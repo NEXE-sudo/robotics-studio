@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package rosengine;
+
+service RosEngine {
+  rpc StreamEvents(Empty) returns (stream WorkspaceEvent);
+  rpc PublishTwist(TwistCommand) returns (Empty);
+}
+
+message TwistCommand {
+  string topic_name = 1;
+  double linear_x = 2;
+  double angular_z = 3;
+}
+
+message Empty {}
+
+message WorkspaceEvent {
+  oneof event {
+    NodeStarted node_started = 1;
+    NodeCrashed node_crashed = 2;
+    TopicSnapshot topic_snapshot = 3;
+    OdometryUpdate odometry_update = 4;
+  }
+  int64 timestamp_ns = 10;
+}
+
+message NodeStarted {
+  string node_name = 1;
+}
+
+message NodeCrashed {
+  string node_name = 1;
+}
+
+message TopicSnapshot {
+  repeated Topic topics = 1;
+}
+
+message Topic {
+  string name = 1;
+  repeated string types = 2;
+}
+
+message OdometryUpdate {
+  string topic_name = 1;
+  double x = 2;
+  double y = 3;
+  double z = 4;
+  double qx = 5;
+  double qy = 6;
+  double qz = 7;
+  double qw = 8;
+}

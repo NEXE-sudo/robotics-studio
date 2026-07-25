@@ -1,0 +1,19 @@
+{
+  "name": "ROS2 Jazzy Dev",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "workspaceFolder": "/workspace",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  "forwardPorts": [50051],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-vscode.cpptools",
+        "ms-iot.vscode-ros"
+      ]
+    }
+  },
+  "postCreateCommand": "echo 'source /opt/ros/jazzy/setup.bash' >> ~/.bashrc"
+}
