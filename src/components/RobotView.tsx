@@ -16,7 +16,7 @@ interface OdometryUpdate {
 
 export default function RobotView() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const robotsRef = useRef<Record<string, THREE.Mesh>>({});
+  const robotsRef = useRef<Record<string, THREE.Group>>({});
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -118,17 +118,52 @@ export default function RobotView() {
         let mesh = robotsRef.current[node];
 
         if (!mesh) {
-          const geometry = new THREE.BoxGeometry(0.3, 0.2, 0.15);
-          const color = node.includes("blue") ? 0x3388ff : 0x33ff88;
-          const material = new THREE.MeshStandardMaterial({ color });
+          const isBlue = node.includes("blue");
+          const bodyColor = isBlue ? 0x8080ff : 0x80ff80;
+          const wheelColor = 0x333333;
 
-          mesh = new THREE.Mesh(geometry, material);
+          const group = new THREE.Group();
 
-          mesh.castShadow = true;
-          mesh.receiveShadow = true;
+          // Chassis — matches SDF: box 2.01142 x 1 x 0.568726,
+          // offset -0.151427 0 0.175 relative to vehicle origin
+          const chassisGeo = new THREE.BoxGeometry(2.01142, 0.568726, 1);
+          const chassisMat = new THREE.MeshStandardMaterial({
+            color: bodyColor,
+          });
+          const chassis = new THREE.Mesh(chassisGeo, chassisMat);
+          chassis.position.set(-0.151427, 0.175, 0);
+          chassis.castShadow = true;
+          chassis.receiveShadow = true;
+          group.add(chassis);
 
-          scene.add(mesh);
-          robotsRef.current[node] = mesh;
+          // Left wheel — sphere radius 0.3, offset 0.554283 0.625029 -0.025
+          const wheelGeo = new THREE.SphereGeometry(0.3, 16, 16);
+          const wheelMat = new THREE.MeshStandardMaterial({
+            color: wheelColor,
+          });
+          const leftWheel = new THREE.Mesh(wheelGeo, wheelMat);
+          leftWheel.position.set(0.554283, -0.025, -0.625029);
+          leftWheel.castShadow = true;
+          group.add(leftWheel);
+
+          // Right wheel — mirrored on y
+          const rightWheel = new THREE.Mesh(wheelGeo.clone(), wheelMat);
+          rightWheel.position.set(0.554282, -0.025, 0.625029);
+          rightWheel.castShadow = true;
+          group.add(rightWheel);
+
+          // Caster — sphere radius 0.2, offset -0.957138 0 -0.125
+          const casterGeo = new THREE.SphereGeometry(0.2, 16, 16);
+          const casterMat = new THREE.MeshStandardMaterial({
+            color: wheelColor,
+          });
+          const caster = new THREE.Mesh(casterGeo, casterMat);
+          caster.position.set(-0.957138, -0.125, 0);
+          caster.castShadow = true;
+          group.add(caster);
+
+          scene.add(group);
+          robotsRef.current[node] = group;
         }
 
         mesh.position.set(x, z, -y);
@@ -146,16 +181,18 @@ export default function RobotView() {
       unlistenPromise.then((f) => f()).catch(() => {});
       unlistenClear.then((f) => f()).catch(() => {});
 
-      Object.values(robotsRef.current).forEach((mesh) => {
-        scene.remove(mesh);
-
-        mesh.geometry.dispose();
-
-        if (Array.isArray(mesh.material)) {
-          mesh.material.forEach((m) => m.dispose());
-        } else {
-          mesh.material.dispose();
-        }
+      Object.values(robotsRef.current).forEach((group) => {
+        scene.remove(group);
+        group.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            child.geometry.dispose();
+            if (Array.isArray(child.material)) {
+              child.material.forEach((m) => m.dispose());
+            } else {
+              child.material.dispose();
+            }
+          }
+        });
       });
 
       controls.dispose();

@@ -21,8 +21,26 @@ message WorkspaceEvent {
     NodeCrashed node_crashed = 2;
     TopicSnapshot topic_snapshot = 3;
     OdometryUpdate odometry_update = 4;
+    TFUpdate tf_update = 5;
+    NodeSnapshot node_snapshot = 6;
   }
   int64 timestamp_ns = 10;
+}
+
+message NodeSnapshot {
+  repeated string node_names = 1;
+}
+
+message TFUpdate {
+  string parent_frame = 1;
+  string child_frame = 2;
+  double x = 3;
+  double y = 4;
+  double z = 5;
+  double qx = 6;
+  double qy = 7;
+  double qz = 8;
+  double qw = 9;
 }
 
 message NodeStarted {

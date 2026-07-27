@@ -12,6 +12,7 @@ import sys
 sys.path.append('generated')
 import ros_engine_pb2
 import ros_engine_pb2_grpc
+from tf2_msgs.msg import TFMessage
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
@@ -24,6 +25,7 @@ class RosIntrospector(Node):
         self.odom_subscribers = {}
         self.timer = self.create_timer(2.0, self.tick)
         self.twist_publishers = {}
+        self.tf_subscribers = {}
 
     def odom_callback(self, msg, topic_name):
         evt = ros_engine_pb2.WorkspaceEvent(
@@ -40,6 +42,24 @@ class RosIntrospector(Node):
             timestamp_ns=time.time_ns()
         )
         self.event_queue.put(evt)
+
+    def tf_callback(self, msg, topic_name):
+        for transform in msg.transforms:
+            evt = ros_engine_pb2.WorkspaceEvent(
+                tf_update=ros_engine_pb2.TFUpdate(
+                    parent_frame=transform.header.frame_id,
+                    child_frame=transform.child_frame_id,
+                    x=transform.transform.translation.x,
+                    y=transform.transform.translation.y,
+                    z=transform.transform.translation.z,
+                    qx=transform.transform.rotation.x,
+                    qy=transform.transform.rotation.y,
+                    qz=transform.transform.rotation.z,
+                    qw=transform.transform.rotation.w,
+                ),
+                timestamp_ns=time.time_ns()
+            )
+            self.event_queue.put(evt)
 
     def tick(self):
         try:
@@ -77,6 +97,10 @@ class RosIntrospector(Node):
         for name in stale:
             del self.odom_subscribers[name]
 
+        stale_tf = set(self.tf_subscribers.keys()) - current_topic_names
+        for name in stale_tf:
+            del self.tf_subscribers[name]
+
         for name, types in topics:
             if 'nav_msgs/msg/Odometry' in types and name not in self.odom_subscribers:
                 sub = self.create_subscription(
@@ -87,6 +111,21 @@ class RosIntrospector(Node):
                 self.odom_subscribers[name] = sub
                 self.get_logger().info(f'Subscribed to odometry topic: {name}')
 
+        print("DEBUG: about to check TF topics", flush=True)
+        for name, types in topics:
+            print(f"DEBUG: checking topic {name}, types={types}", flush=True)
+            if 'tf2_msgs/msg/TFMessage' in types and name not in self.tf_subscribers:
+                print(f"DEBUG: attempting to subscribe to {name}", flush=True)
+                sub = self.create_subscription(
+                    TFMessage, name,
+                    lambda msg, n=name: self.tf_callback(msg, n),
+                    10
+                )
+                self.tf_subscribers[name] = sub
+                self.get_logger().info(f'Subscribed to TF topic: {name}')
+                print(f"DEBUG: subscribed successfully to {name}", flush=True)
+        print("DEBUG: finished TF topic check", flush=True)
+
         topic_msgs = [
             ros_engine_pb2.Topic(name=n, types=list(t)) for n, t in topics
         ]
@@ -95,6 +134,12 @@ class RosIntrospector(Node):
             timestamp_ns=time.time_ns()
         )
         self.event_queue.put(evt)
+
+        node_evt = ros_engine_pb2.WorkspaceEvent(
+            node_snapshot=ros_engine_pb2.NodeSnapshot(node_names=list(nodes)),
+            timestamp_ns=time.time_ns()
+        )
+        self.event_queue.put(node_evt)
 
     def publish_twist(self, topic_name, linear_x, angular_z):
         if topic_name not in self.twist_publishers:

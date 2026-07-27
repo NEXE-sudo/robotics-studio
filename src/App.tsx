@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import RobotView, { RobotControls } from "./components/RobotView";
 import { listen, emit } from "@tauri-apps/api/event";
+import TFTree from "./components/TFTree";
+import Settings from "./components/Settings";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 interface FileEntry {
   name: string;
@@ -18,7 +20,7 @@ interface OpenFile {
   savedContent: string;
 }
 
-type BottomTab = "ros" | "build" | "sim" | "problems";
+type BottomTab = "ros" | "build" | "sim" | "problems" | "tf" | "dashboard";
 type ActivityView = "explorer" | "ros" | "search";
 
 const LANG_MAP: Record<string, string> = {
@@ -119,6 +121,22 @@ function App() {
 
   // --- ROS workspace (for build/sim commands) ---
   const [rosWorkspacePath, setRosWorkspacePath] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [worldPath, setWorldPath] = useState<string | null>(null); // null = bundled default
+  const [logFilter, setLogFilter] = useState("");
+  const [nodeStatus, setNodeStatus] = useState<
+    Record<string, "alive" | "crashed">
+  >({});
+
+  const pickCustomWorld = async () => {
+    const selected = await open({
+      filters: [{ name: "SDF World", extensions: ["sdf"] }],
+      multiple: false,
+    });
+    if (typeof selected === "string") {
+      setWorldPath(selected);
+    }
+  };
 
   // --- ROS event log ---
   const [rosEvents, setRosEvents] = useState<string[]>([]);
@@ -261,6 +279,16 @@ function App() {
     );
   };
 
+  const saveGeneratedCode = async (code: string) => {
+    const selected = await save({
+      defaultPath: currentPath ?? undefined,
+      filters: [{ name: "Python", extensions: ["py"] }],
+    });
+    if (typeof selected === "string") {
+      await invoke("write_file", { path: selected, contents: code });
+    }
+  };
+
   // ---------- ROS workspace selection ----------
   const pickRosWorkspace = async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -298,7 +326,9 @@ function App() {
     setBottomCollapsed(false);
     setActiveTab("sim");
     try {
-      const result = await invoke<string>("start_gazebo_sim");
+      const result = await invoke<string>("start_gazebo_sim", {
+        worldPath: worldPath,
+      });
       console.log("Simulation started:\n", result);
     } catch (err) {
       console.error("Simulation failed:\n", err);
@@ -337,9 +367,9 @@ function App() {
   };
 
   // ---------- AI chat ----------
-  const sendChatMessage = async () => {
-    if (!chatInput.trim()) return;
-    const question = chatInput;
+  const sendChatMessage = async (overrideMessage?: string, mode?: string) => {
+    const question = overrideMessage ?? chatInput;
+    if (!question.trim()) return;
     setChatHistory((prev) => [...prev, { role: "user", text: question }]);
     setChatInput("");
     setAiLoading(true);
@@ -351,19 +381,24 @@ function App() {
         openFilePath: activeFile?.path || null,
         recentRosEvents: rosEvents,
         recentBuildOutput: buildOutput,
+        mode: mode ?? null,
       });
       setChatHistory((prev) => [
         ...prev,
         { role: "assistant", text: response },
       ]);
     } catch (err) {
-      const msg = String(err).includes("GROQ_API_KEY")
-        ? "AI unavailable: no Groq API key set. Ask whoever set up this app to export GROQ_API_KEY before launching."
+      const msg = String(err).includes("No AI provider configured")
+        ? "No AI provider set up yet. Click ⚙️ Settings above to add your API key."
         : `Error: ${err}`;
       setChatHistory((prev) => [...prev, { role: "assistant", text: msg }]);
     } finally {
       setAiLoading(false);
     }
+  };
+
+  const quickAction = (mode: string, prompt: string) => {
+    sendChatMessage(prompt, mode);
   };
 
   // ---------- Keyboard shortcuts ----------
@@ -401,6 +436,22 @@ function App() {
       setRosConnected(true);
     });
 
+    const unlistenNodeSnapshot = listen<string[]>("node-snapshot", (event) => {
+      const currentNodes = new Set(event.payload);
+      setNodeStatus((prev) => {
+        const next: Record<string, "alive" | "crashed"> = {};
+        // Mark everything currently reported as alive
+        currentNodes.forEach((name) => {
+          next[name] = "alive";
+        });
+        // Anything we previously knew about that's no longer present: crashed
+        Object.keys(prev).forEach((name) => {
+          if (!currentNodes.has(name)) next[name] = "crashed";
+        });
+        return next;
+      });
+    });
+
     const unlistenError = listen<string>("ros-error", (event) => {
       console.error("ROS error:", event.payload);
       setRosConnected(false);
@@ -427,6 +478,7 @@ function App() {
     return () => {
       unlistenEvent.then((f) => f());
       unlistenError.then((f) => f());
+      unlistenNodeSnapshot.then((f) => f());
       unlistenConnecting.then((f) => f());
       unlistenBuildOutput.then((f) => f());
       unlistenBuildError.then((f) => f());
@@ -533,6 +585,7 @@ function App() {
       `}</style>
 
       {/* Top toolbar */}
+      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
       <div
         style={{
           display: "flex",
@@ -575,6 +628,20 @@ function App() {
         >
           {building ? "⏳ Building…" : "🔨 Build"}
         </button>
+        <select
+          value={worldPath ?? "default"}
+          onChange={(e) => {
+            if (e.target.value === "custom") {
+              pickCustomWorld();
+            } else {
+              setWorldPath(null);
+            }
+          }}
+          className="ide-btn"
+        >
+          <option value="default">Diff Drive Demo (default)</option>
+          <option value="custom">Custom World...</option>
+        </select>
         <button className="ide-btn" onClick={startSim}>
           ▶️ Start Sim
         </button>
@@ -870,6 +937,12 @@ function App() {
               >
                 <span>✨ AI Assistant</span>
                 <span
+                  style={{ cursor: "pointer", opacity: 0.7, fontSize: 11 }}
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  ⚙️ Settings
+                </span>
+                <span
                   style={{ cursor: "pointer", opacity: 0.7 }}
                   onClick={() => setChatCollapsed(true)}
                 >
@@ -889,30 +962,90 @@ function App() {
                     Ask about your open file, ROS log, or last build.
                   </div>
                 )}
-                {chatHistory.map((msg, i) => (
-                  <div key={i} style={{ marginBottom: 12 }}>
-                    <strong
-                      style={{
-                        color: msg.role === "user" ? "#4fc3f7" : "#81c784",
-                        fontSize: 12,
-                      }}
-                    >
-                      {msg.role === "user" ? "You" : "AI"}
-                    </strong>
-                    <div
-                      style={{
-                        whiteSpace: "pre-wrap",
-                        marginTop: 3,
-                        lineHeight: 1.45,
-                      }}
-                    >
-                      {msg.text}
+                {chatHistory.map((msg, i) => {
+                  const codeMatch = msg.text.match(
+                    /```(?:python|py)?\n([\s\S]*?)```/,
+                  );
+                  return (
+                    <div key={i} style={{ marginBottom: 12 }}>
+                      <strong
+                        style={{
+                          color: msg.role === "user" ? "#4fc3f7" : "#81c784",
+                          fontSize: 12,
+                        }}
+                      >
+                        {msg.role === "user" ? "You" : "AI"}
+                      </strong>
+                      <div
+                        style={{
+                          whiteSpace: "pre-wrap",
+                          marginTop: 3,
+                          lineHeight: 1.45,
+                        }}
+                      >
+                        {msg.text}
+                      </div>
+                      {codeMatch && (
+                        <button
+                          className="ide-btn"
+                          style={{ marginTop: 6, fontSize: 11 }}
+                          onClick={() => saveGeneratedCode(codeMatch[1])}
+                        >
+                          💾 Save to file
+                        </button>
+                      )}
                     </div>
-                  </div>
-                ))}
+                  );
+                })}
                 {aiLoading && (
                   <div style={{ opacity: 0.6, fontSize: 12 }}>Thinking…</div>
                 )}
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: 4,
+                  padding: "8px 8px 0",
+                  flexWrap: "wrap",
+                }}
+              >
+                <button
+                  className="ide-btn"
+                  style={{ fontSize: 11 }}
+                  onClick={() =>
+                    quickAction(
+                      "generate_node",
+                      "Generate a simple ROS 2 publisher node based on this workspace.",
+                    )
+                  }
+                >
+                  + Node
+                </button>
+                <button
+                  className="ide-btn"
+                  style={{ fontSize: 11 }}
+                  onClick={() =>
+                    quickAction(
+                      "generate_launch",
+                      "Generate a launch file for this workspace's packages.",
+                    )
+                  }
+                >
+                  + Launch File
+                </button>
+                <button
+                  className="ide-btn"
+                  style={{ fontSize: 11 }}
+                  disabled={buildOutput.length === 0}
+                  onClick={() =>
+                    quickAction(
+                      "explain_error",
+                      "Explain the most recent build error and how to fix it.",
+                    )
+                  }
+                >
+                  Explain Last Build
+                </button>
               </div>
               <div
                 style={{
@@ -967,31 +1100,91 @@ function App() {
                 flexShrink: 0,
               }}
             >
-              {(["ros", "build", "sim", "problems"] as BottomTab[]).map(
-                (tab) => (
-                  <div
-                    key={tab}
-                    className={`bottom-tab ${activeTab === tab ? "active" : ""}`}
-                    onClick={() => setActiveTab(tab)}
-                  >
-                    {tab === "ros" && (
-                      <>
-                        ROS Log
-                        {rosEvents.length > 0 && (
-                          <span style={{ opacity: 0.5 }}>
-                            ({rosEvents.length})
+              {(
+                [
+                  "ros",
+                  "build",
+                  "sim",
+                  "tf",
+                  "dashboard",
+                  "problems",
+                ] as BottomTab[]
+              ).map((tab) => (
+                <div
+                  key={tab}
+                  className={`bottom-tab ${activeTab === tab ? "active" : ""}`}
+                  onClick={() => setActiveTab(tab)}
+                >
+                  {tab === "ros" && (
+                    <>
+                      ROS Log
+                      {rosEvents.length > 0 && (
+                        <span style={{ opacity: 0.5 }}>
+                          ({rosEvents.length})
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {activeTab === "dashboard" && (
+                    <div style={{ padding: 12, fontSize: 12 }}>
+                      <div
+                        style={{
+                          opacity: 0.6,
+                          marginBottom: 8,
+                          textTransform: "uppercase",
+                          fontSize: 11,
+                        }}
+                      >
+                        Node Health
+                      </div>
+                      {Object.keys(nodeStatus).length === 0 && (
+                        <div style={{ color: "#666" }}>
+                          No nodes detected yet.
+                        </div>
+                      )}
+                      {Object.entries(nodeStatus).map(([name, status]) => (
+                        <div
+                          key={name}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                            padding: "4px 0",
+                            borderBottom: "1px solid #222",
+                          }}
+                        >
+                          <span
+                            style={{
+                              color: status === "alive" ? "#7cd992" : "#e08080",
+                            }}
+                          >
+                            {status === "alive" ? "●" : "○"}
                           </span>
-                        )}
-                      </>
-                    )}
-                    {tab === "build" && (
-                      <>Build Output{building && <span>⏳</span>}</>
-                    )}
-                    {tab === "sim" && "3D View"}
-                    {tab === "problems" && "Problems"}
-                  </div>
-                ),
-              )}
+                          <span style={{ fontFamily: "monospace" }}>
+                            {name}
+                          </span>
+                          <span
+                            style={{
+                              opacity: 0.5,
+                              marginLeft: "auto",
+                              fontSize: 11,
+                            }}
+                          >
+                            {status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {tab === "build" && (
+                    <>Build Output{building && <span>⏳</span>}</>
+                  )}
+                  {tab === "sim" && "3D View"}
+                  {tab === "tf" && "TF Tree"}
+                  {tab === "dashboard" && "Dashboard"}
+                  {tab === "problems" && "Problems"}
+                </div>
+              ))}
               <div style={{ flex: 1 }} />
               <span
                 style={{
@@ -1012,19 +1205,64 @@ function App() {
                 <div
                   style={{
                     height: "100%",
-                    overflowY: "auto",
-                    color: "#0f0",
-                    fontSize: 11,
-                    fontFamily: "monospace",
-                    padding: 8,
+                    display: "flex",
+                    flexDirection: "column",
                   }}
                 >
-                  {rosEvents.length === 0 && (
-                    <div style={{ color: "#666" }}>No ROS events yet.</div>
-                  )}
-                  {rosEvents.map((evt, i) => (
-                    <div key={i}>{evt}</div>
-                  ))}
+                  <div
+                    style={{
+                      padding: 6,
+                      borderBottom: "1px solid #222",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <input
+                      value={logFilter}
+                      onChange={(e) => setLogFilter(e.target.value)}
+                      placeholder="Filter (e.g. NodeCrashed, vehicle_blue, TopicSnapshot)..."
+                      style={{
+                        width: "100%",
+                        background: "#1a1a1a",
+                        border: "1px solid #333",
+                        color: "#eee",
+                        padding: "4px 8px",
+                        fontSize: 12,
+                        borderRadius: 3,
+                      }}
+                    />
+                  </div>
+                  <div
+                    style={{
+                      flex: 1,
+                      overflowY: "auto",
+                      color: "#0f0",
+                      fontSize: 11,
+                      fontFamily: "monospace",
+                      padding: 8,
+                    }}
+                  >
+                    {rosEvents.length === 0 && (
+                      <div style={{ color: "#666" }}>No ROS events yet.</div>
+                    )}
+                    {rosEvents
+                      .filter((evt) =>
+                        evt.toLowerCase().includes(logFilter.toLowerCase()),
+                      )
+                      .map((evt, i) => {
+                        const isCrash = evt.includes("NodeCrashed");
+                        const isError = evt.toLowerCase().includes("error");
+                        return (
+                          <div
+                            key={i}
+                            style={{
+                              color: isCrash || isError ? "#ff6b6b" : "#0f0",
+                            }}
+                          >
+                            {evt}
+                          </div>
+                        );
+                      })}
+                  </div>
                 </div>
               )}
               {activeTab === "build" && (
@@ -1063,6 +1301,7 @@ function App() {
                   </div>
                 </div>
               )}
+              {activeTab === "tf" && <TFTree />}
               {activeTab === "problems" && (
                 <div style={{ padding: 8, fontSize: 12, color: "#666" }}>
                   No problems detected.

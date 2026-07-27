@@ -26,36 +26,44 @@ to touch Docker, VS Code Dev Containers, or a terminal for this part.
 
 ## Prerequisites
 
+- **macOS** (this release is built for Mac; other platforms aren't packaged yet)
 - **Docker Desktop** — [docker.com](https://docker.com) (must be installed
   and running before you launch the app)
-- **Rust** (via [rustup.rs](https://rustup.rs)) and **Node.js** (v18+) —
-  only needed to build the app itself; not needed once a packaged version
-  exists
-- **Xcode Command Line Tools** (macOS): `xcode-select --install`
 - A **Groq API key** (free tier available at [console.groq.com](https://console.groq.com)) — used for the AI assistant panel
+
+---
+
+## Installation
+
+1. Download the latest `.dmg` from the [Releases page](https://github.com/NEXE-sudo/robotics-studio/releases).
+2. Open the `.dmg` and drag **Robotics Studio** into your Applications folder.
+3. **First launch**: macOS will likely show *"Apple cannot verify this app is
+   free of malware"* — this is expected for a small, unsigned, early-stage
+   app, not a sign anything is wrong. **Right-click the app → Open**, then
+   click **Open** again in the dialog that appears. You only need to do this
+   once; future launches work normally via double-click.
+4. Before opening the app, set your Groq API key so the AI assistant works.
+   Open Terminal and run:
+   ```bash
+   launchctl setenv GROQ_API_KEY "your-key-here"
+   ```
+   (This sets it for the current login session. If the app can't find your
+   key, quit and relaunch it after running this command.)
 
 ---
 
 ## One-time setup
 
-### 1. Build and run the desktop app
+### 1. Launch the app
 
-```bash
-cd robotics-studio-app/robotics-studio
-export GROQ_API_KEY="your-key-here"
-npm install
-npm run tauri dev
-```
-
-The app window should open. First launch compiles Rust dependencies and may
-take a few minutes.
+Open **Robotics Studio** from Applications (or Launchpad/Spotlight).
 
 ### 2. Initialize the ROS environment
 
 In the app's toolbar, click **🚀 Initialize ROS Environment**.
 
 This will:
-- Build a Docker image with ROS 2 and Gazebo (first run only — several
+- Build a Docker image with ROS 2 and Gazebo (first run only — a few
   minutes; you'll see live build progress in the app)
 - Start the container
 - Automatically launch the background ROS service the app talks to

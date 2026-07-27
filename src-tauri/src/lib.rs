@@ -43,8 +43,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
-            read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist
-            
+            read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
+            save_ai_settings, load_ai_settings
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -150,6 +150,23 @@ println!("[ros-stream] calling stream_events");
                                 qz: odom.qz,
                                 qw: odom.qw,
                             });
+                        }
+
+                        if let Some(rosengine::workspace_event::Event::TfUpdate(tf)) = &evt.event {
+                            let _ = app.emit("tf-update", TfUpdate {
+                                parent_frame: tf.parent_frame.clone(),
+                                child_frame: tf.child_frame.clone(),
+                                x: tf.x,
+                                y: tf.y,
+                                z: tf.z,
+                                qx: tf.qx,
+                                qy: tf.qy,
+                                qz: tf.qz,
+                                qw: tf.qw,
+                            });
+                        }
+                        if let Some(rosengine::workspace_event::Event::NodeSnapshot(snap)) = &evt.event {
+                            let _ = app.emit("node-snapshot", snap.node_names.clone());
                         }
                     }
                     Ok(None) => {
@@ -307,8 +324,30 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn detect_models_in_sdf(sdf_content: &str) -> Vec<String> {
+    // Simple regex-free scan for <model name='...'> or <model name="...">
+    let mut models = Vec::new();
+    for line in sdf_content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<model") {
+            if let Some(start) = trimmed.find("name=") {
+                let after = &trimmed[start + 5..];
+                let quote_char = after.chars().next();
+                if let Some(q) = quote_char {
+                    if q == '\'' || q == '"' {
+                        if let Some(end) = after[1..].find(q) {
+                            models.push(after[1..1 + end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    models
+}
+
 #[tauri::command]
-fn start_gazebo_sim() -> Result<String, String> {
+fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     let container_name = find_dev_container()?;
 
     // Defensively kill any existing instances, and actively verify
@@ -351,15 +390,41 @@ fn start_gazebo_sim() -> Result<String, String> {
         }
     }
 
-    // Launch Gazebo headless, detached, inside the container
+    // Determine which world file to use, and read its content (for model
+    // auto-detection) either from our bundled copy or the user-selected one.
+    let (container_world_path, sdf_content) = match &world_path {
+        Some(host_path) => {
+            // Copy the custom world into the container's /workspace so
+            // Gazebo (running inside the container) can actually reach it.
+            let file_name = std::path::Path::new(host_path)
+                .file_name()
+                .ok_or("Invalid world file path")?
+                .to_string_lossy()
+                .to_string();
+            let content = std::fs::read_to_string(host_path).map_err(|e| e.to_string())?;
+            let dest = format!("{}/{}", get_default_workspace_dir()?, file_name);
+            std::fs::write(&dest, &content).map_err(|e| e.to_string())?;
+            (format!("/workspace/{}", file_name), content)
+        }
+        None => {
+            let dest = format!("{}/diff_drive.sdf", get_default_workspace_dir()?);
+            let content = std::fs::read_to_string(&dest).map_err(|e| e.to_string())?;
+            ("/workspace/diff_drive.sdf".to_string(), content)
+        }
+    };
+
+    let models = detect_models_in_sdf(&sdf_content);
+    let robot_models: Vec<&String> = models.iter().filter(|m| m.as_str() != "ground_plane").collect();
+
+    let gz_launch_cmd = format!(
+        "source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering {} > /tmp/gz.log 2>&1",
+        container_world_path
+    );
+
     let gz_result = docker_command()
-    .args([
-        "exec", "-d", &container_name,
-        "bash", "-c",
-        "source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering diff_drive.sdf > /tmp/gz.log 2>&1",
-    ])
-    .output()
-    .map_err(|e| e.to_string())?;
+        .args(["exec", "-d", &container_name, "bash", "-c", &gz_launch_cmd])
+        .output()
+        .map_err(|e| e.to_string())?;
 
     if !gz_result.status.success() {
         return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
@@ -368,18 +433,28 @@ fn start_gazebo_sim() -> Result<String, String> {
     // Give Gazebo a moment to actually start before launching the bridge
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // Launch the bridge, also detached
+    // Build bridge args dynamically based on models actually found in the
+    // world file, rather than hardcoding vehicle_blue/vehicle_green.
+    let mut bridge_topics = Vec::new();
+    for model in &robot_models {
+        bridge_topics.push(format!(
+            "/model/{}/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist", model
+        ));
+        bridge_topics.push(format!(
+            "/model/{}/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry", model
+        ));
+        bridge_topics.push(format!(
+            "/model/{}/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V", model
+        ));
+    }
+
+    let bridge_cmd = format!(
+        "source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge {} > /tmp/bridge.log 2>&1",
+        bridge_topics.join(" ")
+    );
+
     let bridge_result = docker_command()
-        .args([
-            "exec", "-d", &container_name,
-            "bash", "-c",
-            "source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge \
-             /model/vehicle_blue/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
-             /model/vehicle_blue/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry \
-             /model/vehicle_green/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist \
-             /model/vehicle_green/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry \
-             > /tmp/bridge.log 2>&1",
-        ])
+        .args(["exec", "-d", &container_name, "bash", "-c", &bridge_cmd])
         .output()
         .map_err(|e| e.to_string())?;
 
@@ -464,9 +539,14 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
     let workspace_dir = format!("{}/.robotics-studio/ros2-workspace", home);
     let workspace_path = std::path::Path::new(&workspace_dir);
 
-    if !workspace_path.join("Dockerfile").exists() {
-        copy_dir_recursive(&resource_path, workspace_path)?;
-    }
+    // Always re-copy bundled resource files (Dockerfile, proto/, server.py,
+    // world files, etc.) so updates to the app's bundled resources are
+    // never silently skipped — this previously caused a confusing bug
+    // where a new world file didn't appear because an old Dockerfile
+    // already existed. User-generated content (src/, build/, install/,
+    // log/) lives alongside these files but isn't touched, since we only
+    // copy what's present in the bundled resource_path, not delete anything.
+    copy_dir_recursive(&resource_path, workspace_path)?;
 
     let filter = format!("label=devcontainer.local_folder={}", workspace_dir);
 
@@ -642,6 +722,38 @@ let server_output = docker_command()
     Ok(())
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct AIProviderSettings {
+    provider: String, // "groq" | "anthropic" | "openai"
+    api_key: String,
+    model: String,
+}
+
+fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("ai_settings.json"))
+}
+
+#[tauri::command]
+fn save_ai_settings(app: AppHandle, settings: AIProviderSettings) -> Result<(), String> {
+    let path = settings_path(&app)?;
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_ai_settings(app: AppHandle) -> Result<Option<AIProviderSettings>, String> {
+    let path = settings_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let settings: AIProviderSettings = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    Ok(Some(settings))
+}
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize)]
@@ -654,6 +766,19 @@ struct GroqMessage {
 struct GroqRequest {
     model: String,
     messages: Vec<GroqMessage>,
+}
+
+#[derive(Serialize, Clone)]
+struct TfUpdate {
+    parent_frame: String,
+    child_frame: String,
+    x: f64,
+    y: f64,
+    z: f64,
+    qx: f64,
+    qy: f64,
+    qz: f64,
+    qw: f64,
 }
 
 #[derive(Deserialize)]
@@ -671,30 +796,76 @@ struct GroqResponse {
     choices: Vec<GroqChoice>,
 }
 
+#[derive(Deserialize)]
+struct ClaudeContentBlock {
+    text: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ClaudeMessage {
+    role: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct ClaudeRequest {
+    model: String,
+    max_tokens: u32,
+    messages: Vec<ClaudeMessage>,
+}
+
+#[derive(Deserialize)]
+struct ClaudeResponse {
+    content: Vec<ClaudeContentBlock>,
+}
+
 #[tauri::command]
 async fn ask_ai(
+    app: AppHandle,
     user_message: String,
     open_file_content: Option<String>,
     open_file_path: Option<String>,
     recent_ros_events: Vec<String>,
     recent_build_output: Vec<String>,
+    mode: Option<String>,
 ) -> Result<String, String> {
-    let api_key = std::env::var("GROQ_API_KEY")
-        .map_err(|_| "GROQ_API_KEY not set".to_string())?;
+    let settings = load_ai_settings(app)?
+        .ok_or_else(|| "No AI provider configured. Open Settings to add your API key.".to_string())?;
 
     // --- Context assembly (unchanged, provider-agnostic) ---
     let mut context = String::new();
+    let mut system_context = match mode.as_deref() {
+        Some("generate_node") => String::from(
+            "You are a ROS 2 code generator. The user wants a new ROS 2 Python node. \
+             Output ONLY a single Python code block using ```python fences — no explanation \
+             before or after. Use rclpy, follow standard ROS 2 node conventions (a class \
+             extending Node, a main() function with rclpy.init/spin/shutdown). Base it on \
+             any workspace context below if relevant (e.g., existing topic names, package \
+             structure).\n\n"
+        ),
+        Some("generate_launch") => String::from(
+            "You are a ROS 2 launch file generator. The user wants a ROS 2 Python launch file. \
+             Output ONLY a single Python code block using ```python fences — no explanation \
+             before or after. Follow standard ROS 2 launch conventions (LaunchDescription, \
+             generate_launch_description()).\n\n"
+        ),
+        Some("explain_error") => String::from(
+            "You are a ROS 2 / robotics debugging assistant. The user wants their most recent \
+             build error or runtime error explained. Be concise and specific: name the likely \
+             root cause, then give a concrete fix. Reference the actual error text from the \
+             context below rather than generic advice.\n\n"
+        ),
+        _ => String::from(
+            "You are an AI coding assistant. Answer the user's question directly and accurately. \
+             Only reference ROS 2, robotics concepts, or the workspace context below if it is \
+             actually relevant to the question — do not force a connection that isn't there.\n\n"
+        ),
+    };
 
-    let mut system_context = String::from(
-    "You are an AI coding assistant. Answer the user's question directly and accurately. \
-     Only reference ROS 2, robotics concepts, or the workspace context below if it is \
-     actually relevant to the question — do not force a connection that isn't there.\n\n"
-);
-
-if open_file_path.as_deref().map_or(false, |p| p.ends_with(".py")) 
-    || recent_ros_events.iter().any(|e| e.contains("WorkspaceEvent")) {
-    system_context.push_str("This workspace appears to involve ROS 2 development.\n\n");
-}
+    if open_file_path.as_deref().map_or(false, |p| p.ends_with(".py"))
+        || recent_ros_events.iter().any(|e| e.contains("WorkspaceEvent")) {
+        system_context.push_str("This workspace appears to involve ROS 2 development.\n\n");
+    }
 
     if let Some(path) = &open_file_path {
         context.push_str(&format!("Currently open file: {}\n\n", path));
@@ -718,37 +889,62 @@ if open_file_path.as_deref().map_or(false, |p| p.ends_with(".py"))
     }
 
     let full_prompt = format!(
-        "{}=== WORKSPACE CONTEXT ===\n{}\n=== END CONTEXT ===\n\n\
-         User question: {}",
+        "{}=== WORKSPACE CONTEXT ===\n{}\n=== END CONTEXT ===\n\nUser question: {}",
         system_context, context, user_message
     );
 
     let client = reqwest::Client::new();
-    let request_body = GroqRequest {
-        model: "llama-3.3-70b-versatile".to_string(),
-        messages: vec![GroqMessage {
-            role: "user".to_string(),
-            content: full_prompt,
-        }],
-    };
 
-    let response = client
-        .post("https://api.groq.com/openai/v1/chat/completions")
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("content-type", "application/json")
-        .json(&request_body)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
-
-    parsed
-        .choices
-        .into_iter()
-        .next()
-        .map(|c| c.message.content)
-        .ok_or_else(|| "No response from AI".to_string())
+    match settings.provider.as_str() {
+        "groq" => {
+            let request_body = GroqRequest {
+                model: settings.model,
+                messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
+            };
+            let response = client
+                .post("https://api.groq.com/openai/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", settings.api_key))
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send().await.map_err(|e| e.to_string())?;
+            let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
+            parsed.choices.into_iter().next().map(|c| c.message.content)
+                .ok_or_else(|| "No response from AI".to_string())
+        }
+        "anthropic" => {
+            let request_body = ClaudeRequest {
+                model: settings.model,
+                max_tokens: 1024,
+                messages: vec![ClaudeMessage { role: "user".to_string(), content: full_prompt }],
+            };
+            let response = client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", settings.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send().await.map_err(|e| e.to_string())?;
+            let parsed: ClaudeResponse = response.json().await.map_err(|e| e.to_string())?;
+            parsed.content.into_iter().next().and_then(|b| b.text)
+                .ok_or_else(|| "No response from AI".to_string())
+        }
+        "openai" => {
+            let request_body = GroqRequest {
+                model: settings.model,
+                messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
+            };
+            let response = client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", settings.api_key))
+                .header("content-type", "application/json")
+                .json(&request_body)
+                .send().await.map_err(|e| e.to_string())?;
+            let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
+            parsed.choices.into_iter().next().map(|c| c.message.content)
+                .ok_or_else(|| "No response from AI".to_string())
+        }
+        other => Err(format!("Unknown provider: {}", other)),
+    }
 }
 
 #[derive(Serialize, Clone)]
