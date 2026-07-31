@@ -849,6 +849,16 @@ async fn ask_ai(
              before or after. Follow standard ROS 2 launch conventions (LaunchDescription, \
              generate_launch_description()).\n\n"
         ),
+        Some("generate_urdf") => String::from(
+            "You are a ROS 2 robot description generator. The user wants a URDF or xacro file \
+             describing a robot. Output ONLY a single XML code block using ```xml fences — no \
+             explanation before or after. Use standard URDF conventions: <robot> root element, \
+             <link> elements with <visual>/<collision>/<inertial>, <joint> elements connecting \
+             them with correct parent/child and joint type. If workspace context mentions \
+             specific link/frame names (e.g., from TF data or existing topics), reuse those \
+             names for consistency. Prefer plain URDF unless the user explicitly asks for \
+             xacro macros/parameters.\n\n"
+        ),
         Some("explain_error") => String::from(
             "You are a ROS 2 / robotics debugging assistant. The user wants their most recent \
              build error or runtime error explained. Be concise and specific: name the likely \

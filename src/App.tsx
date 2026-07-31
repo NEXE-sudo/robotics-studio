@@ -123,6 +123,7 @@ function App() {
   const [rosWorkspacePath, setRosWorkspacePath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [worldPath, setWorldPath] = useState<string | null>(null); // null = bundled default
+  const [availableRobots, setAvailableRobots] = useState<string[]>([]);
   const [logFilter, setLogFilter] = useState("");
   const [nodeStatus, setNodeStatus] = useState<
     Record<string, "alive" | "crashed">
@@ -279,10 +280,12 @@ function App() {
     );
   };
 
-  const saveGeneratedCode = async (code: string) => {
+  const saveGeneratedCode = async (code: string, isXml: boolean) => {
     const selected = await save({
       defaultPath: currentPath ?? undefined,
-      filters: [{ name: "Python", extensions: ["py"] }],
+      filters: isXml
+        ? [{ name: "URDF/XML", extensions: ["urdf", "xacro", "xml"] }]
+        : [{ name: "Python", extensions: ["py"] }],
     });
     if (typeof selected === "string") {
       await invoke("write_file", { path: selected, contents: code });
@@ -434,6 +437,17 @@ function App() {
     const unlistenEvent = listen<string>("ros-event", (event) => {
       setRosEvents((prev) => [...prev.slice(-49), event.payload]);
       setRosConnected(true);
+
+      // Extract any cmd_vel topics from TopicSnapshot events, so the
+      // robot control dropdown reflects whatever's actually in the
+      // currently-loaded world, not a hardcoded pair.
+      const cmdVelMatches = [
+        ...event.payload.matchAll(/name: "([^"]+\/cmd_vel)"/g),
+      ];
+      if (cmdVelMatches.length > 0) {
+        const topics = cmdVelMatches.map((m) => m[1]);
+        setAvailableRobots(topics);
+      }
     });
 
     const unlistenNodeSnapshot = listen<string[]>("node-snapshot", (event) => {
@@ -964,8 +978,9 @@ function App() {
                 )}
                 {chatHistory.map((msg, i) => {
                   const codeMatch = msg.text.match(
-                    /```(?:python|py)?\n([\s\S]*?)```/,
+                    /```(?:python|py|xml)?\n([\s\S]*?)```/,
                   );
+                  const isXml = /```xml/.test(msg.text);
                   return (
                     <div key={i} style={{ marginBottom: 12 }}>
                       <strong
@@ -989,7 +1004,7 @@ function App() {
                         <button
                           className="ide-btn"
                           style={{ marginTop: 6, fontSize: 11 }}
-                          onClick={() => saveGeneratedCode(codeMatch[1])}
+                          onClick={() => saveGeneratedCode(codeMatch[1], isXml)}
                         >
                           💾 Save to file
                         </button>
@@ -1032,6 +1047,18 @@ function App() {
                   }
                 >
                   + Launch File
+                </button>
+                <button
+                  className="ide-btn"
+                  style={{ fontSize: 11 }}
+                  onClick={() =>
+                    quickAction(
+                      "generate_urdf",
+                      "Generate a URDF for a simple robot, using this workspace's frame names if relevant.",
+                    )
+                  }
+                >
+                  + URDF
                 </button>
                 <button
                   className="ide-btn"
@@ -1297,7 +1324,10 @@ function App() {
                     <RobotView />
                   </div>
                   <div style={{ width: 200, borderLeft: "1px solid #333" }}>
-                    <RobotControls onCommand={sendTwist} />
+                    <RobotControls
+                      onCommand={sendTwist}
+                      availableRobots={availableRobots}
+                    />
                   </div>
                 </div>
               )}

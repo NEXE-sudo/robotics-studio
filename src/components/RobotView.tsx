@@ -221,12 +221,22 @@ export default function RobotView() {
 
 export function RobotControls({
   onCommand,
+  availableRobots,
 }: {
   onCommand: (topic: string, lin: number, ang: number) => void;
+  availableRobots: string[];
 }) {
-  const [selectedRobot, setSelectedRobot] = useState(
-    "/model/vehicle_blue/cmd_vel",
-  );
+  const [selectedRobot, setSelectedRobot] = useState<string | null>(null);
+
+  // Keep selection valid as the available robot list changes (e.g., after
+  // switching worlds) — default to the first available robot if none is
+  // selected yet, or if the previously selected one no longer exists.
+  useEffect(() => {
+    if (availableRobots.length === 0) return;
+    if (!selectedRobot || !availableRobots.includes(selectedRobot)) {
+      setSelectedRobot(availableRobots[0]);
+    }
+  }, [availableRobots, selectedRobot]);
 
   const btnStyle: React.CSSProperties = {
     width: 48,
@@ -238,49 +248,65 @@ export function RobotControls({
 
   return (
     <div style={{ padding: 12, color: "#ccc" }}>
-      <select
-        value={selectedRobot}
-        onChange={(e) => setSelectedRobot(e.target.value)}
-        style={{ marginBottom: 10 }}
-      >
-        <option value="/model/vehicle_blue/cmd_vel">Blue Robot</option>
-        <option value="/model/vehicle_green/cmd_vel">Green Robot</option>
-      </select>
+      {availableRobots.length === 0 ? (
+        <div style={{ fontSize: 12, opacity: 0.5, marginBottom: 10 }}>
+          No robots detected — start the simulation.
+        </div>
+      ) : (
+        <select
+          value={selectedRobot ?? ""}
+          onChange={(e) => setSelectedRobot(e.target.value)}
+          style={{ marginBottom: 10 }}
+        >
+          {availableRobots.map((topic) => {
+            // Derive a readable name from the topic path, e.g.
+            // /model/vehicle_blue/cmd_vel -> vehicle_blue
+            const name = topic.split("/")[2] ?? topic;
+            return (
+              <option key={topic} value={topic}>
+                {name}
+              </option>
+            );
+          })}
+        </select>
+      )}
 
       <div
         style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 48px)",
           justifyContent: "center",
+          opacity: selectedRobot ? 1 : 0.4,
+          pointerEvents: selectedRobot ? "auto" : "none",
         }}
       >
         <div />
         <button
           style={btnStyle}
-          onClick={() => onCommand(selectedRobot, 0.3, 0)}
+          onClick={() => onCommand(selectedRobot!, 0.3, 0)}
         >
           ↑
         </button>
         <div />
         <button
           style={btnStyle}
-          onClick={() => onCommand(selectedRobot, 0, 0.5)}
+          onClick={() => onCommand(selectedRobot!, 0, 0.5)}
         >
           ↺
         </button>
-        <button style={btnStyle} onClick={() => onCommand(selectedRobot, 0, 0)}>
+        <button style={btnStyle} onClick={() => onCommand(selectedRobot!, 0, 0)}>
           ■
         </button>
         <button
           style={btnStyle}
-          onClick={() => onCommand(selectedRobot, 0, -0.5)}
+          onClick={() => onCommand(selectedRobot!, 0, -0.5)}
         >
           ↻
         </button>
         <div />
         <button
           style={btnStyle}
-          onClick={() => onCommand(selectedRobot, -0.3, 0)}
+          onClick={() => onCommand(selectedRobot!, -0.3, 0)}
         >
           ↓
         </button>
