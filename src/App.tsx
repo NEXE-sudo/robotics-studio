@@ -1097,7 +1097,10 @@ function App() {
                   }}
                   placeholder="Ask about your workspace…"
                 />
-                <button className="ide-btn primary" onClick={sendChatMessage}>
+                <button
+                  className="ide-btn primary"
+                  onClick={() => sendChatMessage()}
+                >
                   Send
                 </button>
               </div>
