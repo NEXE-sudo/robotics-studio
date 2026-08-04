@@ -44,7 +44,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
-            save_ai_settings, load_ai_settings
+            save_ai_settings, load_ai_settings, list_templates, create_project_from_template
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -955,6 +955,56 @@ async fn ask_ai(
         }
         other => Err(format!("Unknown provider: {}", other)),
     }
+}
+
+#[tauri::command]
+fn list_templates(app: AppHandle) -> Result<Vec<String>, String> {
+    let templates_path = app
+        .path()
+        .resolve("resources/templates", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| e.to_string())?;
+
+    if !templates_path.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&templates_path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        if entry.file_type().map_err(|e| e.to_string())?.is_dir() {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
+    Ok(names)
+}
+
+#[tauri::command]
+fn create_project_from_template(
+    app: AppHandle,
+    template_name: String,
+    destination_dir: String,
+    project_name: String,
+) -> Result<String, String> {
+    let template_path = app
+        .path()
+        .resolve(
+            format!("resources/templates/{}", template_name),
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| e.to_string())?;
+
+    if !template_path.exists() {
+        return Err(format!("Template '{}' not found", template_name));
+    }
+
+    let dest = std::path::Path::new(&destination_dir).join(&project_name);
+    if dest.exists() {
+        return Err(format!("A folder named '{}' already exists there", project_name));
+    }
+
+    copy_dir_recursive(&template_path, &dest)?;
+
+    Ok(dest.to_string_lossy().to_string())
 }
 
 #[derive(Serialize, Clone)]

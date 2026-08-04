@@ -32,6 +32,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": ["resources/devcontainer/**/*"]
+    "resources": ["resources/devcontainer/**/*", "resources/templates/**/*"]
   }
 }
