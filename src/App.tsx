@@ -1084,7 +1084,7 @@ function App() {
                               </div>
                               <div
                                 style={{
-                                  color: "#a0a0a0",
+                                  color: "#ccc",
                                   fontSize: 10,
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",

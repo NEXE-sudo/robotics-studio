@@ -477,7 +477,7 @@ export default function Settings({
                       style={{
                         padding: "2px 8px",
                         background:
-                          listeningId === kb.id ? "#2d2d30" : "#2d2d30",
+                          listeningId === kb.id ? "#3c3c3c" : "#2d2d30",
                         border: "1px solid #3c3c3c",
                         borderRadius: 3,
                         fontSize: 11,
