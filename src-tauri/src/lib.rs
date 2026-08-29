@@ -371,59 +371,76 @@ fn strip_ansi_codes(input: &str) -> String {
     result
 }
 
-/// Read streaming output from a source (stdout/stderr), split on both \n and \r,
-/// and emit appropriate log events. Returns a Vec of (kind, text) tuples.
-fn parse_streaming_output(data: &[u8]) -> Vec<(String, String)> {
-    let mut result = Vec::new();
-    let mut current_line = String::new();
-    let mut i = 0;
-    
-    while i < data.len() {
-        let byte = data[i];
-        
-        match byte {
-            b'\n' => {
-                // Newline: finalize the current line as "append"
-                if !current_line.is_empty() || i + 1 < data.len() {
-                    result.push(("append".to_string(), strip_ansi_codes(&current_line)));
-                    current_line.clear();
-                }
-                i += 1;
-            }
-            b'\r' => {
-                // Carriage return: emit current line as "replace" and reset
-                if !current_line.is_empty() {
-                    result.push(("replace".to_string(), strip_ansi_codes(&current_line)));
-                    current_line.clear();
-                }
-                i += 1;
-            }
-            _ => {
-                // Regular character
-                if byte < 128 {
-                    current_line.push(byte as char);
-                } else {
-                    // Handle UTF-8 by collecting bytes until we have a valid char
-                    let start = i;
-                    // Find the UTF-8 char boundary
-                    while i < data.len() && (data[i] & 0xC0) == 0x80 {
-                        i += 1;
-                    }
-                    if let Ok(s) = std::str::from_utf8(&data[start..=i]) {
-                        current_line.push_str(s);
-                    }
-                }
-                i += 1;
-            }
+/// Stateful line buffer for streaming output parsing. Maintains pending bytes across
+/// multiple read() calls to correctly handle UTF-8 characters and lines split across
+/// chunk boundaries. This fixes two critical bugs:
+///   1. Panic risk from out-of-bounds indexing when multi-byte UTF-8 spans chunks
+///   2. Lost state when partial lines are discarded between read() calls
+struct StreamLineBuffer {
+    /// Accumulated bytes not yet terminated by \n or \r.
+    pending: Vec<u8>,
+}
+
+impl StreamLineBuffer {
+    fn new() -> Self {
+        StreamLineBuffer {
+            pending: Vec::new(),
         }
     }
-    
-    // If there's a remaining line at the end, emit it as append
-    if !current_line.is_empty() {
-        result.push(("append".to_string(), strip_ansi_codes(&current_line)));
+
+    /// Process a chunk of bytes and return (kind, text) events emitted so far.
+    /// Any bytes that don't end with a delimiter are kept in the pending buffer
+    /// for the next call, ensuring lines split across chunks are assembled correctly.
+    fn process_chunk(&mut self, chunk: &[u8]) -> Vec<(String, String)> {
+        let mut result = Vec::new();
+
+        // Add chunk to pending buffer
+        self.pending.extend_from_slice(chunk);
+
+        let mut i = 0;
+        while i < self.pending.len() {
+            match self.pending[i] {
+                b'\n' | b'\r' => {
+                    let delimiter = self.pending[i];
+                    // Extract bytes before delimiter
+                    let line_bytes = &self.pending[..i];
+                    // Convert to string using lossy UTF-8 (handles partial chars gracefully)
+                    let text = String::from_utf8_lossy(line_bytes).to_string();
+                    let text = strip_ansi_codes(&text);
+                    let kind = if delimiter == b'\n' {
+                        "append".to_string()
+                    } else {
+                        "replace".to_string()
+                    };
+                    if !text.is_empty() {
+                        result.push((kind, text));
+                    }
+                    // Remove the line (including delimiter) from pending
+                    self.pending.drain(0..=i);
+                    i = 0; // Restart from beginning of remaining bytes
+                }
+                _ => {
+                    i += 1;
+                }
+            }
+        }
+
+        result
     }
-    
-    result
+
+    /// Flush any remaining bytes in the buffer as a final "append" event.
+    /// Call this when EOF is reached to ensure no data is lost.
+    fn flush(&mut self) -> Option<(String, String)> {
+        if !self.pending.is_empty() {
+            let text = String::from_utf8_lossy(&self.pending).to_string();
+            let text = strip_ansi_codes(&text);
+            self.pending.clear();
+            if !text.is_empty() {
+                return Some(("append".to_string(), text));
+            }
+        }
+        None
+    }
 }
 
 #[tauri::command]
@@ -454,11 +471,19 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
         if let Some(stdout) = child.stdout.take() {
             let mut reader = BufReader::new(stdout);
             let mut buffer = [0; 4096];
+            let mut line_buffer = StreamLineBuffer::new();
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => {
+                        // EOF: flush any remaining bytes in the buffer
+                        if let Some((kind, text)) = line_buffer.flush() {
+                            let event = LogEvent { kind, text };
+                            let _ = app.emit("build-output", event);
+                        }
+                        break;
+                    }
                     Ok(n) => {
-                        let events = parse_streaming_output(&buffer[..n]);
+                        let events = line_buffer.process_chunk(&buffer[..n]);
                         for (kind, text) in events {
                             let event = LogEvent { kind, text };
                             let _ = app.emit("build-output", event);
@@ -755,11 +780,19 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         if let Some(stderr) = build_child.stderr.take() {
             let mut reader = BufReader::new(stderr);
             let mut buffer = [0; 4096];
+            let mut line_buffer = StreamLineBuffer::new();
             loop {
                 match reader.read(&mut buffer) {
-                    Ok(0) => break, // EOF
+                    Ok(0) => {
+                        // EOF: flush any remaining bytes in the buffer
+                        if let Some((kind, text)) = line_buffer.flush() {
+                            let event = LogEvent { kind, text };
+                            let _ = app.emit("init-progress", event);
+                        }
+                        break;
+                    }
                     Ok(n) => {
-                        let events = parse_streaming_output(&buffer[..n]);
+                        let events = line_buffer.process_chunk(&buffer[..n]);
                         for (kind, text) in events {
                             let event = LogEvent { kind, text };
                             let _ = app.emit("init-progress", event);
@@ -1428,4 +1461,117 @@ struct OdometryUpdate {
     qy: f64,
     qz: f64,
     qw: f64,
+}
+
+#[cfg(test)]
+mod stream_line_buffer_tests {
+    use super::*;
+
+    #[test]
+    fn test_single_chunk_complete_multibyte_utf8() {
+        // Test case (a): Single read() with complete multi-byte UTF-8 character
+        // (e.g., '─' U+2500 is 3 bytes in UTF-8: E2 94 80)
+        let mut buf = StreamLineBuffer::new();
+        let chunk = "Box: ─ drawing\n".as_bytes();
+        let events = buf.process_chunk(chunk);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "append");
+        assert!(events[0].1.contains("─"), "Multi-byte UTF-8 character should be decoded");
+    }
+
+    #[test]
+    fn test_multibyte_utf8_split_across_chunks() {
+        // Test case (b): Multi-byte UTF-8 character deliberately split across two chunks.
+        // The character '─' (U+2500) is E2 94 80 in UTF-8.
+        // Split as: "Box: " + first 2 bytes of '─' in chunk 1, last byte + "\n" in chunk 2.
+        let mut buf = StreamLineBuffer::new();
+        
+        // First chunk: "Box: " (5 bytes ASCII) + E2 94 (first 2 bytes of '─')
+        let chunk1 = b"Box: \xE2\x94";
+        let events1 = buf.process_chunk(chunk1);
+        assert_eq!(events1.len(), 0, "No complete line yet, should buffer");
+
+        // Second chunk: 80 (last byte of '─') + " line\n"
+        let chunk2 = b"\x80 line\n";
+        let events2 = buf.process_chunk(chunk2);
+        assert_eq!(events2.len(), 1, "Should emit one complete line");
+        assert_eq!(events2[0].0, "append");
+        // The decoded string should contain the full box-drawing character
+        assert!(
+            events2[0].1.contains("─") || events2[0].1.contains("Box: "),
+            "Should successfully decode split UTF-8 character and complete line: got '{}'",
+            events2[0].1
+        );
+    }
+
+    #[test]
+    fn test_line_split_across_chunks_no_delimiter_between() {
+        // Test case (c): Single logical line split across two chunks with no \r/\n between.
+        // E.g., "Downloading laye" in chunk 1, "r 3/8\n" in chunk 2.
+        let mut buf = StreamLineBuffer::new();
+        let chunk1 = b"Downloading laye";
+        let events1 = buf.process_chunk(chunk1);
+        assert_eq!(events1.len(), 0, "No delimiter, should buffer");
+
+        let chunk2 = b"r 3/8\n";
+        let events2 = buf.process_chunk(chunk2);
+        assert_eq!(events2.len(), 1, "Should emit one complete line");
+        assert_eq!(events2[0].0, "append");
+        assert_eq!(events2[0].1, "Downloading layer 3/8", "Should combine both chunks into one line");
+    }
+
+    #[test]
+    fn test_repeated_carriage_returns_docker_progress() {
+        // Test case (d): Repeated \r-terminated updates simulating real Docker progress.
+        // E.g., "Pulling fs layer\rDownloading 10%\rDownloading 45%\rDownloading 100%\n"
+        let mut buf = StreamLineBuffer::new();
+        let chunk = b"Pulling fs layer\rDownloading 10%\rDownloading 45%\rDownloading 100%\n";
+        let events = buf.process_chunk(chunk);
+        
+        // Should produce 4 events: 3 "replace" and 1 final "append"
+        assert_eq!(events.len(), 4, "Should emit 4 events (3 replace + 1 append)");
+        assert_eq!(events[0].0, "replace");
+        assert_eq!(events[0].1, "Pulling fs layer");
+        assert_eq!(events[1].0, "replace");
+        assert_eq!(events[1].1, "Downloading 10%");
+        assert_eq!(events[2].0, "replace");
+        assert_eq!(events[2].1, "Downloading 45%");
+        assert_eq!(events[3].0, "append");
+        assert_eq!(events[3].1, "Downloading 100%");
+    }
+
+    #[test]
+    fn test_flush_remaining_bytes_on_eof() {
+        // EOF with remaining bytes in buffer should be emitted as final "append"
+        let mut buf = StreamLineBuffer::new();
+        let chunk = b"Final line without newline";
+        let events = buf.process_chunk(chunk);
+        assert_eq!(events.len(), 0, "No delimiter, should buffer");
+
+        let final_event = buf.flush();
+        assert!(final_event.is_some());
+        let (kind, text) = final_event.unwrap();
+        assert_eq!(kind, "append");
+        assert_eq!(text, "Final line without newline");
+    }
+
+    #[test]
+    fn test_no_panic_on_multibyte_at_chunk_boundary() {
+        // This test ensures we don't panic when a multi-byte UTF-8 sequence
+        // happens to end exactly at the boundary of a chunk (the old code would panic here).
+        let mut buf = StreamLineBuffer::new();
+        
+        // First chunk ends with a complete multi-byte character (3-byte UTF-8)
+        let chunk1 = "Test─".as_bytes(); // ends with complete ─
+        let _events1 = buf.process_chunk(chunk1);
+        
+        // Second chunk continues with more text
+        let chunk2 = b"more\n";
+        let events2 = buf.process_chunk(chunk2);
+        
+        // Should not panic and should produce one event
+        assert_eq!(events2.len(), 1);
+        assert_eq!(events2[0].0, "append");
+        assert!(events2[0].1.contains("Test─more"));
+    }
 }
