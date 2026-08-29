@@ -911,8 +911,6 @@ if !ready {
     return;
 }
 
-let _ = app.emit("init-finished", workspace_dir.clone());
-
 let server_output = docker_command()
     .args([
         "exec",
