@@ -258,9 +258,10 @@ export default function Settings({
     padding: "8px 16px",
     cursor: "pointer",
     borderBottom: isActive ? "2px solid #4fc3f7" : "none",
-    color: isActive ? "#4fc3f7" : "#999",
+    color: isActive ? "#4fc3f7" : "#ccc",
     fontSize: 13,
     fontWeight: isActive ? 600 : 400,
+    transition: "color 0.12s ease, opacity 0.12s ease",
   });
 
   return (
@@ -476,7 +477,7 @@ export default function Settings({
                       style={{
                         padding: "2px 8px",
                         background:
-                          listeningId === kb.id ? "#4a4a4a" : "#2d2d30",
+                          listeningId === kb.id ? "#2d2d30" : "#2d2d30",
                         border: "1px solid #3c3c3c",
                         borderRadius: 3,
                         fontSize: 11,
@@ -485,6 +486,20 @@ export default function Settings({
                         minWidth: 80,
                         textAlign: "center",
                         color: listeningId === kb.id ? "#4fc3f7" : "#ccc",
+                        transition:
+                          "background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease",
+                      }}
+                      onMouseEnter={(e) => {
+                        if (listeningId !== kb.id) {
+                          e.currentTarget.style.background = "#3c3c3c";
+                          e.currentTarget.style.borderColor = "#4fc3f7";
+                        }
+                      }}
+                      onMouseLeave={(e) => {
+                        if (listeningId !== kb.id) {
+                          e.currentTarget.style.background = "#2d2d30";
+                          e.currentTarget.style.borderColor = "#3c3c3c";
+                        }
                       }}
                       onClick={() =>
                         listeningId !== kb.id &&

@@ -64,6 +64,54 @@ fn read_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct RecentProject {
+    path: String,
+    name: String,
+    last_opened: String,
+}
+
+fn normalize_recent_projects(mut projects: Vec<RecentProject>) -> Vec<RecentProject> {
+    let mut by_path: std::collections::HashMap<String, RecentProject> = std::collections::HashMap::new();
+
+    for project in projects.drain(..) {
+        let path = project.path.trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+
+        match by_path.get_mut(&path) {
+            Some(existing) => {
+                let incoming_ts = project.last_opened.parse::<u64>().unwrap_or(0);
+                let current_ts = existing.last_opened.parse::<u64>().unwrap_or(0);
+                if incoming_ts >= current_ts {
+                    *existing = RecentProject {
+                        path: path.clone(),
+                        name: if project.name.trim().is_empty() {
+                            existing.name.clone()
+                        } else {
+                            project.name
+                        },
+                        last_opened: project.last_opened,
+                    };
+                }
+            }
+            None => {
+                by_path.insert(path.clone(), project);
+            }
+        }
+    }
+
+    let mut latest: Vec<RecentProject> = by_path.into_values().collect();
+    latest.sort_by(|a, b| {
+        let a_ts = a.last_opened.parse::<u64>().unwrap_or(0);
+        let b_ts = b.last_opened.parse::<u64>().unwrap_or(0);
+        b_ts.cmp(&a_ts)
+    });
+    latest.truncate(8);
+    latest
+}
+
 #[tauri::command]
 fn write_file(path: String, contents: String) -> Result<(), String> {
     fs::write(&path, contents).map_err(|e| e.to_string())
@@ -104,7 +152,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
-            save_ai_settings, load_ai_settings, save_keybindings, load_keybindings, get_system_specs, list_templates, create_project_from_template, check_aiignore
+            save_ai_settings, load_ai_settings, save_keybindings, load_keybindings, save_recent_projects, load_recent_projects, get_system_specs, list_templates, create_project_from_template, check_aiignore
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -1011,6 +1059,32 @@ fn load_keybindings(app: AppHandle) -> Result<Option<Vec<KeyBinding>>, String> {
     Ok(Some(data.keybindings))
 }
 
+fn recent_projects_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("recent_projects.json"))
+}
+
+#[tauri::command]
+fn save_recent_projects(app: AppHandle, projects: Vec<RecentProject>) -> Result<(), String> {
+    let path = recent_projects_path(&app)?;
+    let normalized = normalize_recent_projects(projects);
+    let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+    let path = recent_projects_path(&app)?;
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let projects: Vec<RecentProject> = serde_json::from_str(&json).unwrap_or_default();
+    Ok(normalize_recent_projects(projects))
+}
+
 #[derive(Serialize)]
 struct SystemSpecs {
     ram_gb: u64,
@@ -1459,6 +1533,44 @@ struct OdometryUpdate {
     qy: f64,
     qz: f64,
     qw: f64,
+}
+
+#[cfg(test)]
+mod recent_project_tests {
+    use super::*;
+
+    #[test]
+    fn test_recent_projects_reorder_and_dedupe() {
+        let projects = vec![
+            RecentProject {
+                path: "/tmp/old".to_string(),
+                name: "old".to_string(),
+                last_opened: "100".to_string(),
+            },
+            RecentProject {
+                path: "/tmp/alpha".to_string(),
+                name: "alpha".to_string(),
+                last_opened: "200".to_string(),
+            },
+            RecentProject {
+                path: "/tmp/alpha".to_string(),
+                name: "alpha".to_string(),
+                last_opened: "300".to_string(),
+            },
+            RecentProject {
+                path: "/tmp/beta".to_string(),
+                name: "beta".to_string(),
+                last_opened: "150".to_string(),
+            },
+        ];
+
+        let normalized = normalize_recent_projects(projects);
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized[0].path, "/tmp/alpha");
+        assert_eq!(normalized[0].last_opened, "300");
+        assert_eq!(normalized[1].path, "/tmp/beta");
+        assert_eq!(normalized[2].path, "/tmp/old");
+    }
 }
 
 #[cfg(test)]

@@ -27,9 +27,41 @@ interface OpenFile {
   savedContent: string;
 }
 
+interface RecentProject {
+  path: string;
+  name: string;
+  last_opened: string;
+}
+
 interface LogEvent {
   kind: "append" | "replace";
   text: string;
+}
+
+const MAX_RECENT_PROJECTS = 8;
+
+function normalizeRecentProjects(projects: RecentProject[]) {
+  const byPath = new Map<string, RecentProject>();
+
+  for (const project of projects) {
+    const path = project.path.trim();
+    if (!path) continue;
+
+    const existing = byPath.get(path);
+    const next = {
+      path,
+      name: project.name || path.split(/[\\/]/).filter(Boolean).pop() || path,
+      last_opened: project.last_opened || String(Date.now()),
+    };
+
+    if (!existing || Number(next.last_opened) >= Number(existing.last_opened)) {
+      byPath.set(path, next);
+    }
+  }
+
+  return [...byPath.values()]
+    .sort((a, b) => Number(b.last_opened) - Number(a.last_opened))
+    .slice(0, MAX_RECENT_PROJECTS);
 }
 
 type BottomTab =
@@ -247,24 +279,57 @@ function App() {
     Record<string, FileEntry[]>
   >({});
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+
+  const loadFolder = async (path: string): Promise<boolean> => {
+    try {
+      const result = await invoke<FileEntry[]>("list_dir", { path });
+      setCurrentPath(path);
+      setEntries(result);
+      setChildrenByPath({});
+      setExpandedPaths(new Set());
+
+      const projectName = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+      const nextProject: RecentProject = {
+        path,
+        name: projectName,
+        last_opened: String(Date.now()),
+      };
+
+      setRecentProjects((prev) => {
+        const updated = normalizeRecentProjects([nextProject, ...prev]);
+        void invoke("save_recent_projects", { projects: updated }).catch(
+          () => undefined,
+        );
+        return updated;
+      });
+
+      return true;
+    } catch (error) {
+      console.warn("Failed to load folder:", path, error);
+      return false;
+    }
+  };
+
+  useEffect(() => {
+    invoke<RecentProject[] | null>("load_recent_projects")
+      .then((loaded) => {
+        setRecentProjects(normalizeRecentProjects(loaded ?? []));
+      })
+      .catch(() => {
+        setRecentProjects([]);
+      });
+  }, []);
 
   const pickFolder = async () => {
     const selected = await open({ directory: true, multiple: false });
     if (typeof selected === "string") {
-      setCurrentPath(selected);
-      const result = await invoke<FileEntry[]>("list_dir", { path: selected });
-      setEntries(result);
-      setChildrenByPath({});
-      setExpandedPaths(new Set());
+      await loadFolder(selected);
     }
   };
 
   const openCreatedProject = async (projectPath: string) => {
-    setCurrentPath(projectPath);
-    const result = await invoke<FileEntry[]>("list_dir", { path: projectPath });
-    setEntries(result);
-    setChildrenByPath({});
-    setExpandedPaths(new Set());
+    await loadFolder(projectPath);
   };
 
   const toggleFolder = async (path: string) => {
@@ -966,9 +1031,73 @@ function App() {
                         opacity: 0.5,
                       }}
                     >
-                      No folder open. Use{" "}
-                      <span style={{ color: "#4fc3f7" }}>Open Folder</span>{" "}
-                      above.
+                      <div>No folder open. Use Open Folder above.</div>
+                      {recentProjects.length > 0 && (
+                        <div style={{ marginTop: 12 }}>
+                          <div
+                            style={{
+                              fontSize: 11,
+                              textTransform: "uppercase",
+                              letterSpacing: 0.5,
+                              opacity: 0.7,
+                              marginBottom: 6,
+                            }}
+                          >
+                            Recent Projects
+                          </div>
+                          {recentProjects.map((project) => (
+                            <div
+                              key={project.path}
+                              onClick={async () => {
+                                const ok = await loadFolder(project.path);
+                                if (!ok) {
+                                  setRecentProjects((prev) => {
+                                    const next = prev.filter(
+                                      (item) => item.path !== project.path,
+                                    );
+                                    void invoke("save_recent_projects", {
+                                      projects: next,
+                                    }).catch(() => undefined);
+                                    return next;
+                                  });
+                                }
+                              }}
+                              title={project.path}
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: 4,
+                                cursor: "pointer",
+                                marginBottom: 4,
+                                background: "rgba(255,255,255,0.02)",
+                              }}
+                              onMouseEnter={(e) => {
+                                e.currentTarget.style.background =
+                                  "rgba(79, 195, 247, 0.08)";
+                              }}
+                              onMouseLeave={(e) => {
+                                e.currentTarget.style.background =
+                                  "rgba(255,255,255,0.02)";
+                              }}
+                            >
+                              <div style={{ color: "#eee", fontSize: 12 }}>
+                                {project.name}
+                              </div>
+                              <div
+                                style={{
+                                  color: "#a0a0a0",
+                                  fontSize: 10,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                  marginTop: 2,
+                                }}
+                              >
+                                {project.path}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   )}
                   <FileTree

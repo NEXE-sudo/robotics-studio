@@ -57,7 +57,7 @@ export default function TFTree({ onExplain }: Props) {
     >
       {roots.length === 0 && (
         <div style={{ opacity: 0.5 }}>
-          No TF data yet — start the simulation.
+          No transforms detected yet — start a ROS node that publishes to /tf.
         </div>
       )}
       {roots.map((parent) => (
@@ -65,7 +65,7 @@ export default function TFTree({ onExplain }: Props) {
           <div style={{ color: "#4fc3f7", fontWeight: 600 }}>{parent}</div>
           {byParent[parent].map((t) => (
             <div key={t.child_frame} style={{ paddingLeft: 20, opacity: 0.9 }}>
-              └─ <span style={{ color: "#81c784" }}>{t.child_frame}</span>
+              └─ <span style={{ color: "#7cd992" }}>{t.child_frame}</span>
               {onExplain && (
                 <span
                   onClick={() => onExplain(t)}
@@ -76,6 +76,13 @@ export default function TFTree({ onExplain }: Props) {
                     color: "#4fc3f7",
                     opacity: 0.8,
                     cursor: "pointer",
+                    transition: "opacity 0.12s ease",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.opacity = "1";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.opacity = "0.8";
                   }}
                 >
                   ✨ Explain
