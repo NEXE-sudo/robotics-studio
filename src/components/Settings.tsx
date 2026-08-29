@@ -256,11 +256,11 @@ export default function Settings({
   };
 
   const tabStyle = (isActive: boolean) => ({
-    padding: "8px 16px",
+    padding: "var(--spacing-sm) var(--spacing-md)",
     cursor: "pointer",
     borderBottom: isActive ? "2px solid #4fc3f7" : "none",
     color: isActive ? "#4fc3f7" : "#ccc",
-    fontSize: 13,
+    fontSize: "var(--font-sm)",
     fontWeight: isActive ? 600 : 400,
     transition: "color 0.12s ease, opacity 0.12s ease",
   });
@@ -298,14 +298,19 @@ export default function Settings({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-            padding: "16px 24px",
+            padding: "var(--spacing-md) var(--spacing-lg)",
             borderBottom: "1px solid #3c3c3c",
           }}
         >
           <h3 style={{ margin: 0 }}>Settings</h3>
           <X
-            size={20}
-            style={{ cursor: "pointer", opacity: 0.7, flexShrink: 0 }}
+            style={{
+              width: "var(--icon-md)",
+              height: "var(--icon-md)",
+              cursor: "pointer",
+              opacity: 0.7,
+              flexShrink: 0,
+            }}
             onClick={onClose}
           />
         </div>
@@ -315,7 +320,7 @@ export default function Settings({
           style={{
             display: "flex",
             borderBottom: "1px solid #3c3c3c",
-            paddingLeft: 24,
+            paddingLeft: "var(--spacing-lg)",
           }}
         >
           <div
@@ -342,7 +347,7 @@ export default function Settings({
         <div
           style={{
             flex: 1,
-            padding: 24,
+            padding: "var(--spacing-lg)",
             overflowY: "auto",
           }}
         >
@@ -351,8 +356,8 @@ export default function Settings({
               <label
                 style={{
                   display: "block",
-                  fontSize: 12,
-                  marginBottom: 4,
+                  fontSize: "var(--font-xs)",
+                  marginBottom: "var(--spacing-xs)",
                   opacity: 0.8,
                 }}
               >
@@ -363,8 +368,8 @@ export default function Settings({
                 onChange={(e) => handleProviderChange(e.target.value)}
                 style={{
                   width: "100%",
-                  padding: 6,
-                  marginBottom: 12,
+                  padding: "var(--spacing-sm)",
+                  marginBottom: "var(--spacing-base)",
                   background: "#2d2d30",
                   color: "#eee",
                   border: "1px solid #3c3c3c",
@@ -378,8 +383,8 @@ export default function Settings({
               <label
                 style={{
                   display: "block",
-                  fontSize: 12,
-                  marginBottom: 4,
+                  fontSize: "var(--font-xs)",
+                  marginBottom: "var(--spacing-xs)",
                   opacity: 0.8,
                 }}
               >
@@ -390,8 +395,8 @@ export default function Settings({
                 onChange={(e) => setModel(e.target.value)}
                 style={{
                   width: "100%",
-                  padding: 6,
-                  marginBottom: 12,
+                  padding: "var(--spacing-sm)",
+                  marginBottom: "var(--spacing-base)",
                   background: "#2d2d30",
                   color: "#eee",
                   border: "1px solid #3c3c3c",
@@ -407,8 +412,8 @@ export default function Settings({
               <label
                 style={{
                   display: "block",
-                  fontSize: 12,
-                  marginBottom: 4,
+                  fontSize: "var(--font-xs)",
+                  marginBottom: "var(--spacing-xs)",
                   opacity: 0.8,
                 }}
               >
@@ -421,8 +426,8 @@ export default function Settings({
                 placeholder="sk-..."
                 style={{
                   width: "100%",
-                  padding: 6,
-                  marginBottom: 16,
+                  padding: "var(--spacing-sm)",
+                  marginBottom: "var(--spacing-md)",
                   background: "#2d2d30",
                   color: "#eee",
                   border: "1px solid #3c3c3c",
@@ -430,13 +435,17 @@ export default function Settings({
               />
 
               <div
-                style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}
+                style={{
+                  display: "flex",
+                  justifyContent: "flex-end",
+                  gap: "var(--spacing-sm)",
+                }}
               >
                 {aiSaved && (
                   <span
                     style={{
                       color: "#7cd992",
-                      fontSize: 12,
+                      fontSize: "var(--font-xs)",
                       alignSelf: "center",
                     }}
                   >
@@ -454,12 +463,12 @@ export default function Settings({
             <div>
               <div
                 style={{
-                  marginBottom: 16,
+                  marginBottom: "var(--spacing-md)",
                   maxHeight: 300,
                   overflowY: "auto",
                   border: "1px solid #3c3c3c",
                   borderRadius: 4,
-                  padding: 8,
+                  padding: "var(--spacing-sm)",
                 }}
               >
                 {keybindings.map((kb) => (
@@ -473,17 +482,17 @@ export default function Settings({
                       borderBottom: "1px solid #3c3c3c",
                     }}
                   >
-                    <span style={{ fontSize: 12, opacity: 0.9 }}>
+                    <span style={{ fontSize: "var(--font-xs)", opacity: 0.9 }}>
                       {kb.description}
                     </span>
                     <div
                       style={{
-                        padding: "2px 8px",
+                        padding: "2px var(--spacing-sm)",
                         background:
                           listeningId === kb.id ? "#3c3c3c" : "#2d2d30",
                         border: "1px solid #3c3c3c",
                         borderRadius: 3,
-                        fontSize: 11,
+                        fontSize: "var(--font-xs)",
                         cursor: "pointer",
                         fontFamily: "monospace",
                         minWidth: 80,
@@ -519,9 +528,9 @@ export default function Settings({
                 <div
                   style={{
                     color: "#e08080",
-                    fontSize: 12,
-                    marginBottom: 12,
-                    padding: 8,
+                    fontSize: "var(--font-xs)",
+                    marginBottom: "var(--spacing-base)",
+                    padding: "var(--spacing-sm)",
                     background: "rgba(224, 128, 128, 0.1)",
                     borderRadius: 4,
                   }}
@@ -533,14 +542,19 @@ export default function Settings({
               {importPreview && (
                 <div
                   style={{
-                    marginBottom: 12,
-                    padding: 8,
+                    marginBottom: "var(--spacing-base)",
+                    padding: "var(--spacing-sm)",
                     background: "rgba(79, 195, 247, 0.1)",
                     border: "1px solid #4fc3f7",
                     borderRadius: 4,
                   }}
                 >
-                  <div style={{ fontSize: 12, marginBottom: 8 }}>
+                  <div
+                    style={{
+                      fontSize: "var(--font-xs)",
+                      marginBottom: "var(--spacing-sm)",
+                    }}
+                  >
                     <strong>Import preview:</strong> {importPreview.length}{" "}
                     keybinding{importPreview.length !== 1 ? "s" : ""} will be
                     updated:
@@ -549,25 +563,37 @@ export default function Settings({
                     <div
                       key={p.id}
                       style={{
-                        fontSize: 11,
-                        marginBottom: 4,
+                        fontSize: "var(--font-xs)",
+                        marginBottom: "var(--spacing-xs)",
                         opacity: 0.8,
                       }}
                     >
                       {p.id}: {p.oldKeys} → {p.newKeys}
                     </div>
                   ))}
-                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      gap: "var(--spacing-sm)",
+                      marginTop: "var(--spacing-sm)",
+                    }}
+                  >
                     <button
                       className="ide-btn primary"
-                      style={{ fontSize: 11, padding: "4px 8px" }}
+                      style={{
+                        fontSize: "var(--font-xs)",
+                        padding: "4px var(--spacing-sm)",
+                      }}
                       onClick={handleApplyImport}
                     >
                       Apply
                     </button>
                     <button
                       className="ide-btn"
-                      style={{ fontSize: 11, padding: "4px 8px" }}
+                      style={{
+                        fontSize: "var(--font-xs)",
+                        padding: "4px var(--spacing-sm)",
+                      }}
                       onClick={handleCancelImport}
                     >
                       Cancel
@@ -577,13 +603,17 @@ export default function Settings({
               )}
 
               <div
-                style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}
+                style={{
+                  display: "flex",
+                  gap: "var(--spacing-sm)",
+                  justifyContent: "flex-end",
+                }}
               >
                 {shortcutsSaved && (
                   <span
                     style={{
                       color: "#7cd992",
-                      fontSize: 12,
+                      fontSize: "var(--font-xs)",
                       alignSelf: "center",
                     }}
                   >
@@ -593,21 +623,21 @@ export default function Settings({
                 <button
                   className="ide-btn"
                   onClick={handleResetShortcuts}
-                  style={{ fontSize: 12 }}
+                  style={{ fontSize: "var(--font-xs)" }}
                 >
                   Reset to Defaults
                 </button>
                 <button
                   className="ide-btn"
                   onClick={handleImportVsCode}
-                  style={{ fontSize: 12 }}
+                  style={{ fontSize: "var(--font-xs)" }}
                 >
                   Import from VS Code
                 </button>
                 <button
                   className="ide-btn primary"
                   onClick={handleSaveShortcuts}
-                  style={{ fontSize: 12 }}
+                  style={{ fontSize: "var(--font-xs)" }}
                 >
                   Save Shortcuts
                 </button>
@@ -619,33 +649,57 @@ export default function Settings({
             <div>
               {systemLoading && (
                 <div
-                  style={{ color: "#999", fontSize: 12, textAlign: "center" }}
+                  style={{
+                    color: "#999",
+                    fontSize: "var(--font-xs)",
+                    textAlign: "center",
+                  }}
                 >
                   Detecting system specs...
                 </div>
               )}
 
               {systemError && (
-                <div style={{ color: "#e08080", fontSize: 12 }}>
+                <div style={{ color: "#e08080", fontSize: "var(--font-xs)" }}>
                   {systemError}
                 </div>
               )}
 
               {systemSpecs && (
                 <div>
-                  <div style={{ marginBottom: 16 }}>
-                    <div style={{ fontSize: 12, marginBottom: 4 }}>
+                  <div style={{ marginBottom: "var(--spacing-md)" }}>
+                    <div
+                      style={{
+                        fontSize: "var(--font-xs)",
+                        marginBottom: "var(--spacing-xs)",
+                      }}
+                    >
                       <strong>RAM:</strong> {systemSpecs.ram_gb} GB
                     </div>
-                    <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    <div
+                      style={{
+                        fontSize: "var(--font-xs)",
+                        marginBottom: "var(--spacing-xs)",
+                      }}
+                    >
                       <strong>CPU cores:</strong> {systemSpecs.cpu_cores}
                     </div>
-                    <div style={{ fontSize: 12, marginBottom: 4 }}>
+                    <div
+                      style={{
+                        fontSize: "var(--font-xs)",
+                        marginBottom: "var(--spacing-xs)",
+                      }}
+                    >
                       <strong>GPU:</strong>{" "}
                       {systemSpecs.gpu_name || "Not detected"}
                     </div>
                     {systemSpecs.gpu_vram_gb && (
-                      <div style={{ fontSize: 12, marginBottom: 4 }}>
+                      <div
+                        style={{
+                          fontSize: "var(--font-xs)",
+                          marginBottom: "var(--spacing-xs)",
+                        }}
+                      >
                         <strong>GPU VRAM:</strong> {systemSpecs.gpu_vram_gb} GB
                       </div>
                     )}
@@ -653,25 +707,25 @@ export default function Settings({
 
                   <div
                     style={{
-                      padding: 12,
+                      padding: "var(--spacing-base)",
                       background: "#2d2d30",
                       borderRadius: 4,
                       border: "1px solid #3c3c3c",
-                      marginTop: 16,
+                      marginTop: "var(--spacing-md)",
                     }}
                   >
                     <div
                       style={{
-                        fontSize: 12,
+                        fontSize: "var(--font-xs)",
                         fontWeight: 600,
-                        marginBottom: 8,
+                        marginBottom: "var(--spacing-sm)",
                       }}
                     >
                       Offline model suggestions:
                     </div>
                     <div
                       style={{
-                        fontSize: 12,
+                        fontSize: "var(--font-xs)",
                         lineHeight: 1.5,
                         opacity: 0.9,
                       }}
@@ -688,7 +742,13 @@ export default function Settings({
                               gap: 6,
                             }}
                           >
-                            <Lightbulb size={14} style={{ flexShrink: 0 }} />
+                            <Lightbulb
+                              style={{
+                                width: "var(--icon-sm)",
+                                height: "var(--icon-sm)",
+                                flexShrink: 0,
+                              }}
+                            />
                             <span>
                               GPU-accelerated inference will be significantly
                               faster than CPU-only.

@@ -79,7 +79,7 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
           background: "#252526",
           border: "1px solid #3c3c3c",
           borderRadius: 8,
-          padding: 24,
+          padding: "var(--spacing-lg)",
           width: 460,
           color: "#ccc",
         }}
@@ -88,13 +88,18 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
           style={{
             display: "flex",
             justifyContent: "space-between",
-            marginBottom: 16,
+            marginBottom: "var(--spacing-md)",
           }}
         >
           <h3 style={{ margin: 0 }}>New Project from Template</h3>
           <X
-            size={20}
-            style={{ cursor: "pointer", opacity: 0.7, flexShrink: 0 }}
+            style={{
+              width: "var(--icon-md)",
+              height: "var(--icon-md)",
+              cursor: "pointer",
+              opacity: 0.7,
+              flexShrink: 0,
+            }}
             onClick={onClose}
           />
         </div>
@@ -102,19 +107,31 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         <label
           style={{
             display: "block",
-            fontSize: 12,
-            marginBottom: 4,
+            fontSize: "var(--font-xs)",
+            marginBottom: "var(--spacing-xs)",
             opacity: 0.8,
           }}
         >
           Template
         </label>
         {loadingTemplates ? (
-          <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 12 }}>
+          <div
+            style={{
+              fontSize: "var(--font-xs)",
+              opacity: 0.6,
+              marginBottom: "var(--spacing-base)",
+            }}
+          >
             Loading templates…
           </div>
         ) : templates.length === 0 ? (
-          <div style={{ fontSize: 12, opacity: 0.6, marginBottom: 12 }}>
+          <div
+            style={{
+              fontSize: "var(--font-xs)",
+              opacity: 0.6,
+              marginBottom: "var(--spacing-base)",
+            }}
+          >
             No templates bundled.
           </div>
         ) : (
@@ -123,8 +140,8 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
             onChange={(e) => setSelectedTemplate(e.target.value)}
             style={{
               width: "100%",
-              padding: 6,
-              marginBottom: 12,
+              padding: "var(--spacing-sm)",
+              marginBottom: "var(--spacing-base)",
               background: "#2d2d30",
               color: "#eee",
               border: "1px solid #3c3c3c",
@@ -141,8 +158,8 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         <label
           style={{
             display: "block",
-            fontSize: 12,
-            marginBottom: 4,
+            fontSize: "var(--font-xs)",
+            marginBottom: "var(--spacing-xs)",
             opacity: 0.8,
           }}
         >
@@ -154,8 +171,8 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
           placeholder="my_ros2_project"
           style={{
             width: "100%",
-            padding: 6,
-            marginBottom: 12,
+            padding: "var(--spacing-sm)",
+            marginBottom: "var(--spacing-base)",
             background: "#2d2d30",
             color: "#eee",
             border: "1px solid #3c3c3c",
@@ -166,21 +183,27 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         <label
           style={{
             display: "block",
-            fontSize: 12,
-            marginBottom: 4,
+            fontSize: "var(--font-xs)",
+            marginBottom: "var(--spacing-xs)",
             opacity: 0.8,
           }}
         >
           Destination folder
         </label>
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            gap: "var(--spacing-sm)",
+            marginBottom: "var(--spacing-md)",
+          }}
+        >
           <input
             value={destinationDir}
             readOnly
             placeholder="Choose a folder…"
             style={{
               flex: 1,
-              padding: 6,
+              padding: "var(--spacing-sm)",
               background: "#2d2d30",
               color: "#eee",
               border: "1px solid #3c3c3c",
@@ -192,12 +215,24 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         </div>
 
         {error && (
-          <div style={{ color: "#e08080", fontSize: 12, marginBottom: 12 }}>
+          <div
+            style={{
+              color: "#e08080",
+              fontSize: "var(--font-xs)",
+              marginBottom: "var(--spacing-base)",
+            }}
+          >
             {error}
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: "var(--spacing-sm)",
+          }}
+        >
           <button className="ide-btn" onClick={onClose} disabled={creating}>
             Cancel
           </button>

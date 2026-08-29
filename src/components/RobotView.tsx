@@ -240,17 +240,23 @@ export function RobotControls({
   }, [availableRobots, selectedRobot]);
 
   const btnStyle: React.CSSProperties = {
-    width: 48,
-    height: 48,
-    fontSize: 18,
-    margin: 2,
+    width: "var(--icon-lg)",
+    height: "var(--icon-lg)",
+    fontSize: "var(--font-md)",
+    margin: "var(--spacing-xs)",
     cursor: "pointer",
   };
 
   return (
-    <div style={{ padding: 12, color: "#ccc" }}>
+    <div style={{ padding: "var(--spacing-base)", color: "#ccc" }}>
       {availableRobots.length === 0 ? (
-        <div style={{ fontSize: 12, opacity: 0.5, marginBottom: 10 }}>
+        <div
+          style={{
+            fontSize: "var(--font-xs)",
+            opacity: 0.5,
+            marginBottom: "var(--spacing-base)",
+          }}
+        >
           No robots detected — start the simulation.
         </div>
       ) : (
@@ -286,33 +292,43 @@ export function RobotControls({
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0.3, 0)}
         >
-          <ArrowUp size={20} />
+          <ArrowUp
+            style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+          />
         </button>
         <div />
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, 0.5)}
         >
-          <RotateCcw size={20} />
+          <RotateCcw
+            style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+          />
         </button>
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, 0)}
         >
-          <Square size={16} />
+          <Square
+            style={{ width: "var(--icon-sm)", height: "var(--icon-sm)" }}
+          />
         </button>
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, -0.5)}
         >
-          <RotateCw size={20} />
+          <RotateCw
+            style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+          />
         </button>
         <div />
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, -0.3, 0)}
         >
-          <ArrowDown size={20} />
+          <ArrowDown
+            style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+          />
         </button>
         <div />
       </div>

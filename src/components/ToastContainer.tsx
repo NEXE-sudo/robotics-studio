@@ -69,10 +69,10 @@ const ToastContainer: React.FC<ToastContainerProps> = ({
           key={t.id}
           style={{
             ...getTypeStyle(t.type),
-            padding: "10px 14px",
+            padding: "var(--spacing-base) var(--spacing-md)",
             borderRadius: 4,
             boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
-            fontSize: 13,
+            fontSize: "var(--font-sm)",
             pointerEvents: "auto",
             display: "flex",
             flexDirection: "column",
@@ -101,13 +101,15 @@ const ToastContainer: React.FC<ToastContainerProps> = ({
                 opacity: 0.7,
               }}
             >
-              <X size={16} />
+              <X
+                style={{ width: "var(--icon-sm)", height: "var(--icon-sm)" }}
+              />
             </button>
           </div>
           {t.details && (
             <div
               style={{
-                fontSize: 11,
+                fontSize: "var(--font-xs)",
                 opacity: 0.85,
                 fontFamily: "monospace",
                 wordBreak: "break-all",

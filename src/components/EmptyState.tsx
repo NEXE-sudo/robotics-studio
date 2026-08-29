@@ -22,25 +22,25 @@ const EmptyState: React.FC<EmptyStateProps> = ({
         justifyContent: "center",
         background: "#1e1e1e",
         color: "#ccc",
-        padding: 40,
+        padding: "var(--spacing-lg)",
         textAlign: "center",
         userSelect: "none",
       }}
     >
       <div
         style={{
-          marginBottom: 16,
+          marginBottom: "var(--spacing-base)",
           opacity: 0.9,
           display: "flex",
           justifyContent: "center",
         }}
       >
-        <Bot size={48} />
+        <Bot style={{ width: "var(--icon-lg)", height: "var(--icon-lg)" }} />
       </div>
       <h2
         style={{
-          margin: "0 0 8px 0",
-          fontSize: 22,
+          margin: "0 0 var(--spacing-sm) 0",
+          fontSize: "var(--font-lg)",
           fontWeight: 500,
           color: "#fff",
         }}
@@ -49,8 +49,8 @@ const EmptyState: React.FC<EmptyStateProps> = ({
       </h2>
       <p
         style={{
-          margin: "0 0 28px 0",
-          fontSize: 13,
+          margin: "0 0 var(--spacing-lg) 0",
+          fontSize: "var(--font-sm)",
           color: "#888",
           maxWidth: 460,
         }}
@@ -75,7 +75,7 @@ const EmptyState: React.FC<EmptyStateProps> = ({
             background: "#252526",
             border: "1px solid #3c3c3c",
             borderRadius: 6,
-            padding: 16,
+            padding: "var(--spacing-md)",
             cursor: "pointer",
             textAlign: "left",
             transition: "all 0.15s ease",
@@ -91,17 +91,23 @@ const EmptyState: React.FC<EmptyStateProps> = ({
         >
           <div
             style={{
-              fontSize: 18,
-              marginBottom: 6,
+              fontSize: "var(--font-md)",
+              marginBottom: "var(--spacing-sm)",
               display: "flex",
               alignItems: "center",
-              gap: 8,
+              gap: "var(--spacing-sm)",
             }}
           >
-            <Folder size={18} style={{ flexShrink: 0 }} />
+            <Folder
+              style={{
+                width: "var(--icon-md)",
+                height: "var(--icon-md)",
+                flexShrink: 0,
+              }}
+            />
             <span>Open Folder</span>
           </div>
-          <div style={{ fontSize: 12, color: "#888" }}>
+          <div style={{ fontSize: "var(--font-xs)", color: "#888" }}>
             Browse and edit packages, launch files, and URDF models.
           </div>
         </div>
@@ -112,7 +118,7 @@ const EmptyState: React.FC<EmptyStateProps> = ({
             background: "#252526",
             border: "1px solid #3c3c3c",
             borderRadius: 6,
-            padding: 16,
+            padding: "var(--spacing-md)",
             cursor: "pointer",
             textAlign: "left",
             transition: "all 0.15s ease",
@@ -128,19 +134,25 @@ const EmptyState: React.FC<EmptyStateProps> = ({
         >
           <div
             style={{
-              fontSize: 18,
-              marginBottom: 6,
+              fontSize: "var(--font-md)",
+              marginBottom: "var(--spacing-sm)",
               display: "flex",
               alignItems: "center",
-              gap: 8,
+              gap: "var(--spacing-sm)",
             }}
           >
-            <Bot size={18} style={{ flexShrink: 0 }} />
+            <Bot
+              style={{
+                width: "var(--icon-md)",
+                height: "var(--icon-md)",
+                flexShrink: 0,
+              }}
+            />
             <span>
               {rosWorkspacePath ? "Change Workspace" : "Select ROS Workspace"}
             </span>
           </div>
-          <div style={{ fontSize: 12, color: "#888" }}>
+          <div style={{ fontSize: "var(--font-xs)", color: "#888" }}>
             {rosWorkspacePath
               ? `Active: ${rosWorkspacePath.split("/").pop()}`
               : "Connect your workspace to enable builds & Gazebo simulations."}
@@ -148,7 +160,14 @@ const EmptyState: React.FC<EmptyStateProps> = ({
         </div>
       </div>
 
-      <div style={{ fontSize: 12, color: "#666", display: "flex", gap: 20 }}>
+      <div
+        style={{
+          fontSize: "var(--font-xs)",
+          color: "#666",
+          display: "flex",
+          gap: "var(--spacing-lg)",
+        }}
+      >
         <span>
           <kbd style={kbdStyle}>⌘S</kbd> Save File
         </span>
@@ -170,8 +189,8 @@ const kbdStyle: React.CSSProperties = {
   background: "#2d2d30",
   border: "1px solid #444",
   borderRadius: 3,
-  padding: "1px 5px",
-  fontSize: 11,
+  padding: "1px var(--spacing-sm)",
+  fontSize: "var(--font-xs)",
   color: "#aaa",
 };
 

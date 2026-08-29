@@ -269,9 +269,40 @@ function App() {
   const [activityView, setActivityView] = useState<ActivityView>("explorer");
 
   // ---------- Panel layout (resizable + collapsible) ----------
-  const [sidebarWidth, setSidebarWidth] = useState(240);
-  const [chatWidth, setChatWidth] = useState(320);
-  const [bottomHeight, setBottomHeight] = useState(220);
+  const resolveResponsiveDefault = (variable: string, fallback: number) => {
+    if (typeof window === "undefined") return fallback;
+    const raw = getComputedStyle(document.documentElement)
+      .getPropertyValue(variable)
+      .trim();
+    if (!raw) return fallback;
+
+    const numbers = raw.match(/-?\d*\.?\d+/g)?.map(Number) ?? [];
+    if (numbers.length >= 3) {
+      const [min, preferred, max] = numbers;
+      const preferredValue = raw.includes("vw")
+        ? (window.innerWidth * preferred) / 100
+        : raw.includes("vh")
+          ? (window.innerHeight * preferred) / 100
+          : preferred;
+      return clamp(preferredValue, min, max);
+    }
+
+    const numeric = Number.parseFloat(raw);
+    return Number.isFinite(numeric) ? numeric : fallback;
+  };
+
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    resolveResponsiveDefault("--sidebar-default-width", 240),
+  );
+  const [chatWidth, setChatWidth] = useState(() =>
+    Math.max(
+      resolveResponsiveDefault("--sidebar-default-width", 240) * 1.25,
+      320,
+    ),
+  );
+  const [bottomHeight, setBottomHeight] = useState(() =>
+    resolveResponsiveDefault("--bottom-panel-default-height", 220),
+  );
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [chatCollapsed, setChatCollapsed] = useState(false);
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
@@ -1010,10 +1041,16 @@ function App() {
               setSidebarCollapsed(false);
             }}
           >
-            <Folder size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
+            <Folder
+              size={18}
+              style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+            />
           </div>
           <div className="activity-icon" title="Search">
-            <FolderOpen size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
+            <FolderOpen
+              size={18}
+              style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+            />
           </div>
           <div
             className={`activity-icon ${
@@ -1026,7 +1063,10 @@ function App() {
               setSidebarCollapsed(false);
             }}
           >
-            <Bot size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
+            <Bot
+              size={18}
+              style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+            />
           </div>
           <div style={{ flex: 1 }} />
           <div
@@ -1034,7 +1074,10 @@ function App() {
             title="AI Assistant"
             onClick={() => setChatCollapsed((c) => !c)}
           >
-            <Sparkles size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
+            <Sparkles
+              size={18}
+              style={{ width: "var(--icon-md)", height: "var(--icon-md)" }}
+            />
           </div>
         </div>
 
@@ -1284,7 +1327,14 @@ function App() {
                   gap: 8,
                 }}
               >
-                <div style={{ opacity: 0.5, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <div
+                  style={{
+                    opacity: 0.5,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                >
                   <Bot size={32} />
                 </div>
                 <div>Select a file from the Explorer to start editing</div>
@@ -1326,14 +1376,26 @@ function App() {
                   <span>AI Assistant</span>
                 </span>
                 <span
-                  style={{ cursor: "pointer", opacity: 0.7, fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}
+                  style={{
+                    cursor: "pointer",
+                    opacity: 0.7,
+                    fontSize: 11,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
                   onClick={() => setSettingsOpen(true)}
                 >
                   <Settings2 size={12} />
                   <span>Settings</span>
                 </span>
                 <span
-                  style={{ cursor: "pointer", opacity: 0.7, display: "flex", alignItems: "center" }}
+                  style={{
+                    cursor: "pointer",
+                    opacity: 0.7,
+                    display: "flex",
+                    alignItems: "center",
+                  }}
                   onClick={() => setChatCollapsed(true)}
                 >
                   <X size={12} />
@@ -1382,7 +1444,8 @@ function App() {
                           style={{ marginTop: 6, fontSize: 11 }}
                           onClick={() => saveGeneratedCode(codeMatch[1], isXml)}
                         >
-                          <Save size={12} style={{ marginRight: 4 }} /> Save to file
+                          <Save size={12} style={{ marginRight: 4 }} /> Save to
+                          file
                         </button>
                       )}
                     </div>
@@ -1533,9 +1596,20 @@ function App() {
                     </>
                   )}
                   {tab === "environment" && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
                       Environment Setup
-                      {initializing && <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />}
+                      {initializing && (
+                        <LoaderCircle
+                          size={12}
+                          style={{ animation: "spin 1s linear infinite" }}
+                        />
+                      )}
                     </span>
                   )}
                   {activeTab === "dashboard" && (
@@ -1590,9 +1664,20 @@ function App() {
                     </div>
                   )}
                   {tab === "build" && (
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: 4,
+                      }}
+                    >
                       Build Output
-                      {building && <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />}
+                      {building && (
+                        <LoaderCircle
+                          size={12}
+                          style={{ animation: "spin 1s linear infinite" }}
+                        />
+                      )}
                     </span>
                   )}
                   {tab === "sim" && "3D View"}
@@ -1779,7 +1864,9 @@ function App() {
           onClick={() => setBottomCollapsed(false)}
         >
           <ChevronUp size={12} />
-          <span>Show panel (ROS Log · Build Output · Environment · 3D View)</span>
+          <span>
+            Show panel (ROS Log · Build Output · Environment · 3D View)
+          </span>
         </div>
       )}
 
@@ -1807,8 +1894,14 @@ function App() {
             : "No ROS workspace"}
         </div>
         {building && (
-          <div className="status-item" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-            <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />
+          <div
+            className="status-item"
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            <LoaderCircle
+              size={12}
+              style={{ animation: "spin 1s linear infinite" }}
+            />
             Building…
           </div>
         )}
@@ -1824,7 +1917,12 @@ function App() {
           <div
             className="status-item"
             title="This file matches a pattern in .aiignore and is excluded from AI context"
-            style={{ color: "#e0b050", display: "inline-flex", alignItems: "center", gap: 4 }}
+            style={{
+              color: "#e0b050",
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 4,
+            }}
           >
             <Ban size={12} />
             AI-ignored

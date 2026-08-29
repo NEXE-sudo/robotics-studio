@@ -48,9 +48,9 @@ export default function TFTree({ onExplain }: Props) {
   return (
     <div
       style={{
-        padding: 12,
+        padding: "var(--spacing-base)",
         color: "#ccc",
-        fontSize: 12,
+        fontSize: "var(--font-xs)",
         fontFamily: "monospace",
         overflowY: "auto",
         height: "100%",
@@ -72,8 +72,8 @@ export default function TFTree({ onExplain }: Props) {
                   onClick={() => onExplain(t)}
                   title="Explain this frame with AI"
                   style={{
-                    marginLeft: 8,
-                    fontSize: 10,
+                    marginLeft: "var(--spacing-sm)",
+                    fontSize: "var(--font-xs)",
                     color: "#4fc3f7",
                     opacity: 0.8,
                     cursor: "pointer",
@@ -87,13 +87,23 @@ export default function TFTree({ onExplain }: Props) {
                   }}
                 >
                   <Sparkles
-                    size={12}
-                    style={{ marginRight: 4, display: "inline" }}
+                    style={{
+                      width: "var(--icon-sm)",
+                      height: "var(--icon-sm)",
+                      marginRight: 4,
+                      display: "inline",
+                    }}
                   />{" "}
                   Explain
                 </span>
               )}
-              <div style={{ paddingLeft: 20, opacity: 0.6, fontSize: 11 }}>
+              <div
+                style={{
+                  paddingLeft: 20,
+                  opacity: 0.6,
+                  fontSize: "var(--font-xs)",
+                }}
+              >
                 pos: ({t.x.toFixed(3)}, {t.y.toFixed(3)}, {t.z.toFixed(3)})
               </div>
             </div>
