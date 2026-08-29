@@ -1496,10 +1496,10 @@ mod stream_line_buffer_tests {
         let events2 = buf.process_chunk(chunk2);
         assert_eq!(events2.len(), 1, "Should emit one complete line");
         assert_eq!(events2[0].0, "append");
-        // The decoded string should contain the full box-drawing character
-        assert!(
-            events2[0].1.contains("─") || events2[0].1.contains("Box: "),
-            "Should successfully decode split UTF-8 character and complete line: got '{}'",
+        assert_eq!(
+            events2[0].1,
+            "Box: ─ line",
+            "Split UTF-8 character should reassemble exactly, got '{}'",
             events2[0].1
         );
     }
