@@ -7,6 +7,12 @@ import TFTree from "./components/TFTree";
 import Settings from "./components/Settings";
 import NewProjectModal from "./components/NewProjectModal";
 import { open, save } from "@tauri-apps/plugin-dialog";
+import {
+  KeyBinding,
+  DEFAULT_KEYBINDINGS,
+  parseKeybinding,
+  keyEventMatches,
+} from "./keybindings";
 
 interface FileEntry {
   name: string;
@@ -164,6 +170,7 @@ function App() {
   const [nodeStatus, setNodeStatus] = useState<
     Record<string, "alive" | "crashed">
   >({});
+  const [keymap, setKeymap] = useState<KeyBinding[]>(DEFAULT_KEYBINDINGS);
 
   const pickCustomWorld = async () => {
     const selected = await open({
@@ -504,30 +511,53 @@ function App() {
   };
 
   // ---------- Keyboard shortcuts ----------
+  // Load keybindings on mount
+  useEffect(() => {
+    invoke<KeyBinding[] | null>("load_keybindings").then((loaded) => {
+      if (loaded) {
+        setKeymap(loaded);
+      }
+    });
+  }, []);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        saveFile();
-      }
-      if (mod && e.key.toLowerCase() === "b") {
-        e.preventDefault();
-        setSidebarCollapsed((c) => !c);
-      }
-      if (mod && e.key === "`") {
-        e.preventDefault();
-        setBottomCollapsed((c) => !c);
-      }
-      if (mod && e.key.toLowerCase() === "w" && activeFilePath) {
-        e.preventDefault();
-        closeTab(activeFilePath);
+      // Find matching keybinding
+      for (const binding of keymap) {
+        const parsed = parseKeybinding(binding.keys);
+        if (keyEventMatches(e, parsed)) {
+          e.preventDefault();
+          // Dispatch to appropriate action
+          switch (binding.id) {
+            case "save":
+              saveFile();
+              break;
+            case "toggle-sidebar":
+              setSidebarCollapsed((c) => !c);
+              break;
+            case "toggle-bottom-panel":
+              setBottomCollapsed((c) => !c);
+              break;
+            case "close-tab":
+              if (activeFilePath) {
+                closeTab(activeFilePath);
+              }
+              break;
+            case "build":
+              triggerBuild();
+              break;
+            case "new-project":
+              setNewProjectOpen(true);
+              break;
+          }
+          return;
+        }
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeFile, activeFilePath]);
+  }, [keymap, activeFile, activeFilePath]);
 
   // ---------- Event listeners (ROS stream + build stream) ----------
   useEffect(() => {
@@ -732,7 +762,12 @@ function App() {
       `}</style>
 
       {/* Top toolbar */}
-      {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <Settings
+          onClose={() => setSettingsOpen(false)}
+          onKeybindingsChange={setKeymap}
+        />
+      )}
       {newProjectOpen && (
         <NewProjectModal
           onClose={() => setNewProjectOpen(false)}
