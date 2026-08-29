@@ -21,7 +21,19 @@ interface OpenFile {
   savedContent: string;
 }
 
-type BottomTab = "ros" | "build" | "sim" | "problems" | "tf" | "dashboard";
+interface LogEvent {
+  kind: "append" | "replace";
+  text: string;
+}
+
+type BottomTab =
+  | "ros"
+  | "build"
+  | "sim"
+  | "problems"
+  | "tf"
+  | "dashboard"
+  | "environment";
 type ActivityView = "explorer" | "ros" | "search";
 
 const LANG_MAP: Record<string, string> = {
@@ -167,7 +179,8 @@ function App() {
   const [rosEvents, setRosEvents] = useState<string[]>([]);
   const [rosConnected, setRosConnected] = useState(false);
   const [initializing, setInitializing] = useState(false);
-  const [initLog, setInitLog] = useState<string[]>([]);
+  const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
+  const [currentSetupLine, setCurrentSetupLine] = useState<string>(""); // Current line for toast
 
   // --- Build output ---
   const [buildOutput, setBuildOutput] = useState<string[]>([]);
@@ -366,11 +379,15 @@ function App() {
 
   const initializeRosEnvironment = async () => {
     setInitializing(true);
-    setInitLog(["Starting..."]);
+    setSetupOutput(["Starting..."]);
+    setCurrentSetupLine("Starting...");
+    setBottomCollapsed(false);
+    setActiveTab("environment");
     try {
       await invoke("initialize_ros_environment");
     } catch (err) {
-      setInitLog((prev) => [...prev, `❌ ${err}`]);
+      setSetupOutput((prev) => [...prev, `❌ ${err}`]);
+      setCurrentSetupLine(`❌ ${err}`);
       setInitializing(false);
     }
   };
@@ -557,8 +574,23 @@ function App() {
       setRosConnected(false);
     });
 
-    const unlistenBuildOutput = listen<string>("build-output", (event) => {
-      setBuildOutput((prev) => [...prev, event.payload]);
+    const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
+      const { kind, text } = event.payload;
+      if (kind === "replace") {
+        // Update the last line in place
+        setBuildOutput((prev) => {
+          const updated = [...prev];
+          if (updated.length > 0) {
+            updated[updated.length - 1] = text;
+          } else {
+            updated.push(text);
+          }
+          return updated;
+        });
+      } else {
+        // Append a new line
+        setBuildOutput((prev) => [...prev, text]);
+      }
     });
     const unlistenBuildError = listen<string>("build-error", (event) => {
       setBuildOutput((prev) => [...prev, `ERROR: ${event.payload}`]);
@@ -583,16 +615,35 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const unlistenProgress = listen<string>("init-progress", (event) => {
-      setInitLog((prev) => [...prev.slice(-99), event.payload]);
+    const unlistenProgress = listen<LogEvent>("init-progress", (event) => {
+      const { kind, text } = event.payload;
+      if (kind === "replace") {
+        // Update the last line in place
+        setSetupOutput((prev) => {
+          const updated = [...prev];
+          if (updated.length > 0) {
+            updated[updated.length - 1] = text;
+          } else {
+            updated.push(text);
+          }
+          return updated;
+        });
+      } else {
+        // Append a new line
+        setSetupOutput((prev) => [...prev.slice(-99), text]);
+      }
+      // Always update the toast's current line
+      setCurrentSetupLine(text);
     });
     const unlistenFinished = listen<string>("init-finished", (event) => {
       setRosWorkspacePath(event.payload);
-      setInitLog((prev) => [...prev, "✅ ROS environment ready"]);
+      setSetupOutput((prev) => [...prev, "✅ ROS environment ready"]);
+      setCurrentSetupLine("✅ ROS environment ready");
       setInitializing(false);
     });
     const unlistenError = listen<string>("init-error", (event) => {
-      setInitLog((prev) => [...prev, `❌ ${event.payload}`]);
+      setSetupOutput((prev) => [...prev, `❌ ${event.payload}`]);
+      setCurrentSetupLine(`❌ ${event.payload}`);
       setInitializing(false);
     });
 
@@ -779,25 +830,6 @@ function App() {
           💾 Save
         </button>
       </div>
-
-      {initializing && (
-        <div
-          style={{
-            maxHeight: 150,
-            overflowY: "auto",
-            background: "#111",
-            color: "#0f0",
-            fontSize: 11,
-            fontFamily: "monospace",
-            padding: 8,
-            borderBottom: "1px solid #333",
-          }}
-        >
-          {initLog.map((line, i) => (
-            <div key={i}>{line}</div>
-          ))}
-        </div>
-      )}
 
       {/* Main area: activity bar + sidebar + editor + AI chat */}
       <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
@@ -1237,6 +1269,7 @@ function App() {
                 [
                   "ros",
                   "build",
+                  "environment",
                   "sim",
                   "tf",
                   "dashboard",
@@ -1257,6 +1290,9 @@ function App() {
                         </span>
                       )}
                     </>
+                  )}
+                  {tab === "environment" && (
+                    <>Environment Setup{initializing && <span>⏳</span>}</>
                   )}
                   {activeTab === "dashboard" && (
                     <div style={{ padding: 12, fontSize: 12 }}>
@@ -1424,6 +1460,36 @@ function App() {
                   ))}
                 </div>
               )}
+              {activeTab === "environment" && (
+                <div
+                  style={{
+                    height: "100%",
+                    overflowY: "auto",
+                    color: "#0f0",
+                    fontSize: 11,
+                    fontFamily: "monospace",
+                    padding: 8,
+                  }}
+                >
+                  {setupOutput.length === 0 && (
+                    <div style={{ color: "#666" }}>No setup logs yet.</div>
+                  )}
+                  {setupOutput.map((line, i) => (
+                    <div
+                      key={i}
+                      style={{
+                        color: line.startsWith("❌")
+                          ? "#e08080"
+                          : line.startsWith("✅")
+                            ? "#7cd992"
+                            : undefined,
+                      }}
+                    >
+                      {line}
+                    </div>
+                  ))}
+                </div>
+              )}
               {activeTab === "sim" && (
                 <div style={{ height: "100%", display: "flex" }}>
                   <div style={{ flex: 1 }}>
@@ -1462,7 +1528,7 @@ function App() {
           }}
           onClick={() => setBottomCollapsed(false)}
         >
-          ⌃ Show panel (ROS Log · Build Output · 3D View)
+          ⌃ Show panel (ROS Log · Build Output · Environment · 3D View)
         </div>
       )}
 
@@ -1514,6 +1580,80 @@ function App() {
           ✨ Assistant
         </div>
       </div>
+
+      {/* Environment Setup Toast */}
+      {initializing && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 40,
+            right: 20,
+            background: "#1e2e3a",
+            border: "1px solid #0078d4",
+            borderRadius: 6,
+            padding: "12px 16px",
+            maxWidth: 380,
+            boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+            zIndex: 9998,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            fontSize: 12,
+            color: "#e3f2fd",
+          }}
+        >
+          <div
+            style={{
+              display: "inline-block",
+              animation: "spin 1s linear infinite",
+              fontSize: 14,
+            }}
+          >
+            ⚙️
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ marginBottom: 4, fontWeight: 600, color: "#4fc3f7" }}>
+              Environment Setup
+            </div>
+            <div
+              style={{ fontSize: 11, color: "#bbb", wordBreak: "break-word" }}
+            >
+              {currentSetupLine || "Initializing..."}
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              // Dismiss toast but keep initialization running
+              setCurrentSetupLine("");
+            }}
+            style={{
+              background: "transparent",
+              border: "none",
+              color: "#888",
+              cursor: "pointer",
+              fontSize: 16,
+              padding: "0 4px",
+              opacity: 0.6,
+              transition: "opacity 0.2s",
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.opacity = "1";
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.opacity = "0.6";
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   );
 }

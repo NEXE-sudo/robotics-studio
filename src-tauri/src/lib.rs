@@ -104,7 +104,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
-            save_ai_settings, load_ai_settings, list_templates, create_project_from_template, check_aiignore
+            save_ai_settings, load_ai_settings, save_keybindings, load_keybindings, get_system_specs, list_templates, create_project_from_template, check_aiignore
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -336,8 +336,95 @@ fn run_colcon_build() -> Result<String, String> {
     }
 }
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufReader, Read};
 use std::process::Stdio;
+
+/// Event payload for streaming log output from Docker/build processes.
+/// Distinguishes between "append" (finalized line with \n) and "replace" 
+/// (in-progress update with \r) to properly render Docker BuildKit progress.
+#[derive(serde::Serialize, Clone)]
+struct LogEvent {
+    kind: String, // "append" | "replace"
+    text: String,
+}
+
+/// Strip ANSI escape sequences (colors, cursor movement, etc.) from a string.
+/// Docker BuildKit output often contains these; we need to remove them
+/// before displaying in plain text UI.
+fn strip_ansi_codes(input: &str) -> String {
+    let mut result = String::new();
+    let mut chars = input.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            // Start of an ANSI escape sequence; consume until 'm' or other terminator
+            while let Some(c) = chars.next() {
+                if c.is_alphabetic() {
+                    break; // End of escape sequence
+                }
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    
+    result
+}
+
+/// Read streaming output from a source (stdout/stderr), split on both \n and \r,
+/// and emit appropriate log events. Returns a Vec of (kind, text) tuples.
+fn parse_streaming_output(data: &[u8]) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut i = 0;
+    
+    while i < data.len() {
+        let byte = data[i];
+        
+        match byte {
+            b'\n' => {
+                // Newline: finalize the current line as "append"
+                if !current_line.is_empty() || i + 1 < data.len() {
+                    result.push(("append".to_string(), strip_ansi_codes(&current_line)));
+                    current_line.clear();
+                }
+                i += 1;
+            }
+            b'\r' => {
+                // Carriage return: emit current line as "replace" and reset
+                if !current_line.is_empty() {
+                    result.push(("replace".to_string(), strip_ansi_codes(&current_line)));
+                    current_line.clear();
+                }
+                i += 1;
+            }
+            _ => {
+                // Regular character
+                if byte < 128 {
+                    current_line.push(byte as char);
+                } else {
+                    // Handle UTF-8 by collecting bytes until we have a valid char
+                    let start = i;
+                    // Find the UTF-8 char boundary
+                    while i < data.len() && (data[i] & 0xC0) == 0x80 {
+                        i += 1;
+                    }
+                    if let Ok(s) = std::str::from_utf8(&data[start..=i]) {
+                        current_line.push_str(s);
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    
+    // If there's a remaining line at the end, emit it as append
+    if !current_line.is_empty() {
+        result.push(("append".to_string(), strip_ansi_codes(&current_line)));
+    }
+    
+    result
+}
 
 #[tauri::command]
 async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
@@ -365,9 +452,23 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
         };
 
         if let Some(stdout) = child.stdout.take() {
-            let reader = BufReader::new(stdout);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = app.emit("build-output", line);
+            let mut reader = BufReader::new(stdout);
+            let mut buffer = [0; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        let events = parse_streaming_output(&buffer[..n]);
+                        for (kind, text) in events {
+                            let event = LogEvent { kind, text };
+                            let _ = app.emit("build-output", event);
+                        }
+                    }
+                    Err(e) => {
+                        let _ = app.emit("build-error", e.to_string());
+                        break;
+                    }
+                }
             }
         }
 
@@ -621,13 +722,21 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         let _ = docker_command()
             .args(["start", &container_name])
             .output();
-        let _ = app.emit("init-progress", "Existing environment found, starting it...".to_string());
+        let event = LogEvent {
+            kind: "append".to_string(),
+            text: "Existing environment found, starting it...".to_string(),
+        };
+        let _ = app.emit("init-progress", event);
         let _ = app.emit("init-finished", workspace_dir.clone());
         return Ok(());
     }
 
     tauri::async_runtime::spawn(async move {
-        let _ = app.emit("init-progress", "Building Docker image (this may take several minutes on first run)...".to_string());
+        let event = LogEvent {
+            kind: "append".to_string(),
+            text: "Building Docker image (this may take several minutes on first run)...".to_string(),
+        };
+        let _ = app.emit("init-progress", event);
 
         let build_child = docker_command()
             .args(["build", "-t", "robotics-studio-ros2", &workspace_dir])
@@ -644,9 +753,20 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         };
 
         if let Some(stderr) = build_child.stderr.take() {
-            let reader = BufReader::new(stderr);
-            for line in reader.lines().map_while(Result::ok) {
-                let _ = app.emit("init-progress", line);
+            let mut reader = BufReader::new(stderr);
+            let mut buffer = [0; 4096];
+            loop {
+                match reader.read(&mut buffer) {
+                    Ok(0) => break, // EOF
+                    Ok(n) => {
+                        let events = parse_streaming_output(&buffer[..n]);
+                        for (kind, text) in events {
+                            let event = LogEvent { kind, text };
+                            let _ = app.emit("init-progress", event);
+                        }
+                    }
+                    Err(_) => break,
+                }
             }
         }
 
@@ -663,7 +783,11 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
             return;
         }
 
-        let _ = app.emit("init-progress", "Image built. Starting container...".to_string());
+        let event = LogEvent {
+            kind: "append".to_string(),
+            text: "Image built. Starting container...".to_string(),
+        };
+        let _ = app.emit("init-progress", event);
 
         let run_output = docker_command()
             .args([
@@ -691,7 +815,11 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
 
         let container_id = String::from_utf8_lossy(&run_output.stdout).trim().to_string();
 
-        let _ = app.emit("init-progress", "Container started. Launching ROS engine service...".to_string());
+        let event = LogEvent {
+            kind: "append".to_string(),
+            text: "Container started. Launching ROS engine service...".to_string(),
+        };
+        let _ = app.emit("init-progress", event);
 
         std::thread::sleep(std::time::Duration::from_secs(2));
 
@@ -812,6 +940,190 @@ fn load_ai_settings(app: AppHandle) -> Result<Option<AIProviderSettings>, String
     let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let settings: AIProviderSettings = serde_json::from_str(&json).map_err(|e| e.to_string())?;
     Ok(Some(settings))
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct KeyBinding {
+    id: String,
+    keys: String,
+    description: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct KeybindingsData {
+    keybindings: Vec<KeyBinding>,
+}
+
+fn keybindings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir.join("keybindings.json"))
+}
+
+#[tauri::command]
+fn save_keybindings(app: AppHandle, keybindings: Vec<KeyBinding>) -> Result<(), String> {
+    let path = keybindings_path(&app)?;
+    let data = KeybindingsData { keybindings };
+    let json = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn load_keybindings(app: AppHandle) -> Result<Option<Vec<KeyBinding>>, String> {
+    let path = keybindings_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let data: KeybindingsData = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    Ok(Some(data.keybindings))
+}
+
+#[derive(Serialize)]
+struct SystemSpecs {
+    ram_gb: u64,
+    cpu_cores: u32,
+    gpu_name: Option<String>,
+    gpu_vram_gb: Option<u64>,
+}
+
+#[tauri::command]
+fn get_system_specs() -> Result<SystemSpecs, String> {
+    // Get total RAM using system_info-like approach via command line
+    let ram_gb = get_total_ram_gb()?;
+    let cpu_cores = get_cpu_count();
+    let gpu_info = get_gpu_info();
+    let gpu_name = gpu_info.as_ref().map(|(name, _)| name.clone());
+    let gpu_vram_gb = gpu_info.and_then(|(_, vram)| vram);
+
+    Ok(SystemSpecs {
+        ram_gb,
+        cpu_cores,
+        gpu_name,
+        gpu_vram_gb,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn get_total_ram_gb() -> Result<u64, String> {
+    let output = std::process::Command::new("sysctl")
+        .args(&["-n", "hw.memsize"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let bytes_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let bytes: u64 = bytes_str.parse().map_err(|_| "Failed to parse RAM size".to_string())?;
+    Ok(bytes / (1024 * 1024 * 1024))
+}
+
+#[cfg(target_os = "linux")]
+fn get_total_ram_gb() -> Result<u64, String> {
+    let output = std::process::Command::new("grep")
+        .args(&["MemTotal", "/proc/meminfo"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = output_str.split_whitespace().collect();
+    if parts.len() >= 2 {
+        let kb: u64 = parts[1].parse().map_err(|_| "Failed to parse RAM size".to_string())?;
+        Ok(kb / (1024 * 1024))
+    } else {
+        Err("Failed to parse /proc/meminfo".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_total_ram_gb() -> Result<u64, String> {
+    let output = std::process::Command::new("wmic")
+        .args(&["ComputerSystem", "get", "TotalPhysicalMemory"])
+        .output()
+        .map_err(|e| e.to_string())?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    for line in output_str.lines() {
+        if let Ok(bytes) = line.trim().parse::<u64>() {
+            return Ok(bytes / (1024 * 1024 * 1024));
+        }
+    }
+    Err("Failed to parse RAM from wmic output".to_string())
+}
+
+fn get_cpu_count() -> u32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(1)
+}
+
+#[cfg(target_os = "macos")]
+fn get_gpu_info() -> Option<(String, Option<u64>)> {
+    // Try to get GPU info from system_profiler on macOS
+    let output = std::process::Command::new("system_profiler")
+        .args(&["SPDisplaysDataType"])
+        .output()
+        .ok()?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    
+    // Simple parsing: look for "Chip Model:" and "VRAM:"
+    let mut gpu_name = None;
+    let mut vram_gb = None;
+    
+    for line in output_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Chip Model:") {
+            gpu_name = trimmed.strip_prefix("Chip Model:").map(|s| s.trim().to_string());
+        }
+        if trimmed.starts_with("VRAM") {
+            // Try to extract VRAM amount (e.g., "10 GB")
+            if let Some(vram_part) = trimmed.split(": ").nth(1) {
+                if let Some(num_part) = vram_part.split_whitespace().next() {
+                    vram_gb = num_part.parse::<u64>().ok();
+                }
+            }
+        }
+    }
+    
+    gpu_name.map(|name| (name, vram_gb))
+}
+
+#[cfg(target_os = "linux")]
+fn get_gpu_info() -> Option<(String, Option<u64>)> {
+    // Try lspci on Linux
+    let output = std::process::Command::new("lspci")
+        .output()
+        .ok()?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    
+    for line in output_str.lines() {
+        if line.contains("VGA") || line.contains("3D") {
+            // Extract GPU name from lspci output
+            if let Some(gpu_part) = line.split(": ").nth(1) {
+                return Some((gpu_part.to_string(), None));
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn get_gpu_info() -> Option<(String, Option<u64>)> {
+    // Try WMIC on Windows
+    let output = std::process::Command::new("wmic")
+        .args(&["path", "win32_videocontroller", "get", "name,adapterram"])
+        .output()
+        .ok()?;
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    
+    let lines: Vec<&str> = output_str.lines().collect();
+    if lines.len() > 1 {
+        let data_line = lines[1];
+        let parts: Vec<&str> = data_line.split_whitespace().collect();
+        if !parts.is_empty() {
+            let name = parts[0].to_string();
+            let vram_bytes = parts.last().and_then(|s| s.parse::<u64>().ok());
+            let vram_gb = vram_bytes.map(|b| b / (1024 * 1024 * 1024));
+            return Some((name, vram_gb));
+        }
+    }
+    None
 }
 
 use serde::{Deserialize, Serialize};
