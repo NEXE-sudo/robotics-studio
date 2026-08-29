@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { X, Lightbulb } from "lucide-react";
 import {
   KeyBinding,
   DEFAULT_KEYBINDINGS,
@@ -302,9 +303,11 @@ export default function Settings({
           }}
         >
           <h3 style={{ margin: 0 }}>Settings</h3>
-          <span style={{ cursor: "pointer", opacity: 0.7 }} onClick={onClose}>
-            ✕
-          </span>
+          <X
+            size={20}
+            style={{ cursor: "pointer", opacity: 0.7, flexShrink: 0 }}
+            onClick={onClose}
+          />
         </div>
 
         {/* Tab bar */}
@@ -676,9 +679,20 @@ export default function Settings({
                       {getModelSuggestion(systemSpecs.ram_gb)}
                       {systemSpecs.gpu_vram_gb &&
                         systemSpecs.gpu_vram_gb >= 8 && (
-                          <div style={{ marginTop: 8, opacity: 0.8 }}>
-                            💡 GPU-accelerated inference will be significantly
-                            faster than CPU-only.
+                          <div
+                            style={{
+                              marginTop: 8,
+                              opacity: 0.8,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 6,
+                            }}
+                          >
+                            <Lightbulb size={14} style={{ flexShrink: 0 }} />
+                            <span>
+                              GPU-accelerated inference will be significantly
+                              faster than CPU-only.
+                            </span>
                           </div>
                         )}
                     </div>

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { X } from "lucide-react";
 
 interface Props {
   onClose: () => void;
@@ -91,13 +92,20 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
           }}
         >
           <h3 style={{ margin: 0 }}>New Project from Template</h3>
-          <span style={{ cursor: "pointer", opacity: 0.7 }} onClick={onClose}>
-            ✕
-          </span>
+          <X
+            size={20}
+            style={{ cursor: "pointer", opacity: 0.7, flexShrink: 0 }}
+            onClick={onClose}
+          />
         </div>
 
         <label
-          style={{ display: "block", fontSize: 12, marginBottom: 4, opacity: 0.8 }}
+          style={{
+            display: "block",
+            fontSize: 12,
+            marginBottom: 4,
+            opacity: 0.8,
+          }}
         >
           Template
         </label>
@@ -131,7 +139,12 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         )}
 
         <label
-          style={{ display: "block", fontSize: 12, marginBottom: 4, opacity: 0.8 }}
+          style={{
+            display: "block",
+            fontSize: 12,
+            marginBottom: 4,
+            opacity: 0.8,
+          }}
         >
           Project name
         </label>
@@ -151,7 +164,12 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
         />
 
         <label
-          style={{ display: "block", fontSize: 12, marginBottom: 4, opacity: 0.8 }}
+          style={{
+            display: "block",
+            fontSize: 12,
+            marginBottom: 4,
+            opacity: 0.8,
+          }}
         >
           Destination folder
         </label>

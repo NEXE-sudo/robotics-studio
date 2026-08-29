@@ -13,6 +13,25 @@ import {
   parseKeybinding,
   keyEventMatches,
 } from "./keybindings";
+import {
+  X,
+  Sparkles,
+  Bot,
+  Folder,
+  FolderOpen,
+  FileText,
+  Ban,
+  Save,
+  Rocket,
+  Hammer,
+  RotateCw,
+  Play,
+  Square,
+  Settings2,
+  LoaderCircle,
+  ChevronDown,
+  ChevronUp,
+} from "lucide-react";
 
 interface FileEntry {
   name: string;
@@ -132,14 +151,27 @@ function FileTree({
           <div key={entry.path}>
             <div
               className={`file-row ${activeFilePath === entry.path ? "active" : ""}`}
-              style={{ paddingLeft: 16 + depth * 14 }}
+              style={{
+                paddingLeft: 16 + depth * 14,
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+              }}
               onClick={() =>
                 entry.is_dir
                   ? onToggleFolder(entry.path)
                   : onOpenFile(entry.path, entry.name)
               }
             >
-              <span>{entry.is_dir ? (isExpanded ? "📂" : "📁") : "📄"}</span>
+              {entry.is_dir ? (
+                isExpanded ? (
+                  <FolderOpen size={16} style={{ flexShrink: 0 }} />
+                ) : (
+                  <Folder size={16} style={{ flexShrink: 0 }} />
+                )
+              ) : (
+                <FileText size={16} style={{ flexShrink: 0 }} />
+              )}
               <span>{entry.name}</span>
             </div>
             {entry.is_dir && isExpanded && childrenByPath[entry.path] && (
@@ -694,7 +726,7 @@ function App() {
       setBuilding(false);
       setBuildOutput((prev) => [
         ...prev,
-        event.payload ? "✅ Build succeeded" : "❌ Build failed",
+        event.payload ? "[✓ Build succeeded]" : "[✗ Build failed]",
       ]);
     });
 
@@ -769,14 +801,9 @@ function App() {
       }}
     >
       <style>{`
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 10px; height: 10px; }
-        ::-webkit-scrollbar-thumb { background: #3e3e42; border-radius: 5px; }
-        ::-webkit-scrollbar-thumb:hover { background: #55555a; }
-        ::-webkit-scrollbar-track { background: transparent; }
         .ide-btn {
           background: #2d2d30; color: #ddd; border: 1px solid #3c3c3c;
-          border-radius: 4px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+          border-radius: 4px; padding: 4px 10px; font-size: var(--font-sm); cursor: pointer;
           transition: background 0.12s, border-color 0.12s;
         }
         .ide-btn:hover { background: #3a3a3d; border-color: #4fc3f7; }
@@ -785,38 +812,44 @@ function App() {
         .ide-btn.primary { border-color: #4fc3f7; color: #4fc3f7; }
         .ide-btn.danger:hover { border-color: #e08080; color: #e08080; }
         .activity-icon {
-          width: 48px; height: 44px; display: flex; align-items: center;
-          justify-content: center; font-size: 18px; cursor: pointer;
+          width: var(--activity-bar-width); height: auto; aspect-ratio: 1;
+          display: flex; align-items: center; justify-content: center; 
+          font-size: var(--activity-icon-size); cursor: pointer;
           color: #858585; border-left: 2px solid transparent; position: relative;
         }
         .activity-icon:hover { color: #fff; }
         .activity-icon.active { color: #fff; border-left: 2px solid #4fc3f7; background: #1e1e1e; }
         .file-row {
-          padding: 3px 10px 3px 16px; font-size: 13px; cursor: pointer;
-          display: flex; align-items: center; gap: 6px; white-space: nowrap;
+          padding: var(--spacing-xs) var(--spacing-base) var(--spacing-xs) var(--spacing-lg);
+          font-size: var(--font-md); cursor: pointer;
+          display: flex; align-items: center; gap: var(--spacing-sm); white-space: nowrap;
           border-left: 2px solid transparent;
         }
         .file-row:hover { background: #2a2d2e; }
         .file-row.active { background: #37373d; border-left: 2px solid #4fc3f7; }
         .tab {
-          display: flex; align-items: center; gap: 6px; padding: 0 8px 0 12px;
-          height: 34px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
-          border-right: 1px solid #1e1e1e; color: #969696; position: relative; flex-shrink: 0;
+          display: flex; align-items: center; gap: var(--spacing-sm);
+          padding: 0 var(--spacing-md) 0 var(--spacing-lg);
+          height: var(--tab-height); font-size: var(--tab-font-size); cursor: pointer;
+          white-space: nowrap; border-right: 1px solid #1e1e1e;
+          color: #969696; position: relative; flex-shrink: 0;
         }
         .tab.active { background: #1e1e1e; color: #fff; }
         .tab:hover { color: #fff; }
         .tab-close {
-          width: 16px; height: 16px; border-radius: 3px; display: flex;
-          align-items: center; justify-content: center; font-size: 12px; opacity: 0.6;
+          width: var(--icon-sm); height: var(--icon-sm); border-radius: 3px; 
+          display: flex; align-items: center; justify-content: center; 
+          opacity: 0.6; flex-shrink: 0;
         }
         .tab-close:hover { background: #4a4a4d; opacity: 1; }
-        .resizer-v { width: 4px; cursor: col-resize; flex-shrink: 0; background: transparent; }
+        .resizer-v { width: var(--resizer-size); cursor: col-resize; flex-shrink: 0; background: transparent; }
         .resizer-v:hover, .resizer-v:active { background: #4fc3f7; }
-        .resizer-h { height: 4px; cursor: row-resize; flex-shrink: 0; background: transparent; }
+        .resizer-h { height: var(--resizer-size); cursor: row-resize; flex-shrink: 0; background: transparent; }
         .resizer-h:hover, .resizer-h:active { background: #4fc3f7; }
         .bottom-tab {
-          padding: 6px 14px; font-size: 12px; cursor: pointer; user-select: none;
-          border-right: 1px solid #333; display: flex; align-items: center; gap: 6px;
+          padding: var(--spacing-sm) var(--spacing-md); font-size: var(--font-sm);
+          cursor: pointer; user-select: none; border-right: 1px solid #333;
+          display: flex; align-items: center; gap: var(--spacing-sm);
         }
         .bottom-tab.active { background: #1e1e1e; color: #fff; }
         .bottom-tab:not(.active) { color: #888; }
@@ -863,10 +896,11 @@ function App() {
           {rosConnected ? "● ROS Connected" : "○ ROS Disconnected"}
         </span>
         <button className="ide-btn" onClick={pickFolder}>
-          📁 Open Folder
+          <Folder size={14} style={{ marginRight: 4 }} /> Open Folder
         </button>
         <button className="ide-btn" onClick={() => setNewProjectOpen(true)}>
-          ✨ New Project from Template
+          <Sparkles size={14} style={{ marginRight: 4 }} /> New Project from
+          Template
         </button>
         <button
           className="ide-btn"
@@ -878,13 +912,24 @@ function App() {
               : "Open a folder first"
           }
         >
-          🚫 .aiignore
+          <Ban size={14} style={{ marginRight: 4 }} /> .aiignore
         </button>
         <button className="ide-btn" onClick={pickRosWorkspace}>
-          🤖 {rosWorkspacePath ? "Workspace Set" : "Select ROS Workspace"}
+          <Bot size={14} style={{ marginRight: 4 }} />{" "}
+          {rosWorkspacePath ? "Workspace Set" : "Select ROS Workspace"}
         </button>
         <button onClick={initializeRosEnvironment} disabled={initializing}>
-          {initializing ? "⏳ Setting up..." : "🚀 Initialize ROS Environment"}
+          {initializing ? (
+            <>
+              <Rocket size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
+              Setting up...
+            </>
+          ) : (
+            <>
+              <Rocket size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
+              Initialize ROS Environment
+            </>
+          )}
         </button>
         <div
           style={{ width: 1, height: 20, background: "#444", margin: "0 4px" }}
@@ -894,7 +939,17 @@ function App() {
           onClick={triggerBuild}
           disabled={building}
         >
-          {building ? "⏳ Building…" : "🔨 Build"}
+          {building ? (
+            <>
+              <Hammer size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
+              Building…
+            </>
+          ) : (
+            <>
+              <Hammer size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
+              Build
+            </>
+          )}
         </button>
         <select
           value={worldPath ?? "default"}
@@ -911,13 +966,13 @@ function App() {
           <option value="custom">Custom World...</option>
         </select>
         <button className="ide-btn" onClick={startSim}>
-          ▶️ Start Sim
+          <Play size={14} style={{ marginRight: 4 }} /> Start Sim
         </button>
         <button className="ide-btn danger" onClick={stopSim}>
-          ⏹ Stop Sim
+          <Square size={14} style={{ marginRight: 4 }} /> Stop Sim
         </button>
         <button className="ide-btn" onClick={resetSim}>
-          🔄 Reset Sim
+          <RotateCw size={14} style={{ marginRight: 4 }} /> Reset Sim
         </button>
         <div style={{ flex: 1 }} />
         <button
@@ -927,7 +982,7 @@ function App() {
             !activeFile || activeFile.content === activeFile.savedContent
           }
         >
-          💾 Save
+          <Save size={14} style={{ marginRight: 4 }} /> Save
         </button>
       </div>
 
@@ -936,7 +991,7 @@ function App() {
         {/* Activity bar */}
         <div
           style={{
-            width: 48,
+            width: "var(--activity-bar-width)",
             background: "#252526",
             borderRight: "1px solid #000",
             display: "flex",
@@ -955,10 +1010,10 @@ function App() {
               setSidebarCollapsed(false);
             }}
           >
-            📁
+            <Folder size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
           </div>
           <div className="activity-icon" title="Search">
-            🔍
+            <FolderOpen size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
           </div>
           <div
             className={`activity-icon ${
@@ -971,7 +1026,7 @@ function App() {
               setSidebarCollapsed(false);
             }}
           >
-            🤖
+            <Bot size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
           </div>
           <div style={{ flex: 1 }} />
           <div
@@ -979,7 +1034,7 @@ function App() {
             title="AI Assistant"
             onClick={() => setChatCollapsed((c) => !c)}
           >
-            ✨
+            <Sparkles size={18} style={{ width: "var(--icon-md)", height: "var(--icon-md)" }} />
           </div>
         </div>
 
@@ -1163,19 +1218,35 @@ function App() {
                   onClick={() => setActiveFilePath(f.path)}
                   title={f.path}
                 >
-                  <span>📄</span>
+                  <FileText size={14} style={{ flexShrink: 0 }} />
                   <span>{f.name}</span>
-                  <span
+                  <div
                     className="tab-close"
                     onClick={(e) => closeTab(f.path, e)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      cursor: "pointer",
+                    }}
                   >
-                    {dirty ? "●" : "✕"}
-                  </span>
+                    {dirty ? (
+                      <span style={{ fontSize: 8, opacity: 0.8 }}>●</span>
+                    ) : (
+                      <X size={12} />
+                    )}
+                  </div>
                 </div>
               );
             })}
             {openFiles.length === 0 && (
-              <div style={{ padding: "8px 14px", fontSize: 12, opacity: 0.4 }}>
+              <div
+                style={{
+                  padding: "var(--spacing-base) var(--spacing-lg)",
+                  fontSize: "var(--font-sm)",
+                  opacity: 0.4,
+                }}
+              >
                 No files open
               </div>
             )}
@@ -1213,7 +1284,9 @@ function App() {
                   gap: 8,
                 }}
               >
-                <div style={{ fontSize: 32, opacity: 0.5 }}>🤖</div>
+                <div style={{ opacity: 0.5, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  <Bot size={32} />
+                </div>
                 <div>Select a file from the Explorer to start editing</div>
               </div>
             )}
@@ -1248,18 +1321,22 @@ function App() {
                   justifyContent: "space-between",
                 }}
               >
-                <span>✨ AI Assistant</span>
-                <span
-                  style={{ cursor: "pointer", opacity: 0.7, fontSize: 11 }}
-                  onClick={() => setSettingsOpen(true)}
-                >
-                  ⚙️ Settings
+                <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <Sparkles size={12} />
+                  <span>AI Assistant</span>
                 </span>
                 <span
-                  style={{ cursor: "pointer", opacity: 0.7 }}
+                  style={{ cursor: "pointer", opacity: 0.7, fontSize: 11, display: "flex", alignItems: "center", gap: 4 }}
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  <Settings2 size={12} />
+                  <span>Settings</span>
+                </span>
+                <span
+                  style={{ cursor: "pointer", opacity: 0.7, display: "flex", alignItems: "center" }}
                   onClick={() => setChatCollapsed(true)}
                 >
-                  ✕
+                  <X size={12} />
                 </span>
               </div>
               <div
@@ -1305,7 +1382,7 @@ function App() {
                           style={{ marginTop: 6, fontSize: 11 }}
                           onClick={() => saveGeneratedCode(codeMatch[1], isXml)}
                         >
-                          💾 Save to file
+                          <Save size={12} style={{ marginRight: 4 }} /> Save to file
                         </button>
                       )}
                     </div>
@@ -1456,7 +1533,10 @@ function App() {
                     </>
                   )}
                   {tab === "environment" && (
-                    <>Environment Setup{initializing && <span>⏳</span>}</>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      Environment Setup
+                      {initializing && <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />}
+                    </span>
                   )}
                   {activeTab === "dashboard" && (
                     <div style={{ padding: 12, fontSize: 12 }}>
@@ -1510,7 +1590,10 @@ function App() {
                     </div>
                   )}
                   {tab === "build" && (
-                    <>Build Output{building && <span>⏳</span>}</>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                      Build Output
+                      {building && <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />}
+                    </span>
                   )}
                   {tab === "sim" && "3D View"}
                   {tab === "tf" && "TF Tree"}
@@ -1525,11 +1608,13 @@ function App() {
                   fontSize: 13,
                   cursor: "pointer",
                   opacity: 0.6,
+                  display: "flex",
+                  alignItems: "center",
                 }}
                 title="Close panel (⌘`)"
                 onClick={() => setBottomCollapsed(true)}
               >
-                ⌄
+                <ChevronDown size={14} />
               </span>
             </div>
 
@@ -1689,10 +1774,12 @@ function App() {
             color: "#888",
             cursor: "pointer",
             flexShrink: 0,
+            gap: 6,
           }}
           onClick={() => setBottomCollapsed(false)}
         >
-          ⌃ Show panel (ROS Log · Build Output · Environment · 3D View)
+          <ChevronUp size={12} />
+          <span>Show panel (ROS Log · Build Output · Environment · 3D View)</span>
         </div>
       )}
 
@@ -1719,7 +1806,12 @@ function App() {
             ? `Workspace: ${rosWorkspacePath}`
             : "No ROS workspace"}
         </div>
-        {building && <div className="status-item">⏳ Building…</div>}
+        {building && (
+          <div className="status-item" style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <LoaderCircle size={12} style={{ animation: "spin 1s linear infinite" }} />
+            Building…
+          </div>
+        )}
         <div style={{ flex: 1 }} />
         {dirtyCount > 0 && (
           <div className="status-item">{dirtyCount} unsaved</div>
@@ -1732,16 +1824,19 @@ function App() {
           <div
             className="status-item"
             title="This file matches a pattern in .aiignore and is excluded from AI context"
-            style={{ color: "#e0b050" }}
+            style={{ color: "#e0b050", display: "inline-flex", alignItems: "center", gap: 4 }}
           >
-            🚫 AI-ignored
+            <Ban size={12} />
+            AI-ignored
           </div>
         )}
         <div
           className="status-item clickable"
           onClick={() => setChatCollapsed((c) => !c)}
+          style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
         >
-          ✨ Assistant
+          <Sparkles size={12} />
+          Assistant
         </div>
       </div>
 
@@ -1768,12 +1863,14 @@ function App() {
         >
           <div
             style={{
-              display: "inline-block",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
               animation: "spin 1s linear infinite",
               fontSize: 14,
             }}
           >
-            ⚙️
+            <Settings2 size={14} />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ marginBottom: 4, fontWeight: 600, color: "#4fc3f7" }}>
@@ -1807,7 +1904,7 @@ function App() {
               e.currentTarget.style.opacity = "0.6";
             }}
           >
-            ✕
+            <X size={14} />
           </button>
         </div>
       )}

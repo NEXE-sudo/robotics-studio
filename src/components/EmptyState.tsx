@@ -1,4 +1,5 @@
 import React from "react";
+import { Bot, Folder } from "lucide-react";
 
 interface EmptyStateProps {
   onOpenFolder: () => void;
@@ -26,12 +27,36 @@ const EmptyState: React.FC<EmptyStateProps> = ({
         userSelect: "none",
       }}
     >
-      <div style={{ fontSize: 48, marginBottom: 16, opacity: 0.9 }}>🤖</div>
-      <h2 style={{ margin: "0 0 8px 0", fontSize: 22, fontWeight: 500, color: "#fff" }}>
+      <div
+        style={{
+          marginBottom: 16,
+          opacity: 0.9,
+          display: "flex",
+          justifyContent: "center",
+        }}
+      >
+        <Bot size={48} />
+      </div>
+      <h2
+        style={{
+          margin: "0 0 8px 0",
+          fontSize: 22,
+          fontWeight: 500,
+          color: "#fff",
+        }}
+      >
         Robotics Studio
       </h2>
-      <p style={{ margin: "0 0 28px 0", fontSize: 13, color: "#888", maxWidth: 460 }}>
-        Next-Generation Robotics Development Environment for ROS 2, Gazebo Simulation, and Real-Time Introspection.
+      <p
+        style={{
+          margin: "0 0 28px 0",
+          fontSize: 13,
+          color: "#888",
+          maxWidth: 460,
+        }}
+      >
+        Next-Generation Robotics Development Environment for ROS 2, Gazebo
+        Simulation, and Real-Time Introspection.
       </p>
 
       <div
@@ -64,7 +89,18 @@ const EmptyState: React.FC<EmptyStateProps> = ({
             e.currentTarget.style.background = "#252526";
           }}
         >
-          <div style={{ fontSize: 18, marginBottom: 6 }}>📁 Open Folder</div>
+          <div
+            style={{
+              fontSize: 18,
+              marginBottom: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <Folder size={18} style={{ flexShrink: 0 }} />
+            <span>Open Folder</span>
+          </div>
           <div style={{ fontSize: 12, color: "#888" }}>
             Browse and edit packages, launch files, and URDF models.
           </div>
@@ -90,8 +126,19 @@ const EmptyState: React.FC<EmptyStateProps> = ({
             e.currentTarget.style.background = "#252526";
           }}
         >
-          <div style={{ fontSize: 18, marginBottom: 6 }}>
-            🤖 {rosWorkspacePath ? "Change Workspace" : "Select ROS Workspace"}
+          <div
+            style={{
+              fontSize: 18,
+              marginBottom: 6,
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+            }}
+          >
+            <Bot size={18} style={{ flexShrink: 0 }} />
+            <span>
+              {rosWorkspacePath ? "Change Workspace" : "Select ROS Workspace"}
+            </span>
           </div>
           <div style={{ fontSize: 12, color: "#888" }}>
             {rosWorkspacePath
@@ -102,10 +149,18 @@ const EmptyState: React.FC<EmptyStateProps> = ({
       </div>
 
       <div style={{ fontSize: 12, color: "#666", display: "flex", gap: 20 }}>
-        <span><kbd style={kbdStyle}>⌘S</kbd> Save File</span>
-        <span><kbd style={kbdStyle}>⌘B</kbd> Toggle Sidebar</span>
-        <span><kbd style={kbdStyle}>⌘`</kbd> Toggle Bottom Panel</span>
-        <span><kbd style={kbdStyle}>⌘W</kbd> Close Tab</span>
+        <span>
+          <kbd style={kbdStyle}>⌘S</kbd> Save File
+        </span>
+        <span>
+          <kbd style={kbdStyle}>⌘B</kbd> Toggle Sidebar
+        </span>
+        <span>
+          <kbd style={kbdStyle}>⌘`</kbd> Toggle Bottom Panel
+        </span>
+        <span>
+          <kbd style={kbdStyle}>⌘W</kbd> Close Tab
+        </span>
       </div>
     </div>
   );

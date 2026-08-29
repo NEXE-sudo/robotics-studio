@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { ArrowUp, ArrowDown, RotateCcw, RotateCw, Square } from "lucide-react";
 
 interface OdometryUpdate {
   node: string;
@@ -285,30 +286,33 @@ export function RobotControls({
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0.3, 0)}
         >
-          ↑
+          <ArrowUp size={20} />
         </button>
         <div />
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, 0.5)}
         >
-          ↺
+          <RotateCcw size={20} />
         </button>
-        <button style={btnStyle} onClick={() => onCommand(selectedRobot!, 0, 0)}>
-          ■
+        <button
+          style={btnStyle}
+          onClick={() => onCommand(selectedRobot!, 0, 0)}
+        >
+          <Square size={16} />
         </button>
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, -0.5)}
         >
-          ↻
+          <RotateCw size={20} />
         </button>
         <div />
         <button
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, -0.3, 0)}
         >
-          ↓
+          <ArrowDown size={20} />
         </button>
         <div />
       </div>

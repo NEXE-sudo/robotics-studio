@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { Sparkles } from "lucide-react";
 
 interface TfUpdate {
   parent_frame: string;
@@ -85,7 +86,11 @@ export default function TFTree({ onExplain }: Props) {
                     e.currentTarget.style.opacity = "0.8";
                   }}
                 >
-                  ✨ Explain
+                  <Sparkles
+                    size={12}
+                    style={{ marginRight: 4, display: "inline" }}
+                  />{" "}
+                  Explain
                 </span>
               )}
               <div style={{ paddingLeft: 20, opacity: 0.6, fontSize: 11 }}>
