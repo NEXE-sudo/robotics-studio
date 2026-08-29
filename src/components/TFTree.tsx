@@ -13,7 +13,11 @@ interface TfUpdate {
   qw: number;
 }
 
-export default function TFTree() {
+interface Props {
+  onExplain?: (tf: TfUpdate) => void;
+}
+
+export default function TFTree({ onExplain }: Props) {
   const [transforms, setTransforms] = useState<Record<string, TfUpdate>>({});
   const isActiveRef = useRef(true);
 
@@ -62,6 +66,21 @@ export default function TFTree() {
           {byParent[parent].map((t) => (
             <div key={t.child_frame} style={{ paddingLeft: 20, opacity: 0.9 }}>
               └─ <span style={{ color: "#81c784" }}>{t.child_frame}</span>
+              {onExplain && (
+                <span
+                  onClick={() => onExplain(t)}
+                  title="Explain this frame with AI"
+                  style={{
+                    marginLeft: 8,
+                    fontSize: 10,
+                    color: "#4fc3f7",
+                    opacity: 0.8,
+                    cursor: "pointer",
+                  }}
+                >
+                  ✨ Explain
+                </span>
+              )}
               <div style={{ paddingLeft: 20, opacity: 0.6, fontSize: 11 }}>
                 pos: ({t.x.toFixed(3)}, {t.y.toFixed(3)}, {t.z.toFixed(3)})
               </div>

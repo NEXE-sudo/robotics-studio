@@ -1,5 +1,64 @@
 use std::fs;
 
+/// Very small gitignore-style pattern matcher, supporting the common cases:
+///   *.ext          — match by extension/suffix anywhere in the filename
+///   dirname/       — match any path that has this directory component
+///   exact/path.txt — match a path ending with this exact relative suffix
+///   # comment      — ignored
+///   blank lines    — ignored
+/// This intentionally does not implement full gitignore semantics (negation,
+/// nested `**`, anchoring with a leading `/`) — just enough for excluding
+/// secrets/config files from AI context. Extend here if richer patterns
+/// (via the `ignore` crate) are needed later.
+fn matches_aiignore_pattern(rel_path: &str, pattern: &str) -> bool {
+    let rel_path = rel_path.replace('\\', "/");
+    let pattern = pattern.trim();
+    if pattern.is_empty() || pattern.starts_with('#') {
+        return false;
+    }
+
+    if let Some(dir) = pattern.strip_suffix('/') {
+        return rel_path
+            .split('/')
+            .any(|component| component == dir);
+    }
+
+    if let Some(ext) = pattern.strip_prefix("*.") {
+        return rel_path
+            .rsplit('/')
+            .next()
+            .map_or(false, |name| name.ends_with(&format!(".{}", ext)));
+    }
+
+    if pattern.contains('*') {
+        // Basic single-`*` wildcard support: split on '*' and check prefix/suffix.
+        if let Some((prefix, suffix)) = pattern.split_once('*') {
+            let filename = rel_path.rsplit('/').next().unwrap_or(&rel_path);
+            return filename.starts_with(prefix) && filename.ends_with(suffix);
+        }
+    }
+
+    rel_path == pattern || rel_path.ends_with(&format!("/{}", pattern))
+}
+
+/// Loads `.aiignore` from the given workspace root, if present, and returns
+/// whether `file_path` (absolute) should be excluded from AI context.
+fn is_ignored_by_aiignore(workspace_root: &str, file_path: &str) -> bool {
+    let ignore_file = std::path::Path::new(workspace_root).join(".aiignore");
+    let Ok(contents) = fs::read_to_string(&ignore_file) else {
+        return false;
+    };
+
+    let rel_path = std::path::Path::new(file_path)
+        .strip_prefix(workspace_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| file_path.to_string());
+
+    contents
+        .lines()
+        .any(|pattern| matches_aiignore_pattern(&rel_path, pattern))
+}
+
 #[tauri::command]
 fn read_file(path: String) -> Result<String, String> {
     fs::read_to_string(&path).map_err(|e| e.to_string())
@@ -42,9 +101,10 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
-            save_ai_settings, load_ai_settings, list_templates, create_project_from_template
+            save_ai_settings, load_ai_settings, list_templates, create_project_from_template, check_aiignore
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -825,8 +885,10 @@ async fn ask_ai(
     user_message: String,
     open_file_content: Option<String>,
     open_file_path: Option<String>,
+    workspace_root: Option<String>,
     recent_ros_events: Vec<String>,
     recent_build_output: Vec<String>,
+    tf_context: Option<String>,
     mode: Option<String>,
 ) -> Result<String, String> {
     let settings = load_ai_settings(app)?
@@ -865,6 +927,21 @@ async fn ask_ai(
              root cause, then give a concrete fix. Reference the actual error text from the \
              context below rather than generic advice.\n\n"
         ),
+        Some("explain_tf") => String::from(
+            "You are a ROS 2 / robotics TF (transform tree) assistant. The user wants a specific \
+             TF parent→child frame relationship explained in plain terms. Using the frame names \
+             and the transform values (translation and quaternion rotation) given in the context \
+             below, explain: (1) what this parent/child frame pair likely represents physically \
+             on the robot (e.g., sensor mount, wheel, arm link) based on naming conventions and \
+             standard ROS 2 REP-105/REP-103 frame conventions if the names match common patterns \
+             (base_link, odom, map, camera_link, laser, imu_link, etc.), (2) what the given \
+             translation and rotation values mean in practical terms (e.g., 'this frame is offset \
+             30cm forward and rotated 90° about Z'), and (3) anything that looks unusual or \
+             worth double-checking (e.g., an unexpectedly large offset, a non-normalized \
+             quaternion, or a frame pair that doesn't follow common conventions). Be concise — \
+             a few short paragraphs, not an exhaustive lecture. Do not invent details about the \
+             robot that aren't supported by the frame names or values given.\n\n"
+        ),
         _ => String::from(
             "You are an AI coding assistant. Answer the user's question directly and accurately. \
              Only reference ROS 2, robotics concepts, or the workspace context below if it is \
@@ -877,11 +954,28 @@ async fn ask_ai(
         system_context.push_str("This workspace appears to involve ROS 2 development.\n\n");
     }
 
-    if let Some(path) = &open_file_path {
+    let file_is_ignored = match (&open_file_path, &workspace_root) {
+        (Some(path), Some(root)) => is_ignored_by_aiignore(root, path),
+        _ => false,
+    };
+
+    if file_is_ignored {
+        context.push_str(
+            "Currently open file: [path excluded — matches a pattern in .aiignore]\n\n",
+        );
+    } else if let Some(path) = &open_file_path {
         context.push_str(&format!("Currently open file: {}\n\n", path));
     }
-    if let Some(content) = &open_file_content {
+
+    if file_is_ignored {
+        context.push_str(
+            "File contents: [excluded from AI context — this file matches a pattern in .aiignore]\n\n",
+        );
+    } else if let Some(content) = &open_file_content {
         context.push_str(&format!("File contents:\n```\n{}\n```\n\n", content));
+    }
+    if let Some(tf) = &tf_context {
+        context.push_str(&format!("TF frame data:\n{}\n\n", tf));
     }
     if !recent_ros_events.is_empty() {
         context.push_str("Recent ROS 2 runtime events:\n");
@@ -955,6 +1049,11 @@ async fn ask_ai(
         }
         other => Err(format!("Unknown provider: {}", other)),
     }
+}
+
+#[tauri::command]
+fn check_aiignore(workspace_root: String, file_path: String) -> bool {
+    is_ignored_by_aiignore(&workspace_root, &file_path)
 }
 
 #[tauri::command]

@@ -5,6 +5,7 @@ import RobotView, { RobotControls } from "./components/RobotView";
 import { listen, emit } from "@tauri-apps/api/event";
 import TFTree from "./components/TFTree";
 import Settings from "./components/Settings";
+import NewProjectModal from "./components/NewProjectModal";
 import { open, save } from "@tauri-apps/plugin-dialog";
 
 interface FileEntry {
@@ -119,9 +120,32 @@ function App() {
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const activeFile = openFiles.find((f) => f.path === activeFilePath) ?? null;
 
+  useEffect(() => {
+    if (!activeFile || !currentPath) {
+      setActiveFileIgnored(false);
+      return;
+    }
+    let cancelled = false;
+    invoke<boolean>("check_aiignore", {
+      workspaceRoot: currentPath,
+      filePath: activeFile.path,
+    })
+      .then((ignored) => {
+        if (!cancelled) setActiveFileIgnored(ignored);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveFileIgnored(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeFile?.path, currentPath]);
+
   // --- ROS workspace (for build/sim commands) ---
   const [rosWorkspacePath, setRosWorkspacePath] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [newProjectOpen, setNewProjectOpen] = useState(false);
+  const [activeFileIgnored, setActiveFileIgnored] = useState(false);
   const [worldPath, setWorldPath] = useState<string | null>(null); // null = bundled default
   const [availableRobots, setAvailableRobots] = useState<string[]>([]);
   const [logFilter, setLogFilter] = useState("");
@@ -215,6 +239,14 @@ function App() {
     }
   };
 
+  const openCreatedProject = async (projectPath: string) => {
+    setCurrentPath(projectPath);
+    const result = await invoke<FileEntry[]>("list_dir", { path: projectPath });
+    setEntries(result);
+    setChildrenByPath({});
+    setExpandedPaths(new Set());
+  };
+
   const toggleFolder = async (path: string) => {
     setExpandedPaths((prev) => {
       const next = new Set(prev);
@@ -244,6 +276,25 @@ function App() {
       { path, name, content: text, savedContent: text },
     ]);
     setActiveFilePath(path);
+  };
+
+  const openAiignore = async () => {
+    if (!currentPath) return;
+    const aiignorePath = `${currentPath}/.aiignore`;
+    try {
+      await openFile(aiignorePath, ".aiignore");
+    } catch {
+      // Doesn't exist yet — seed it with a sensible starter template, then open it.
+      const starter =
+        "# Files listed here are excluded from AI chat/context in Robotics Studio.\n" +
+        "# One pattern per line. Supports: *.ext, dirname/, exact/relative/path\n\n" +
+        "*.env\n" +
+        "secrets.yaml\n" +
+        "*.pem\n" +
+        "*.key\n";
+      await invoke("write_file", { path: aiignorePath, contents: starter });
+      await openFile(aiignorePath, ".aiignore");
+    }
   };
 
   const closeTab = (path: string, e?: React.MouseEvent) => {
@@ -370,7 +421,11 @@ function App() {
   };
 
   // ---------- AI chat ----------
-  const sendChatMessage = async (overrideMessage?: string, mode?: string) => {
+  const sendChatMessage = async (
+    overrideMessage?: string,
+    mode?: string,
+    tfContext?: string,
+  ) => {
     const question = overrideMessage ?? chatInput;
     if (!question.trim()) return;
     setChatHistory((prev) => [...prev, { role: "user", text: question }]);
@@ -382,8 +437,10 @@ function App() {
         userMessage: question,
         openFileContent: activeFile?.content || null,
         openFilePath: activeFile?.path || null,
+        workspaceRoot: currentPath ?? null,
         recentRosEvents: rosEvents,
         recentBuildOutput: buildOutput,
+        tfContext: tfContext ?? null,
         mode: mode ?? null,
       });
       setChatHistory((prev) => [
@@ -402,6 +459,31 @@ function App() {
 
   const quickAction = (mode: string, prompt: string) => {
     sendChatMessage(prompt, mode);
+  };
+
+  const explainTfFrame = (tf: {
+    parent_frame: string;
+    child_frame: string;
+    x: number;
+    y: number;
+    z: number;
+    qx: number;
+    qy: number;
+    qz: number;
+    qw: number;
+  }) => {
+    const tfContext =
+      `parent_frame: ${tf.parent_frame}\n` +
+      `child_frame: ${tf.child_frame}\n` +
+      `translation: x=${tf.x.toFixed(4)}, y=${tf.y.toFixed(4)}, z=${tf.z.toFixed(4)}\n` +
+      `rotation (quaternion): x=${tf.qx.toFixed(4)}, y=${tf.qy.toFixed(4)}, ` +
+      `z=${tf.qz.toFixed(4)}, w=${tf.qw.toFixed(4)}`;
+    setChatCollapsed(false);
+    sendChatMessage(
+      `Explain the TF frame relationship "${tf.parent_frame} → ${tf.child_frame}".`,
+      "explain_tf",
+      tfContext,
+    );
   };
 
   // ---------- Keyboard shortcuts ----------
@@ -600,6 +682,12 @@ function App() {
 
       {/* Top toolbar */}
       {settingsOpen && <Settings onClose={() => setSettingsOpen(false)} />}
+      {newProjectOpen && (
+        <NewProjectModal
+          onClose={() => setNewProjectOpen(false)}
+          onProjectCreated={openCreatedProject}
+        />
+      )}
       <div
         style={{
           display: "flex",
@@ -625,6 +713,21 @@ function App() {
         </span>
         <button className="ide-btn" onClick={pickFolder}>
           📁 Open Folder
+        </button>
+        <button className="ide-btn" onClick={() => setNewProjectOpen(true)}>
+          ✨ New Project from Template
+        </button>
+        <button
+          className="ide-btn"
+          onClick={openAiignore}
+          disabled={!currentPath}
+          title={
+            currentPath
+              ? "Open or create .aiignore for this workspace"
+              : "Open a folder first"
+          }
+        >
+          🚫 .aiignore
         </button>
         <button className="ide-btn" onClick={pickRosWorkspace}>
           🤖 {rosWorkspacePath ? "Workspace Set" : "Select ROS Workspace"}
@@ -1334,7 +1437,7 @@ function App() {
                   </div>
                 </div>
               )}
-              {activeTab === "tf" && <TFTree />}
+              {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
               {activeTab === "problems" && (
                 <div style={{ padding: 8, fontSize: 12, color: "#666" }}>
                   No problems detected.
@@ -1395,6 +1498,15 @@ function App() {
           <div className="status-item">{languageFor(activeFile.name)}</div>
         )}
         {activeFile && <div className="status-item">UTF-8</div>}
+        {activeFile && activeFileIgnored && (
+          <div
+            className="status-item"
+            title="This file matches a pattern in .aiignore and is excluded from AI context"
+            style={{ color: "#e0b050" }}
+          >
+            🚫 AI-ignored
+          </div>
+        )}
         <div
           className="status-item clickable"
           onClick={() => setChatCollapsed((c) => !c)}
