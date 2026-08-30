@@ -11,6 +11,10 @@ message TwistCommand {
   string topic_name = 1;
   double linear_x = 2;
   double angular_z = 3;
+  double linear_y = 4;
+  double linear_z = 5;
+  double angular_x = 6;
+  double angular_y = 7;
 }
 
 message Empty {}

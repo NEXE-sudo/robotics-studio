@@ -302,19 +302,31 @@ println!("[ros-stream] calling stream_events");
 use rosengine::TwistCommand;
 
 #[tauri::command]
-async fn publish_twist(topic_name: String, linear_x: f64, angular_z: f64) -> Result<(), String> {
+async fn publish_twist(
+    topic_name: String,
+    linear_x: Option<f64>,
+    linear_y: Option<f64>,
+    linear_z: Option<f64>,
+    angular_x: Option<f64>,
+    angular_y: Option<f64>,
+    angular_z: Option<f64>,
+) -> Result<(), String> {
     let mut client = RosEngineClient::connect("http://localhost:50051")
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     client
         .publish_twist(TwistCommand {
             topic_name,
-            linear_x,
-            angular_z,
+            linear_x: linear_x.unwrap_or(0.0),
+            linear_y: linear_y.unwrap_or(0.0),
+            linear_z: linear_z.unwrap_or(0.0),
+            angular_x: angular_x.unwrap_or(0.0),
+            angular_y: angular_y.unwrap_or(0.0),
+            angular_z: angular_z.unwrap_or(0.0),
         })
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     Ok(())
 }
@@ -337,7 +349,32 @@ fn get_default_workspace_dir() -> Result<String, String> {
     Ok(format!("{}/.robotics-studio/ros2-workspace", home))
 }
 
+fn docker_daemon_unavailable_message() -> String {
+    "Docker Desktop doesn't appear to be running. Please start Docker Desktop and restart Robotics Studio.".to_string()
+}
+
+fn docker_lost_connection_message() -> String {
+    "Lost connection to the ROS environment. Docker may have stopped — check Docker Desktop is running and try again.".to_string()
+}
+
+fn ensure_docker_available() -> Result<(), String> {
+    let output = docker_command()
+        .args(["info"])
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(docker_daemon_unavailable_message())
+    }
+}
+
 fn find_dev_container() -> Result<String, String> {
+    if ensure_docker_available().is_err() {
+        return Err(docker_lost_connection_message());
+    }
+
     let workspace_path = get_default_workspace_dir()?;
     let filter = format!("label=devcontainer.local_folder={}", workspace_path);
     let output = docker_command()
@@ -349,7 +386,11 @@ fn find_dev_container() -> Result<String, String> {
             "{{.Names}}",
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
+
+    if !output.status.success() {
+        return Err(docker_lost_connection_message());
+    }
 
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if name.is_empty() {
@@ -372,7 +413,7 @@ fn run_colcon_build() -> Result<String, String> {
             "source /opt/ros/jazzy/setup.bash && cd /workspace && colcon build",
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -510,8 +551,8 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
 
         let mut child = match child {
             Ok(c) => c,
-            Err(e) => {
-                let _ = app.emit("build-error", e.to_string());
+            Err(_) => {
+                let _ = app.emit("build-error", docker_lost_connection_message());
                 return;
             }
         };
@@ -596,8 +637,8 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
             ])
             .output();
 
-        if let Err(e) = &kill_result {
-            eprintln!("DEBUG: pkill command itself failed to execute: {}", e);
+        if let Err(_) = &kill_result {
+            return Err(docker_lost_connection_message());
         }
 
         std::thread::sleep(std::time::Duration::from_millis(800));
@@ -609,7 +650,7 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
                 "pgrep -f '[g]z sim -s' ; pgrep -f '[/]parameter_bridge '",
             ])
             .output()
-            .map_err(|e| e.to_string())?;
+            .map_err(|_| docker_lost_connection_message())?;
 
         eprintln!("DEBUG attempt {}: check.stdout = {:?}", attempt, String::from_utf8_lossy(&check.stdout));
 
@@ -658,9 +699,12 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     let gz_result = docker_command()
         .args(["exec", "-d", &container_name, "bash", "-c", &gz_launch_cmd])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     if !gz_result.status.success() {
+        if ensure_docker_available().is_err() {
+            return Err(docker_lost_connection_message());
+        }
         return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
     }
 
@@ -690,9 +734,12 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     let bridge_result = docker_command()
         .args(["exec", "-d", &container_name, "bash", "-c", &bridge_cmd])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     if !bridge_result.status.success() {
+        if ensure_docker_available().is_err() {
+            return Err(docker_lost_connection_message());
+        }
         return Err(String::from_utf8_lossy(&bridge_result.stderr).to_string());
     }
 
@@ -710,7 +757,7 @@ fn stop_gazebo_sim() -> Result<String, String> {
             "pkill -f 'gz sim' ; pkill -f parameter_bridge",
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     Ok(String::from_utf8_lossy(&result.stdout).to_string())
 }
@@ -727,7 +774,7 @@ fn reset_gazebo_sim() -> Result<String, String> {
              --reptype gz.msgs.Boolean --timeout 2000 --req 'reset: {all: true}'",
         ])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     Ok(String::from_utf8_lossy(&result.stdout).to_string())
 }
@@ -764,6 +811,11 @@ fn copy_dir_recursive_impl(src: &std::path::Path, dst: &std::path::Path, depth: 
 
 #[tauri::command]
 async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
+    if let Err(err) = ensure_docker_available() {
+        let _ = app.emit("init-error", err.clone());
+        return Err(err);
+    }
+
     let resource_path = app
         .path()
         .resolve("resources/devcontainer", tauri::path::BaseDirectory::Resource)
@@ -787,7 +839,7 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
     let existing = docker_command()
         .args(["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"])
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|_| docker_lost_connection_message())?;
 
     let container_name = String::from_utf8_lossy(&existing.stdout).trim().to_string();
 
@@ -1296,6 +1348,42 @@ struct ClaudeResponse {
     content: Vec<ClaudeContentBlock>,
 }
 
+fn format_provider_http_error(provider: &str, model: &str, status: reqwest::StatusCode, body: &str) -> String {
+    let snippet = body
+        .trim()
+        .chars()
+        .take(200)
+        .collect::<String>();
+    let snippet = if snippet.len() < body.trim().len() {
+        format!("{}...", snippet)
+    } else {
+        snippet
+    };
+
+    match status {
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
+            format!("Invalid API key for {}. Check your key in Settings.", provider)
+        }
+        reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            format!("Rate limited by {}. Wait a moment and try again.", provider)
+        }
+        reqwest::StatusCode::NOT_FOUND => {
+            format!(
+                "Model '{}' not found for {}. It may have been deprecated — check available models in Settings.",
+                model, provider
+            )
+        }
+        _ => {
+            format!(
+                "AI request failed for {} with status {}: {}",
+                provider,
+                status.as_u16(),
+                snippet
+            )
+        }
+    }
+}
+
 #[tauri::command]
 async fn ask_ai(
     app: AppHandle,
@@ -1419,7 +1507,7 @@ async fn ask_ai(
     match settings.provider.as_str() {
         "groq" => {
             let request_body = GroqRequest {
-                model: settings.model,
+                model: settings.model.clone(),
                 messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
             };
             let response = client
@@ -1428,13 +1516,20 @@ async fn ask_ai(
                 .header("content-type", "application/json")
                 .json(&request_body)
                 .send().await.map_err(|e| e.to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.map_err(|e| e.to_string())?;
+                return Err(format_provider_http_error("groq", &settings.model, status, &body));
+            }
+
             let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
             parsed.choices.into_iter().next().map(|c| c.message.content)
                 .ok_or_else(|| "No response from AI".to_string())
         }
         "anthropic" => {
             let request_body = ClaudeRequest {
-                model: settings.model,
+                model: settings.model.clone(),
                 max_tokens: 1024,
                 messages: vec![ClaudeMessage { role: "user".to_string(), content: full_prompt }],
             };
@@ -1445,13 +1540,20 @@ async fn ask_ai(
                 .header("content-type", "application/json")
                 .json(&request_body)
                 .send().await.map_err(|e| e.to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.map_err(|e| e.to_string())?;
+                return Err(format_provider_http_error("anthropic", &settings.model, status, &body));
+            }
+
             let parsed: ClaudeResponse = response.json().await.map_err(|e| e.to_string())?;
             parsed.content.into_iter().next().and_then(|b| b.text)
                 .ok_or_else(|| "No response from AI".to_string())
         }
         "openai" => {
             let request_body = GroqRequest {
-                model: settings.model,
+                model: settings.model.clone(),
                 messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
             };
             let response = client
@@ -1460,6 +1562,13 @@ async fn ask_ai(
                 .header("content-type", "application/json")
                 .json(&request_body)
                 .send().await.map_err(|e| e.to_string())?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.map_err(|e| e.to_string())?;
+                return Err(format_provider_http_error("openai", &settings.model, status, &body));
+            }
+
             let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
             parsed.choices.into_iter().next().map(|c| c.message.content)
                 .ok_or_else(|| "No response from AI".to_string())

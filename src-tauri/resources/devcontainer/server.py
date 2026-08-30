@@ -141,11 +141,15 @@ class RosIntrospector(Node):
         )
         self.event_queue.put(node_evt)
 
-    def publish_twist(self, topic_name, linear_x, angular_z):
+    def publish_twist(self, topic_name, linear_x, linear_y=0.0, linear_z=0.0, angular_x=0.0, angular_y=0.0, angular_z=0.0):
         if topic_name not in self.twist_publishers:
             self.twist_publishers[topic_name] = self.create_publisher(Twist, topic_name, 10)
         msg = Twist()
         msg.linear.x = linear_x
+        msg.linear.y = linear_y
+        msg.linear.z = linear_z
+        msg.angular.x = angular_x
+        msg.angular.y = angular_y
         msg.angular.z = angular_z
         self.twist_publishers[topic_name].publish(msg)
 
@@ -155,7 +159,15 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
         self.ros_node = ros_node
 
     def PublishTwist(self, request, context):
-        self.ros_node.publish_twist(request.topic_name, request.linear_x, request.angular_z)
+        self.ros_node.publish_twist(
+            request.topic_name,
+            request.linear_x,
+            request.linear_y,
+            request.linear_z,
+            request.angular_x,
+            request.angular_y,
+            request.angular_z,
+        )
         return ros_engine_pb2.Empty()
 
     def StreamEvents(self, request, context):

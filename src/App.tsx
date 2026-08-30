@@ -625,6 +625,7 @@ function App() {
     qy: number;
     qz: number;
     qw: number;
+    validationIssues?: string[];
   }) => {
     const tfContext =
       `parent_frame: ${tf.parent_frame}\n` +
@@ -632,11 +633,19 @@ function App() {
       `translation: x=${tf.x.toFixed(4)}, y=${tf.y.toFixed(4)}, z=${tf.z.toFixed(4)}\n` +
       `rotation (quaternion): x=${tf.qx.toFixed(4)}, y=${tf.qy.toFixed(4)}, ` +
       `z=${tf.qz.toFixed(4)}, w=${tf.qw.toFixed(4)}`;
+
+    const validationContext =
+      tf.validationIssues && tf.validationIssues.length > 0
+        ? `\n\nTF validation warning: ${tf.validationIssues.join("; ")}. ` +
+          "This transform failed validation and may be malformed, uninitialized, or numerically unstable. " +
+          "Explain the likely issue and how it could affect the TF tree, rather than treating it as a normal valid transform."
+        : "";
+
     setChatCollapsed(false);
     sendChatMessage(
       `Explain the TF frame relationship "${tf.parent_frame} → ${tf.child_frame}".`,
       "explain_tf",
-      tfContext,
+      `${tfContext}${validationContext}`,
     );
   };
 
