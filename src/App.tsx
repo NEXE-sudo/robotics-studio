@@ -22,7 +22,6 @@ import {
   FileText,
   Ban,
   Save,
-  Rocket,
   Hammer,
   RotateCw,
   Play,
@@ -201,6 +200,11 @@ function App() {
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFilePath, setActiveFilePath] = useState<string | null>(null);
   const activeFile = openFiles.find((f) => f.path === activeFilePath) ?? null;
+
+  // Auto-initialize ROS environment on mount
+  useEffect(() => {
+    initializeRosEnvironment();
+  }, []);
 
   useEffect(() => {
     if (!activeFile || !currentPath) {
@@ -516,8 +520,6 @@ function App() {
     setInitializing(true);
     setSetupOutput(["Starting..."]);
     setCurrentSetupLine("Starting...");
-    setBottomCollapsed(false);
-    setActiveTab("environment");
     try {
       await invoke("initialize_ros_environment");
     } catch (err) {
@@ -949,22 +951,6 @@ function App() {
           <Bot size={14} style={{ marginRight: 4 }} />{" "}
           {rosWorkspacePath ? "Workspace Set" : "Select ROS Workspace"}
         </button>
-        <button onClick={initializeRosEnvironment} disabled={initializing}>
-          {initializing ? (
-            <>
-              <Rocket size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
-              Setting up...
-            </>
-          ) : (
-            <>
-              <Rocket size={14} style={{ marginRight: 4, display: "inline" }} />{" "}
-              Initialize ROS Environment
-            </>
-          )}
-        </button>
-        <div
-          style={{ width: 1, height: 20, background: "#444", margin: "0 4px" }}
-        />
         <button
           className="ide-btn primary"
           onClick={triggerBuild}
