@@ -161,13 +161,15 @@ export default function Settings({
         parts.push(key);
       }
 
-      const newKeys = parts.join("+");
-      setKeybindings((prev) =>
-        prev.map((kb) => (kb.id === id ? { ...kb, keys: newKeys } : kb)),
-      );
-      setListeningId(null);
-
-      window.removeEventListener("keydown", listener);
+      // Only save keybinding if a non-modifier key was pressed
+      if (parts.length > 0 && !["Cmd", "Ctrl", "Shift", "Alt"].includes(key)) {
+        const newKeys = parts.join("+");
+        setKeybindings((prev) =>
+          prev.map((kb) => (kb.id === id ? { ...kb, keys: newKeys } : kb)),
+        );
+        setListeningId(null);
+        window.removeEventListener("keydown", listener);
+      }
     };
 
     window.addEventListener("keydown", listener);
