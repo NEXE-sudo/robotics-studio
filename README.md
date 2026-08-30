@@ -1,11 +1,47 @@
-# Robotics Studio (Prototype)
+# Robotics Studio
 
 A native desktop IDE for ROS 2 development — edit code, build with `colcon`,
 run live simulations in Gazebo, visualize robot state in real time, and get
 AI assistance that actually understands your running ROS 2 system.
 
-**Status**: early prototype (M1), built for internal testing and feedback.
-Expect rough edges — this is a first pass, not a polished release.
+**Status**: v0.2.0, early-stage. Built solo, in the open. Expect rough
+edges — this is a real, working tool, not a polished 1.0, and I'd rather be
+upfront about that than pretend otherwise.
+
+---
+
+## What's in v0.2.0
+
+- **One-click ROS 2 + Gazebo environment** — the app builds, starts, and
+  connects to a Docker-based ROS 2 environment automatically on launch. No
+  manual Docker/Dev Container setup required.
+- **Live ROS introspection** — a real-time node/topic feed streamed over
+  gRPC while your system runs, plus a live **TF tree** view of your robot's
+  transform frames.
+- **3D visualization** — robot state rendered live in a three.js viewport,
+  with in-app controls to publish `cmd_vel` commands directly (no manual
+  container terminal needed for basic teleop).
+- **Custom Gazebo world support** — load your own world file instead of
+  being limited to the bundled demo.
+- **AI assistant with real context** — ask questions about your open file,
+  recent ROS activity, or build output, with pluggable providers (Groq,
+  Anthropic, OpenAI) configured entirely in-app via **Settings** — no
+  environment variables required.
+  - Generate ROS 2 node code or URDF files from a prompt.
+  - Click **Explain** on any TF frame to get a plain-language breakdown of
+    what it represents and whether its values look normal.
+- **Project templates** — spin up a new ROS 2 package from a bundled
+  template instead of writing boilerplate by hand.
+- **`.aiignore` support** — exclude specific files (secrets, credentials)
+  from ever being sent to the AI assistant.
+- **Configurable keybindings** — rebind shortcuts in-app, or import your
+  existing bindings from VS Code's `keybindings.json`.
+- **System-aware offline model guidance** — Settings can detect your
+  machine's RAM/CPU and suggest realistically-sized local model tiers if
+  you're considering running AI features offline (this is guidance only —
+  it doesn't run local models for you yet).
+- **Responsive UI** — scales with window/screen size rather than staying
+  pinned at a fixed layout.
 
 ---
 
@@ -13,112 +49,77 @@ Expect rough edges — this is a first pass, not a polished release.
 
 This app has two halves that run in different places and talk to each other:
 
-- **The Tauri app** (Rust + React) — runs natively on your machine (macOS,
-  tested; should work on Linux/Windows with minor adjustments).
-- **The ROS 2 environment** — runs inside a Docker container, since ROS 2
-  doesn't support macOS natively. The app talks to it via gRPC (for live
-  ROS state) and `docker exec` (for builds and simulation control).
+- **The Tauri app** (Rust + React) — runs natively on your machine.
+- **The ROS 2 environment** — runs inside a Docker container (needed on
+  macOS, since ROS 2 doesn't run natively there; also used on Linux/Windows
+  for a consistent, reproducible environment). The app talks to it via gRPC
+  (for live ROS state) and `docker exec`/streamed process output (for
+  builds and simulation control).
 
-The app sets up and manages the ROS 2 environment for you — you don't need
-to touch Docker, VS Code Dev Containers, or a terminal for this part.
+You don't need to touch Docker, VS Code Dev Containers, or a terminal for
+any of this — the app manages the environment for you.
 
 ---
 
 ## Prerequisites
 
-- **macOS** (this release is built for Mac; other platforms aren't packaged yet)
 - **Docker Desktop** — [docker.com](https://docker.com) (must be installed
   and running before you launch the app)
-- A **Groq API key** (free tier available at [console.groq.com](https://console.groq.com)) — used for the AI assistant panel
+- An API key for at least one supported AI provider if you want to use the
+  AI assistant — **Groq** (free tier at
+  [console.groq.com](https://console.groq.com)), Anthropic, or OpenAI.
+  This is entirely optional; the IDE, build tooling, and simulation work
+  without it.
 
 ---
 
 ## Installation
 
-1. Download the latest `.dmg` from the [Releases page](https://github.com/NEXE-sudo/robotics-studio/releases).
-2. Open the `.dmg` and drag **Robotics Studio** into your Applications folder.
-3. **First launch**: macOS will likely show *"Apple cannot verify this app is
+1. Download the latest release for your platform from the
+   [Releases page](https://github.com/NEXE-sudo/robotics-studio/releases).
+2. **macOS**: open the `.dmg`, drag **Robotics Studio** into Applications.
+   On first launch, macOS will likely show *"Apple cannot verify this app is
    free of malware"* — this is expected for a small, unsigned, early-stage
-   app, not a sign anything is wrong. **Right-click the app → Open**, then
-   click **Open** again in the dialog that appears. You only need to do this
-   once; future launches work normally via double-click.
-4. Before opening the app, set your Groq API key so the AI assistant works.
-   Open Terminal and run:
-   ```bash
-   launchctl setenv GROQ_API_KEY "your-key-here"
-   ```
-   (This sets it for the current login session. If the app can't find your
-   key, quit and relaunch it after running this command.)
-
----
-
-## One-time setup
-
-### 1. Launch the app
-
-Open **Robotics Studio** from Applications (or Launchpad/Spotlight).
-
-### 2. Initialize the ROS environment
-
-In the app's toolbar, click **🚀 Initialize ROS Environment**.
-
-This will:
-- Build a Docker image with ROS 2 and Gazebo (first run only — a few
-  minutes; you'll see live build progress in the app)
-- Start the container
-- Automatically launch the background ROS service the app talks to
-
-You'll know it's done when the log shows **✅ ROS environment ready** and
-the toolbar's connection indicator turns green (**● ROS Connected**).
-
-On future launches, this step is much faster — it reuses the already-built
-image and container instead of rebuilding from scratch.
-
-### 3. (Optional) Create a test ROS package
-
-The initialized environment starts with an empty workspace. To have
-something to build and run, open a terminal into the running container:
-```bash
-docker exec -it robotics-studio-ros2 bash
-```
-Wait — actually easier: use the app itself. Click **Open Folder**, and once
-you have a package to work with, **Build** will pick it up automatically.
-If you don't have one yet, ask whoever shared this app with you for a
-starter package, or create one via the container terminal above:
-```bash
-source /opt/ros/jazzy/setup.bash
-cd /workspace/src
-ros2 pkg create --build-type ament_python my_test_pkg
-```
+   app. **Right-click the app → Open**, then click **Open** again in the
+   dialog. You only need to do this once.
+3. Launch the app. On first run, it will automatically build and start the
+   Docker-based ROS 2 environment — you'll see a progress popup while it
+   downloads and builds (this takes a few minutes the first time; future
+   launches are much faster since the image is reused).
+4. Open **Settings → AI Provider** in-app to add your API key if you want
+   AI features. No environment variables or config files to edit by hand.
 
 ---
 
 ## Using the app
 
-- **🚀 Initialize ROS Environment** — one-time (per machine) setup; sets
-  everything up automatically. Safe to click again later — it won't rebuild
-  if already set up, it'll just make sure things are running.
 - **Open Folder** — browse and edit any files (not necessarily the ROS
   workspace — this can be any folder you want to edit).
-- **Build** — runs `colcon build` inside the container, streams output live.
-- **Start Sim / Stop Sim / Reset Sim** — launches a two-robot Gazebo demo
-  world (`diff_drive`), visualized live in the **3D View** tab at the bottom.
+- **New Project from Template** — scaffold a new ROS 2 package instead of
+  writing boilerplate.
+- **Build** — runs `colcon build` inside the container, with live streaming
+  output (updates in place, doesn't flood the log with duplicate lines).
+- **Start Sim / Stop Sim / Reset Sim** — launches a Gazebo demo world (or
+  your own custom world), visualized live in the **3D View** tab.
 - **ROS Log tab** — live feed of ROS 2 node/topic activity.
+- **TF Tree tab** — live transform tree, with an **Explain** action per
+  frame for an AI-generated plain-language breakdown.
 - **AI Assistant (right panel)** — ask questions about your open file,
-  recent ROS activity, or build output. It only knows what's visible in
-  the app right now (open file + recent logs), not your whole filesystem.
+  recent ROS activity, or build output. Configure your provider/API key in
+  **Settings**. Files matching `.aiignore` are excluded from what it sees.
+- **Settings** — AI provider config, keyboard shortcut customization
+  (including VS Code import), and system-spec-based offline model guidance.
 
 ### A concrete first thing to try
 
-1. Click **🚀 Initialize ROS Environment** and wait for it to finish.
-2. Create or open a test package (see step 3 above).
+1. Launch the app and wait for the environment-setup popup to finish (first
+   run only takes a few minutes).
+2. Click **New Project from Template** to scaffold a test package.
 3. Click **Build** — confirm it builds successfully.
 4. Click **Start Sim**, switch to the **3D View** tab.
-5. Open a terminal into the container (`docker exec -it robotics-studio-ros2 bash`) and run:
-   ```bash
-   ros2 topic pub /model/vehicle_blue/cmd_vel geometry_msgs/msg/Twist "{linear: {x: 0.3}}"
-   ```
-6. Watch the blue box move in the 3D view.
+5. Use the in-app teleop controls to publish a `cmd_vel` command and watch
+   the robot move.
+6. Open the **TF Tree** tab and click **Explain** on a frame.
 7. Ask the AI assistant: *"what ROS topics are currently active?"* — it
    should answer from live data, not a guess.
 
@@ -126,30 +127,37 @@ ros2 pkg create --build-type ament_python my_test_pkg
 
 ## Known limitations (please break things and tell me what you find)
 
-- Only tested with the built-in `diff_drive` demo world — no custom world/
-  robot loading yet.
-- 3D view shows placeholder boxes, not real robot geometry (no URDF mesh
-  loading yet).
+- 3D view uses accurately-dimensioned placeholder geometry, not full URDF
+  mesh loading yet — visually approximate, not a rendered CAD model.
 - ROS↔three.js coordinate mapping is a first-pass approximation — rotation
-  direction hasn't been rigorously verified.
-- Sending simulation commands (like the `cmd_vel` example above) still
-  requires a manual container terminal for now — no in-app way to do this yet.
-- AI assistant requires a Groq API key set as an environment variable before
-  launching the app — no in-app settings UI yet.
-- First-time setup (Initialize ROS Environment) can take several minutes —
-  this is expected, not a hang, as long as the progress log is still updating.
+  direction hasn't been rigorously verified against every convention.
+- Only one bundled project template (`basic_publisher`) so far.
+- Local/offline model *running* isn't implemented — Settings will suggest
+  appropriately-sized models for your hardware, but you'll still need to
+  run them yourself via something like Ollama for now.
+- Tested most thoroughly on macOS; Linux/Windows should work given the
+  Docker-based architecture, but haven't had the same depth of testing.
 
 ---
 
 ## If something breaks
 
 Check, in order:
-1. Is Docker Desktop actually running? (Look for its icon/menu bar app)
+1. Is Docker Desktop actually running?
 2. Is the container running? (`docker ps` — look for `robotics-studio-ros2`)
-3. Is the app's dev console (Inspect Element → Console) showing an error?
-4. Is the terminal running `npm run tauri dev` showing a Rust-side error?
-5. Try clicking **Initialize ROS Environment** again — it's safe to re-run
-   and may resolve a stuck state.
+3. Is the app's dev console (if running from source) showing an error?
+4. Try restarting the app — environment setup safely re-runs and reuses
+   the existing image/container rather than rebuilding from scratch.
 
-If none of that helps, note exactly what you clicked, what you expected,
-and what happened instead — that's the most useful thing you can hand back.
+If none of that helps, open an issue with exactly what you clicked, what
+you expected, and what happened instead — that's the most useful thing you
+can hand back.
+
+---
+
+## Contributing / following along
+
+This is being built in the open, in public, with real bugs and real fixes
+shared as they happen rather than only polished announcements. If you work
+with ROS 2, or you're just curious about developer tooling for robotics,
+issues, PRs, and feedback are genuinely welcome.
