@@ -1,0 +1,76 @@
+name: publish
+
+# Runs automatically whenever a tag matching v* (e.g. v0.2.0, v0.3.0) is
+# pushed — matching how this project actually cuts releases. Also runnable
+# manually from the Actions tab (workflow_dispatch) for testing without
+# needing to push a new tag.
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish-tauri:
+    permissions:
+      contents: write
+
+    strategy:
+      # If one platform's build fails, let the others keep running instead
+      # of cancelling everything — you still want whatever succeeded.
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest" # Apple Silicon (M1 and above)
+            args: "--target aarch64-apple-darwin"
+          - platform: "macos-latest" # Intel Macs
+            args: "--target x86_64-apple-darwin"
+          - platform: "ubuntu-22.04" # .deb / .AppImage / .rpm, x64
+            args: ""
+          - platform: "windows-latest" # .msi / .exe (NSIS)
+            args: ""
+
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install dependencies (ubuntu only)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf xdg-utils
+
+      - name: setup node
+        uses: actions/setup-node@v6
+        with:
+          node-version: lts/*
+          cache: "npm"
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Only relevant on macOS runners, since that's the only place
+          # this workflow cross-targets both Apple Silicon and Intel from
+          # the same OS. Harmless no-op on Linux/Windows.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          # Matches this project's actual layout (src-tauri/ at repo root).
+          workspaces: "./src-tauri -> target"
+
+      - name: install frontend dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # tauri-action replaces __VERSION__ with the version from
+          # tauri.conf.json automatically.
+          tagName: ${{ github.ref_name }}
+          releaseName: "v__VERSION__"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
