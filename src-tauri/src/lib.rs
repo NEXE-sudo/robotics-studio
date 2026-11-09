@@ -205,41 +205,27 @@ let mut client = match client_result {
         continue;
     }
 };
-let stream_result = tokio::time::timeout(
-    std::time::Duration::from_secs(1),
+let mut stream = match tokio::time::timeout(
+    std::time::Duration::from_secs(5),
     client.stream_events(Empty {}),
-).await;
-
-let mut stream = match stream_result {
+)
+.await
+{
     Ok(Ok(s)) => {
         println!("[ros-stream] stream_events established, awaiting messages");
         s.into_inner()
     }
     Ok(Err(e)) => {
-        println!("[ros-stream] stream_events failed: {}", e);
         let _ = app.emit("ros-error", format!("Stream failed: {}", e));
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         continue;
     }
     Err(_) => {
-        println!("[ros-stream] stream_events timed out");
-        let _ = app.emit("ros-error", "stream_events call timed out".to_string());
+        let _ = app.emit("ros-error", "stream_events timed out".to_string());
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         continue;
     }
 };
-println!("[ros-stream] calling stream_events");
-            let mut stream = match client.stream_events(Empty {}).await {
-            Ok(s) => {
-    println!("[ros-stream] stream_events established, awaiting messages");
-    s.into_inner()
-}
-            Err(e) => {
-                let _ = app.emit("ros-error", format!("Stream failed: {}", e));
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                continue;
-            }
-        };
 
             loop {
                 match stream.message().await {
@@ -301,6 +287,45 @@ println!("[ros-stream] calling stream_events");
 
 use rosengine::TwistCommand;
 
+const MAX_LINEAR_VELOCITY: f64 = 5.0;
+const MAX_ANGULAR_VELOCITY: f64 = 5.0;
+
+fn is_valid_ros_topic(topic_name: &str) -> bool {
+    topic_name.len() <= 200
+        && topic_name.starts_with('/')
+        && topic_name
+            .split('/')
+            .skip(1)
+            .all(|segment| {
+                !segment.is_empty()
+                    && segment
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                    && segment
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+            })
+}
+
+fn is_safe_project_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
+        && value.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
+}
+
+fn validate_velocity(value: f64, maximum: f64) -> Result<(), String> {
+    if !value.is_finite() || value.abs() > maximum {
+        return Err(format!(
+            "Velocity must be finite and between -{maximum} and {maximum}"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 async fn publish_twist(
     topic_name: String,
@@ -311,6 +336,20 @@ async fn publish_twist(
     angular_y: Option<f64>,
     angular_z: Option<f64>,
 ) -> Result<(), String> {
+    if !is_valid_ros_topic(&topic_name) {
+        return Err("Invalid ROS topic name".to_string());
+    }
+    for (value, limit) in [
+        (linear_x.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
+        (linear_y.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
+        (linear_z.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
+        (angular_x.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
+        (angular_y.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
+        (angular_z.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
+    ] {
+        validate_velocity(value, limit)?;
+    }
+
     let mut client = RosEngineClient::connect("http://localhost:50051")
         .await
         .map_err(|_| docker_lost_connection_message())?;
@@ -345,8 +384,14 @@ fn docker_command() -> StdCommand {
 }
 
 fn get_default_workspace_dir() -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    Ok(format!("{}/.robotics-studio/ros2-workspace", home))
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
+    Ok(std::path::PathBuf::from(home)
+        .join(".robotics-studio")
+        .join("ros2-workspace")
+        .to_string_lossy()
+        .into_owned())
 }
 
 fn docker_daemon_unavailable_message() -> String {
@@ -532,11 +577,66 @@ impl StreamLineBuffer {
     }
 }
 
+fn stream_process_output<R: Read + Send + 'static>(
+    reader: R,
+    app: AppHandle,
+    output_event: &'static str,
+    error_event: &'static str,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        let mut buffer = [0; 4096];
+        let mut line_buffer = StreamLineBuffer::new();
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => {
+                    if let Some((kind, text)) = line_buffer.flush() {
+                        let _ = app.emit(output_event, LogEvent { kind, text });
+                    }
+                    break;
+                }
+                Ok(size) => {
+                    for (kind, text) in line_buffer.process_chunk(&buffer[..size]) {
+                        let _ = app.emit(output_event, LogEvent { kind, text });
+                    }
+                }
+                Err(error) => {
+                    let _ = app.emit(error_event, error.to_string());
+                    break;
+                }
+            }
+        }
+    })
+}
+
+static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
+static INITIALIZATION_RUNNING: AtomicBool = AtomicBool::new(false);
+
+struct BuildRunGuard;
+struct InitializationGuard;
+
+impl Drop for BuildRunGuard {
+    fn drop(&mut self) {
+        BUILD_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Drop for InitializationGuard {
+    fn drop(&mut self) {
+        INITIALIZATION_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
     let container_name = find_dev_container()?;
+    if BUILD_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("A build is already running".to_string());
+    }
+    let build_guard = BuildRunGuard;
 
     tauri::async_runtime::spawn(async move {
+        let _build_guard = build_guard;
         let child = docker_command()
             .args([
                 "exec",
@@ -553,45 +653,31 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
             Ok(c) => c,
             Err(_) => {
                 let _ = app.emit("build-error", docker_lost_connection_message());
+                let _ = app.emit("build-finished", false);
                 return;
             }
         };
 
-        if let Some(stdout) = child.stdout.take() {
-            let mut reader = BufReader::new(stdout);
-            let mut buffer = [0; 4096];
-            let mut line_buffer = StreamLineBuffer::new();
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
-                        // EOF: flush any remaining bytes in the buffer
-                        if let Some((kind, text)) = line_buffer.flush() {
-                            let event = LogEvent { kind, text };
-                            let _ = app.emit("build-output", event);
-                        }
-                        break;
-                    }
-                    Ok(n) => {
-                        let events = line_buffer.process_chunk(&buffer[..n]);
-                        for (kind, text) in events {
-                            let event = LogEvent { kind, text };
-                            let _ = app.emit("build-output", event);
-                        }
-                    }
-                    Err(e) => {
-                        let _ = app.emit("build-error", e.to_string());
-                        break;
-                    }
-                }
-            }
-        }
+        let stdout_reader = child.stdout.take().map(|stdout| {
+            stream_process_output(stdout, app.clone(), "build-output", "build-error")
+        });
+        let stderr_reader = child.stderr.take().map(|stderr| {
+            stream_process_output(stderr, app.clone(), "build-output", "build-error")
+        });
 
         match child.wait() {
             Ok(status) => {
+                if let Some(reader) = stdout_reader {
+                    let _ = reader.join();
+                }
+                if let Some(reader) = stderr_reader {
+                    let _ = reader.join();
+                }
                 let _ = app.emit("build-finished", status.success());
             }
             Err(e) => {
                 let _ = app.emit("build-error", e.to_string());
+                let _ = app.emit("build-finished", false);
             }
         }
     });
@@ -691,13 +777,17 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     let models = detect_models_in_sdf(&sdf_content);
     let robot_models: Vec<&String> = models.iter().filter(|m| m.as_str() != "ground_plane").collect();
 
-    let gz_launch_cmd = format!(
-        "source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering {} > /tmp/gz.log 2>&1",
-        container_world_path
-    );
-
     let gz_result = docker_command()
-        .args(["exec", "-d", &container_name, "bash", "-c", &gz_launch_cmd])
+        .args([
+            "exec",
+            "-d",
+            &container_name,
+            "bash",
+            "-c",
+            "source /opt/ros/jazzy/setup.bash && exec gz sim -s -r --headless-rendering \"$1\" > /tmp/gz.log 2>&1",
+            "robotics-studio",
+            &container_world_path,
+        ])
         .output()
         .map_err(|_| docker_lost_connection_message())?;
 
@@ -726,13 +816,18 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
         ));
     }
 
-    let bridge_cmd = format!(
-        "source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge {} > /tmp/bridge.log 2>&1",
-        bridge_topics.join(" ")
-    );
-
+    let mut bridge_args = vec![
+        "exec",
+        "-d",
+        &container_name,
+        "bash",
+        "-c",
+        "source /opt/ros/jazzy/setup.bash && exec ros2 run ros_gz_bridge parameter_bridge \"$@\" > /tmp/bridge.log 2>&1",
+        "robotics-studio",
+    ];
+    bridge_args.extend(bridge_topics.iter().map(String::as_str));
     let bridge_result = docker_command()
-        .args(["exec", "-d", &container_name, "bash", "-c", &bridge_cmd])
+        .args(bridge_args)
         .output()
         .map_err(|_| docker_lost_connection_message())?;
 
@@ -802,15 +897,107 @@ fn copy_dir_recursive_impl(src: &std::path::Path, dst: &std::path::Path, depth: 
 
         if file_type.is_dir() {
             copy_dir_recursive_impl(&src_path, &dst_path, depth + 1)?;
-        } else {
+        } else if !dst_path.exists() {
             std::fs::copy(&src_path, &dst_path).map_err(|e| e.to_string())?;
         }
+    }
+
+    Ok(())
+}
+
+fn start_ros_engine_server(container_id: &str) -> Result<(), String> {
+    let generate = docker_command()
+        .args([
+            "exec",
+            container_id,
+            "bash",
+            "-c",
+            "source /opt/ros/jazzy/setup.bash && cd /workspace && mkdir -p generated && python3 -m grpc_tools.protoc -I proto --python_out=generated --grpc_python_out=generated proto/ros_engine.proto",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to generate gRPC modules: {error}"))?;
+
+    if !generate.status.success() {
+        return Err(format!(
+            "Failed to generate gRPC modules: {}",
+            String::from_utf8_lossy(&generate.stderr)
+        ));
+    }
+
+    let running = docker_command()
+        .args([
+            "exec",
+            container_id,
+            "bash",
+            "-c",
+            "pgrep -f '[p]ython3 server.py'",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to inspect ROS engine process: {error}"))?;
+
+    if running.status.success() && !running.stdout.is_empty() {
+        return Ok(());
+    }
+
+    let started = docker_command()
+        .args([
+            "exec",
+            "-d",
+            container_id,
+            "bash",
+            "-c",
+            "source /opt/ros/jazzy/setup.bash && cd /workspace && exec python3 server.py > /tmp/server.log 2>&1",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to start ROS engine server: {error}"))?;
+
+    if !started.status.success() {
+        return Err(format!(
+            "Failed to start ROS engine server: {}",
+            String::from_utf8_lossy(&started.stderr)
+        ));
     }
     Ok(())
 }
 
+async fn wait_for_ros_engine(container_id: &str) -> Result<(), String> {
+    for _ in 0..30 {
+        if let Ok(Ok(mut client)) = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            RosEngineClient::connect("http://127.0.0.1:50051"),
+        )
+        .await
+        {
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                client.stream_events(Empty {}),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok())
+            {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    let logs = docker_command()
+        .args(["exec", container_id, "cat", "/tmp/server.log"])
+        .output()
+        .map_err(|error| format!("gRPC service did not become ready; could not read logs: {error}"))?;
+    Err(format!(
+        "gRPC service did not become ready: {}",
+        String::from_utf8_lossy(&logs.stdout)
+    ))
+}
+
 #[tauri::command]
 async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
+    if INITIALIZATION_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("ROS environment initialization is already in progress".to_string());
+    }
+    let initialization_guard = InitializationGuard;
+
     if let Err(err) = ensure_docker_available() {
         let _ = app.emit("init-error", err.clone());
         return Err(err);
@@ -821,17 +1008,11 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         .resolve("resources/devcontainer", tauri::path::BaseDirectory::Resource)
         .map_err(|e| e.to_string())?;
 
-    let home = std::env::var("HOME").map_err(|e| e.to_string())?;
-    let workspace_dir = format!("{}/.robotics-studio/ros2-workspace", home);
+    let workspace_dir = get_default_workspace_dir()?;
     let workspace_path = std::path::Path::new(&workspace_dir);
 
-    // Always re-copy bundled resource files (Dockerfile, proto/, server.py,
-    // world files, etc.) so updates to the app's bundled resources are
-    // never silently skipped — this previously caused a confusing bug
-    // where a new world file didn't appear because an old Dockerfile
-    // already existed. User-generated content (src/, build/, install/,
-    // log/) lives alongside these files but isn't touched, since we only
-    // copy what's present in the bundled resource_path, not delete anything.
+    // Install missing bundled files without overwriting resources a user may
+    // have modified in the workspace.
     copy_dir_recursive(&resource_path, workspace_path)?;
 
     let filter = format!("label=devcontainer.local_folder={}", workspace_dir);
@@ -840,23 +1021,69 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         .args(["ps", "-a", "--filter", &filter, "--format", "{{.Names}}"])
         .output()
         .map_err(|_| docker_lost_connection_message())?;
+    if !existing.status.success() {
+        return Err(format!(
+            "Could not inspect existing ROS containers: {}",
+            String::from_utf8_lossy(&existing.stderr)
+        ));
+    }
 
-    let container_name = String::from_utf8_lossy(&existing.stdout).trim().to_string();
+    let container_names = String::from_utf8_lossy(&existing.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if container_names.len() > 1 {
+        return Err(format!(
+            "Multiple ROS containers are registered for workspace '{}': {}",
+            workspace_dir,
+            container_names.join(", ")
+        ));
+    }
+    let container_name = container_names.first().cloned().unwrap_or_default();
 
     if !container_name.is_empty() {
-        let _ = docker_command()
+        let started = docker_command()
             .args(["start", &container_name])
-            .output();
-        let event = LogEvent {
-            kind: "append".to_string(),
-            text: "Existing environment found, starting it...".to_string(),
-        };
-        let _ = app.emit("init-progress", event);
-        let _ = app.emit("init-finished", workspace_dir.clone());
+            .output()
+            .map_err(|error| format!("Could not start existing ROS container: {error}"))?;
+        if !started.status.success() {
+            return Err(format!(
+                "Could not start existing ROS container: {}",
+                String::from_utf8_lossy(&started.stderr)
+            ));
+        }
+
+        let app = app.clone();
+        let workspace_dir = workspace_dir.clone();
+        tauri::async_runtime::spawn(async move {
+            let _initialization_guard = initialization_guard;
+            let _ = app.emit(
+                "init-progress",
+                LogEvent {
+                    kind: "append".to_string(),
+                    text: "Existing environment found. Checking ROS engine...".to_string(),
+                },
+            );
+            let result = match start_ros_engine_server(&container_name) {
+                Ok(()) => wait_for_ros_engine(&container_name).await,
+                Err(error) => Err(error),
+            };
+            match result {
+                Ok(()) => {
+                    let _ = app.emit("init-finished", workspace_dir);
+                }
+                Err(error) => {
+                    let _ = app.emit("init-error", error);
+                }
+            }
+        });
         return Ok(());
     }
 
     tauri::async_runtime::spawn(async move {
+        let _initialization_guard = initialization_guard;
         let event = LogEvent {
             kind: "append".to_string(),
             text: "Building Docker image (this may take several minutes on first run)...".to_string(),
@@ -877,34 +1104,23 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
             }
         };
 
-        if let Some(stderr) = build_child.stderr.take() {
-            let mut reader = BufReader::new(stderr);
-            let mut buffer = [0; 4096];
-            let mut line_buffer = StreamLineBuffer::new();
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) => {
-                        // EOF: flush any remaining bytes in the buffer
-                        if let Some((kind, text)) = line_buffer.flush() {
-                            let event = LogEvent { kind, text };
-                            let _ = app.emit("init-progress", event);
-                        }
-                        break;
-                    }
-                    Ok(n) => {
-                        let events = line_buffer.process_chunk(&buffer[..n]);
-                        for (kind, text) in events {
-                            let event = LogEvent { kind, text };
-                            let _ = app.emit("init-progress", event);
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
+        let stdout_reader = build_child.stdout.take().map(|stdout| {
+            stream_process_output(stdout, app.clone(), "init-progress", "init-error")
+        });
+        let stderr_reader = build_child.stderr.take().map(|stderr| {
+            stream_process_output(stderr, app.clone(), "init-progress", "init-error")
+        });
 
         let build_status = match build_child.wait() {
-            Ok(s) => s,
+            Ok(status) => {
+                if let Some(reader) = stdout_reader {
+                    let _ = reader.join();
+                }
+                if let Some(reader) = stderr_reader {
+                    let _ = reader.join();
+                }
+                status
+            }
             Err(e) => {
                 let _ = app.emit("init-error", e.to_string());
                 return;
@@ -926,7 +1142,7 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
             .args([
                 "run", "-d",
                 "--label", &format!("devcontainer.local_folder={}", workspace_dir),
-                "-p", "50051:50051",
+                "-p", "127.0.0.1:50051:50051",
                 "-v", &format!("{}:/workspace", workspace_dir),
                 "robotics-studio-ros2",
                 "tail", "-f", "/dev/null",
@@ -954,86 +1170,17 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         };
         let _ = app.emit("init-progress", event);
 
-        std::thread::sleep(std::time::Duration::from_secs(2));
-
-        let generate_output = docker_command()
-    .args([
-        "exec",
-        &container_id,
-        "bash",
-        "-c",
-        r#"source /opt/ros/jazzy/setup.bash && \
-           cd /workspace && \
-           mkdir -p generated && \
-           python3 -m grpc_tools.protoc \
-             -I proto \
-             --python_out=generated \
-             --grpc_python_out=generated \
-             proto/ros_engine.proto"#,
-    ])
-    .output();
-
-match generate_output {
-    Ok(o) if o.status.success() => {}
-    Ok(o) => {
-        let _ = app.emit(
-            "init-error",
-            String::from_utf8_lossy(&o.stderr).to_string(),
-        );
-        return;
-    }
-    Err(e) => {
-        let _ = app.emit("init-error", e.to_string());
-        return;
-    }
-}
-
-let mut ready = false;
-for _ in 0..15 {
-    if std::net::TcpStream::connect_timeout(
-        &"127.0.0.1:50051".parse().unwrap(),
-        std::time::Duration::from_millis(500),
-    ).is_ok() {
-        ready = true;
-        break;
-    }
-    std::thread::sleep(std::time::Duration::from_secs(1));
-}
-
-if !ready {
-    let log_output = docker_command()
-        .args(["exec", &container_id, "cat", "/tmp/server.log"])
-        .output();
-    let log_text = log_output
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-        .unwrap_or_default();
-    let _ = app.emit("init-error", format!("ROS engine server never started:\n{}", log_text));
-    return;
-}
-
-let server_output = docker_command()
-    .args([
-        "exec",
-        "-d",
-        &container_id,
-        "bash",
-        "-c",
-        "source /opt/ros/jazzy/setup.bash && \
-         cd /workspace && \
-         python3 server.py > /tmp/server.log 2>&1",
-    ])
-    .output();
-
-        match server_output {
-            Ok(o) if o.status.success() => {
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                let _ = app.emit("init-finished", workspace_dir.clone());
-            }
-            Ok(o) => {
-                let _ = app.emit("init-error", String::from_utf8_lossy(&o.stderr).to_string());
-            }
-            Err(e) => {
-                let _ = app.emit("init-error", e.to_string());
+        match start_ros_engine_server(&container_id) {
+            Ok(()) => match wait_for_ros_engine(&container_id).await {
+                Ok(()) => {
+                    let _ = app.emit("init-finished", workspace_dir.clone());
+                }
+                Err(error) => {
+                    let _ = app.emit("init-error", error);
+                }
+            },
+            Err(error) => {
+                let _ = app.emit("init-error", error);
             }
         }
     });
@@ -1367,7 +1514,7 @@ fn format_provider_http_error(provider: &str, model: &str, status: reqwest::Stat
         reqwest::StatusCode::TOO_MANY_REQUESTS => {
             format!("Rate limited by {}. Wait a moment and try again.", provider)
         }
-        reqwest::StatusCode::NOT_FOUND => {
+        reqwest::StatusCode::NOT_FOUND => { 
             format!(
                 "Model '{}' not found for {}. It may have been deprecated — check available models in Settings.",
                 model, provider
@@ -1502,7 +1649,10 @@ async fn ask_ai(
         system_context, context, user_message
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|error| format!("Could not configure AI request: {error}"))?;
 
     match settings.provider.as_str() {
         "groq" => {
@@ -1610,6 +1760,16 @@ fn create_project_from_template(
     destination_dir: String,
     project_name: String,
 ) -> Result<String, String> {
+    if !is_safe_project_component(&template_name) {
+        return Err("Invalid template name".to_string());
+    }
+    if !is_safe_project_component(&project_name) {
+        return Err(
+            "Project name must start with a letter and contain only letters, numbers, '_' or '-'"
+                .to_string(),
+        );
+    }
+
     let template_path = app
         .path()
         .resolve(
@@ -1618,16 +1778,39 @@ fn create_project_from_template(
         )
         .map_err(|e| e.to_string())?;
 
-    if !template_path.exists() {
+    let templates_root = app
+        .path()
+        .resolve("resources/templates", tauri::path::BaseDirectory::Resource)
+        .map_err(|e| e.to_string())?
+        .canonicalize()
+        .map_err(|e| format!("Template directory is unavailable: {e}"))?;
+    let template_path = template_path
+        .canonicalize()
+        .map_err(|_| format!("Template '{}' not found", template_name))?;
+    if !template_path.starts_with(&templates_root) || !template_path.is_dir() {
         return Err(format!("Template '{}' not found", template_name));
     }
 
-    let dest = std::path::Path::new(&destination_dir).join(&project_name);
+    let destination_root = std::path::Path::new(&destination_dir)
+        .canonicalize()
+        .map_err(|e| format!("Invalid project destination: {e}"))?;
+    if !destination_root.is_dir() {
+        return Err("Project destination must be a directory".to_string());
+    }
+    let dest = destination_root.join(&project_name);
     if dest.exists() {
         return Err(format!("A folder named '{}' already exists there", project_name));
     }
 
-    copy_dir_recursive(&template_path, &dest)?;
+    std::fs::create_dir(&dest).map_err(|e| format!("Could not create project directory: {e}"))?;
+    if let Err(error) = copy_dir_recursive(&template_path, &dest) {
+        if let Err(cleanup_error) = std::fs::remove_dir_all(&dest) {
+            return Err(format!(
+                "Project creation failed: {error}. Incomplete project could not be removed: {cleanup_error}"
+            ));
+        }
+        return Err(format!("Project creation failed: {error}"));
+    }
 
     Ok(dest.to_string_lossy().to_string())
 }
@@ -1679,6 +1862,36 @@ mod recent_project_tests {
         assert_eq!(normalized[0].last_opened, "300");
         assert_eq!(normalized[1].path, "/tmp/beta");
         assert_eq!(normalized[2].path, "/tmp/old");
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn validates_absolute_ros_topics() {
+        assert!(is_valid_ros_topic("/robot/cmd_vel"));
+        assert!(is_valid_ros_topic("/_robot/cmd_vel2"));
+        assert!(!is_valid_ros_topic("robot/cmd_vel"));
+        assert!(!is_valid_ros_topic("/robot/../cmd_vel"));
+        assert!(!is_valid_ros_topic("/robot//cmd_vel"));
+    }
+
+    #[test]
+    fn rejects_non_finite_and_unbounded_velocity() {
+        assert!(validate_velocity(1.0, MAX_LINEAR_VELOCITY).is_ok());
+        assert!(validate_velocity(f64::NAN, MAX_LINEAR_VELOCITY).is_err());
+        assert!(validate_velocity(f64::INFINITY, MAX_LINEAR_VELOCITY).is_err());
+        assert!(validate_velocity(5.1, MAX_LINEAR_VELOCITY).is_err());
+    }
+
+    #[test]
+    fn validates_project_path_components() {
+        assert!(is_safe_project_component("ros2_robot"));
+        assert!(!is_safe_project_component("../escape"));
+        assert!(!is_safe_project_component("2robot"));
+        assert!(!is_safe_project_component(""));
     }
 }
 

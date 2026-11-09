@@ -1,6 +1,7 @@
 import threading
 import queue
 import time
+import logging
 
 import grpc
 from concurrent import futures
@@ -16,11 +17,14 @@ from tf2_msgs.msg import TFMessage
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
+from server_core import EventHub, validate_twist_request
+
+LOGGER = logging.getLogger("ros_engine")
 
 class RosIntrospector(Node):
-    def __init__(self, event_queue: queue.Queue):
+    def __init__(self, event_hub: EventHub):
         super().__init__('ros_engine_wrapper')
-        self.event_queue = event_queue
+        self.event_hub = event_hub
         self.known_nodes = set()
         self.odom_subscribers = {}
         self.timer = self.create_timer(2.0, self.tick)
@@ -41,7 +45,7 @@ class RosIntrospector(Node):
             ),
             timestamp_ns=time.time_ns()
         )
-        self.event_queue.put(evt)
+        self.event_hub.publish(evt)
 
     def tf_callback(self, msg, topic_name):
         for transform in msg.transforms:
@@ -59,7 +63,7 @@ class RosIntrospector(Node):
                 ),
                 timestamp_ns=time.time_ns()
             )
-            self.event_queue.put(evt)
+            self.event_hub.publish(evt)
 
     def tick(self):
         try:
@@ -77,14 +81,14 @@ class RosIntrospector(Node):
                 node_started=ros_engine_pb2.NodeStarted(node_name=name),
                 timestamp_ns=time.time_ns()
             )
-            self.event_queue.put(evt)
+            self.event_hub.publish(evt)
 
         for name in disappeared:
             evt = ros_engine_pb2.WorkspaceEvent(
                 node_crashed=ros_engine_pb2.NodeCrashed(node_name=name),
                 timestamp_ns=time.time_ns()
             )
-            self.event_queue.put(evt)
+            self.event_hub.publish(evt)
 
         self.known_nodes = nodes
 
@@ -111,11 +115,8 @@ class RosIntrospector(Node):
                 self.odom_subscribers[name] = sub
                 self.get_logger().info(f'Subscribed to odometry topic: {name}')
 
-        print("DEBUG: about to check TF topics", flush=True)
         for name, types in topics:
-            print(f"DEBUG: checking topic {name}, types={types}", flush=True)
             if 'tf2_msgs/msg/TFMessage' in types and name not in self.tf_subscribers:
-                print(f"DEBUG: attempting to subscribe to {name}", flush=True)
                 sub = self.create_subscription(
                     TFMessage, name,
                     lambda msg, n=name: self.tf_callback(msg, n),
@@ -123,8 +124,6 @@ class RosIntrospector(Node):
                 )
                 self.tf_subscribers[name] = sub
                 self.get_logger().info(f'Subscribed to TF topic: {name}')
-                print(f"DEBUG: subscribed successfully to {name}", flush=True)
-        print("DEBUG: finished TF topic check", flush=True)
 
         topic_msgs = [
             ros_engine_pb2.Topic(name=n, types=list(t)) for n, t in topics
@@ -133,13 +132,13 @@ class RosIntrospector(Node):
             topic_snapshot=ros_engine_pb2.TopicSnapshot(topics=topic_msgs),
             timestamp_ns=time.time_ns()
         )
-        self.event_queue.put(evt)
+        self.event_hub.publish(evt)
 
         node_evt = ros_engine_pb2.WorkspaceEvent(
             node_snapshot=ros_engine_pb2.NodeSnapshot(node_names=list(nodes)),
             timestamp_ns=time.time_ns()
         )
-        self.event_queue.put(node_evt)
+        self.event_hub.publish(node_evt)
 
     def publish_twist(self, topic_name, linear_x, linear_y=0.0, linear_z=0.0, angular_x=0.0, angular_y=0.0, angular_z=0.0):
         if topic_name not in self.twist_publishers:
@@ -154,30 +153,41 @@ class RosIntrospector(Node):
         self.twist_publishers[topic_name].publish(msg)
 
 class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-    def __init__(self, event_queue: queue.Queue, ros_node):
-        self.event_queue = event_queue
+    def __init__(self, event_hub: EventHub, ros_node):
+        self.event_hub = event_hub
         self.ros_node = ros_node
 
     def PublishTwist(self, request, context):
-        self.ros_node.publish_twist(
-            request.topic_name,
-            request.linear_x,
-            request.linear_y,
-            request.linear_z,
-            request.angular_x,
-            request.angular_y,
-            request.angular_z,
-        )
+        try:
+            validate_twist_request(request)
+            self.ros_node.publish_twist(
+                request.topic_name,
+                request.linear_x,
+                request.linear_y,
+                request.linear_z,
+                request.angular_x,
+                request.angular_y,
+                request.angular_z,
+            )
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except Exception as error:
+            LOGGER.exception("Failed to publish Twist command")
+            context.abort(grpc.StatusCode.INTERNAL, "Failed to publish Twist command")
         return ros_engine_pb2.Empty()
 
     def StreamEvents(self, request, context):
-        print("=== Stream opened ===", flush=True)
-        while context.is_active():
-            try:
-                evt = self.event_queue.get(timeout=1.0)
-                yield evt
-            except queue.Empty:
-                continue
+        subscriber = self.event_hub.subscribe()
+        LOGGER.info("ROS event stream opened")
+        try:
+            while context.is_active():
+                try:
+                    yield subscriber.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+        finally:
+            self.event_hub.unsubscribe(subscriber)
+            LOGGER.info("ROS event stream closed")
 
 
 def ros_spin_thread(node):
@@ -185,29 +195,36 @@ def ros_spin_thread(node):
 
 
 def main():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     rclpy.init()
-    event_queue = queue.Queue()
-    node = RosIntrospector(event_queue)
+    event_hub = EventHub()
+    node = RosIntrospector(event_hub)
 
     spin_thread = threading.Thread(target=ros_spin_thread, args=(node,), daemon=True)
     spin_thread.start()
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     ros_engine_pb2_grpc.add_RosEngineServicer_to_server(
-        RosEngineServicer(event_queue, node), server
+        RosEngineServicer(event_hub, node), server
     )
     server.add_insecure_port('[::]:50051')
     server.start()
-    print("RosEngine gRPC server running on port 50051...")
+    LOGGER.info("RosEngine gRPC server running on port 50051")
 
     try:
         server.wait_for_termination()
     except KeyboardInterrupt:
-        print("Shutting down...")
+        LOGGER.info("Shutting down")
+    finally:
         stop_event = server.stop(grace=2)
         stop_event.wait(3)
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
+        spin_thread.join(timeout=3)
 
 
 if __name__ == '__main__':

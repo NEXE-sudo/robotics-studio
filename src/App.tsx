@@ -260,6 +260,11 @@ function App() {
   // --- Build output ---
   const [buildOutput, setBuildOutput] = useState<string[]>([]);
   const [building, setBuilding] = useState(false);
+  const diagnostics = [
+    ...setupOutput.filter((line) => line.startsWith("❌")),
+    ...buildOutput.filter((line) => /error|failed/i.test(line)),
+    ...rosEvents.filter((line) => /NodeCrashed|error/i.test(line)),
+  ];
 
   // --- AI chat ---
   const [chatInput, setChatInput] = useState("");
@@ -511,8 +516,9 @@ function App() {
     setActiveTab("build");
     try {
       await invoke("run_colcon_build_streaming");
-    } finally {
+    } catch (error) {
       setBuilding(false);
+      setBuildOutput((prev) => [...prev, `ERROR: ${String(error)}`]);
     }
   };
 
@@ -1607,57 +1613,6 @@ function App() {
                       )}
                     </span>
                   )}
-                  {activeTab === "dashboard" && (
-                    <div style={{ padding: 12, fontSize: 12 }}>
-                      <div
-                        style={{
-                          opacity: 0.6,
-                          marginBottom: 8,
-                          textTransform: "uppercase",
-                          fontSize: 11,
-                        }}
-                      >
-                        Node Health
-                      </div>
-                      {Object.keys(nodeStatus).length === 0 && (
-                        <div style={{ color: "#666" }}>
-                          No nodes detected yet.
-                        </div>
-                      )}
-                      {Object.entries(nodeStatus).map(([name, status]) => (
-                        <div
-                          key={name}
-                          style={{
-                            display: "flex",
-                            alignItems: "center",
-                            gap: 8,
-                            padding: "4px 0",
-                            borderBottom: "1px solid #222",
-                          }}
-                        >
-                          <span
-                            style={{
-                              color: status === "alive" ? "#7cd992" : "#e08080",
-                            }}
-                          >
-                            {status === "alive" ? "●" : "○"}
-                          </span>
-                          <span style={{ fontFamily: "monospace" }}>
-                            {name}
-                          </span>
-                          <span
-                            style={{
-                              opacity: 0.5,
-                              marginLeft: "auto",
-                              fontSize: 11,
-                            }}
-                          >
-                            {status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
                   {tab === "build" && (
                     <span
                       style={{
@@ -1819,6 +1774,70 @@ function App() {
                   ))}
                 </div>
               )}
+              {activeTab === "dashboard" && (
+                <div
+                  style={{
+                    height: "100%",
+                    overflowY: "auto",
+                    padding: 12,
+                    fontSize: 12,
+                  }}
+                >
+                  <div style={{ marginBottom: 12 }}>
+                    <strong>ROS environment</strong>
+                    <div style={{ marginTop: 4, color: rosConnected ? "#7cd992" : "#e0b060" }}>
+                      {initializing
+                        ? "Initializing"
+                        : rosConnected
+                          ? "Connected"
+                          : "Disconnected"}
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <strong>Selected workspace</strong>
+                    <div style={{ marginTop: 4, color: "#aaa", overflowWrap: "anywhere" }}>
+                      {rosWorkspacePath ?? "No ROS workspace selected"}
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 12 }}>
+                    <strong>Build</strong>
+                    <div style={{ marginTop: 4, color: building ? "#e0b060" : "#aaa" }}>
+                      {building ? "Running" : "Idle"}
+                    </div>
+                  </div>
+                  <div style={{ marginBottom: 6 }}>
+                    <strong>ROS nodes</strong>
+                  </div>
+                  {Object.keys(nodeStatus).length === 0 ? (
+                    <div style={{ color: "#777" }}>
+                      {rosConnected ? "No nodes reported" : "Unavailable while disconnected"}
+                    </div>
+                  ) : (
+                    Object.entries(nodeStatus).map(([name, status]) => (
+                      <div
+                        key={name}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 8,
+                          padding: "4px 0",
+                        }}
+                      >
+                        <span style={{ color: status === "alive" ? "#7cd992" : "#e08080" }}>
+                          {status === "alive" ? "●" : "○"}
+                        </span>
+                        <span style={{ fontFamily: "monospace" }}>{name}</span>
+                        <span style={{ marginLeft: "auto", opacity: 0.6 }}>{status}</span>
+                      </div>
+                    ))
+                  )}
+                  {currentSetupLine && (
+                    <div style={{ marginTop: 12, color: "#777" }}>
+                      Latest environment message: {currentSetupLine}
+                    </div>
+                  )}
+                </div>
+              )}
               {activeTab === "sim" && (
                 <div style={{ height: "100%", display: "flex" }}>
                   <div style={{ flex: 1 }}>
@@ -1834,8 +1853,16 @@ function App() {
               )}
               {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
               {activeTab === "problems" && (
-                <div style={{ padding: 8, fontSize: 12, color: "#666" }}>
-                  No problems detected.
+                <div style={{ padding: 8, fontSize: 12 }}>
+                  {diagnostics.length === 0 ? (
+                    <div style={{ color: "#777" }}>No problems reported by recent environment, build, or ROS output.</div>
+                  ) : (
+                    diagnostics.slice(-50).map((diagnostic, index) => (
+                      <div key={`${index}-${diagnostic}`} style={{ color: "#e08080", padding: "4px 0" }}>
+                        {diagnostic}
+                      </div>
+                    ))
+                  )}
                 </div>
               )}
             </div>

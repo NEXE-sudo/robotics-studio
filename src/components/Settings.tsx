@@ -146,7 +146,10 @@ export default function Settings({
 
   const handleListenForKeybinding = (id: string) => {
     setListeningId(id);
+  };
 
+  useEffect(() => {
+    if (!listeningId) return;
     const listener = (e: KeyboardEvent) => {
       e.preventDefault();
       const parts: string[] = [];
@@ -165,15 +168,17 @@ export default function Settings({
       if (parts.length > 0 && !["Cmd", "Ctrl", "Shift", "Alt"].includes(key)) {
         const newKeys = parts.join("+");
         setKeybindings((prev) =>
-          prev.map((kb) => (kb.id === id ? { ...kb, keys: newKeys } : kb)),
+          prev.map((kb) =>
+            kb.id === listeningId ? { ...kb, keys: newKeys } : kb,
+          ),
         );
         setListeningId(null);
-        window.removeEventListener("keydown", listener);
       }
     };
 
     window.addEventListener("keydown", listener);
-  };
+    return () => window.removeEventListener("keydown", listener);
+  }, [listeningId]);
 
   const handleImportVsCode = async () => {
     try {

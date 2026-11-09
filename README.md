@@ -137,6 +137,43 @@ any of this — the app manages the environment for you.
   run them yourself via something like Ollama for now.
 - Tested most thoroughly on macOS; Linux/Windows should work given the
   Docker-based architecture, but haven't had the same depth of testing.
+- Existing files in the managed ROS workspace are preserved rather than
+  overwritten during startup. Older customized Docker/server resources may
+  therefore need an explicit manual migration to receive newer resource
+  changes.
+
+## Security notes
+
+- New ROS containers publish gRPC on `127.0.0.1:50051`, not on all host
+  interfaces. The gRPC service does not yet authenticate callers; do not
+  forward or re-publish this port to another network.
+- Twist commands reject malformed topic names, non-finite values, and
+  linear or angular components outside `-5` to `5`.
+- AI provider credentials are currently stored in the application
+  configuration file and are not yet integrated with the operating
+  system's credential store. Avoid using the app with credentials on
+  shared or untrusted accounts.
+- File commands currently accept paths supplied by the frontend and do
+  not yet enforce a backend-maintained approved-root list. Only open
+  projects and files you trust.
+- Existing containers created before loopback-only port publishing may
+  retain their previous host binding. Check `docker port` before using an
+  existing installation on an untrusted network.
+
+These are known security limitations, not a claim of security
+certification.
+
+## Development checks
+
+Run the frontend build/type check, Rust tests and lint, and isolated
+Python service-core tests from the repository root:
+
+```sh
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
+python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
+```
 
 ---
 
