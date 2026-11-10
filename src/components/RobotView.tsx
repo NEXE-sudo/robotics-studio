@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { listen } from "@tauri-apps/api/event";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { invoke } from "@tauri-apps/api/core";
 import { ArrowUp, ArrowDown, RotateCcw, RotateCw, Square } from "lucide-react";
 
 interface OdometryUpdate {
@@ -223,11 +224,69 @@ export default function RobotView() {
 export function RobotControls({
   onCommand,
   availableRobots,
+  safetyState,
+  safetyPending,
+  safetyError,
+  commandError,
+  onEmergencyStop,
+  onResetEmergencyStop,
 }: {
   onCommand: (topic: string, lin: number, ang: number) => void;
   availableRobots: string[];
+  safetyState: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
+  safetyPending: boolean;
+  safetyError: string | null;
+  commandError: string | null;
+  onEmergencyStop: () => void;
+  onResetEmergencyStop: () => void;
 }) {
   const [selectedRobot, setSelectedRobot] = useState<string | null>(null);
+  const [robotConfig, setRobotConfig] = useState<RobotMotionConfig | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const [configBusy, setConfigBusy] = useState(false);
+
+  useEffect(() => {
+    if (!selectedRobot) {
+      setRobotConfig(null);
+      return;
+    }
+    let active = true;
+    setConfigBusy(true);
+    setConfigError(null);
+    invoke<RobotMotionConfig>("get_robot_config", { topicName: selectedRobot })
+      .then((config) => {
+        if (active) setRobotConfig(config);
+      })
+      .catch((error) => {
+        if (active) setConfigError(String(error));
+      })
+      .finally(() => {
+        if (active) setConfigBusy(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedRobot]);
+
+  const saveConfig = async (reset = false) => {
+    if (!selectedRobot || !robotConfig || configBusy) return;
+    setConfigBusy(true);
+    setConfigError(null);
+    try {
+      const saved = reset
+        ? await invoke<RobotMotionConfig>("reset_robot_config", {
+            topicName: selectedRobot,
+          })
+        : await invoke<RobotMotionConfig>("save_robot_config", {
+            config: robotConfig,
+          });
+      setRobotConfig(saved);
+    } catch (error) {
+      setConfigError(String(error));
+    } finally {
+      setConfigBusy(false);
+    }
+  };
 
   // Keep selection valid as the available robot list changes (e.g., after
   // switching worlds) — default to the first available robot if none is
@@ -279,14 +338,60 @@ export function RobotControls({
       )}
 
       <div
+        role="status"
+        aria-live="polite"
+        style={{
+          margin: "8px 0",
+          padding: 8,
+          color: safetyState === "ACTIVE" || safetyState === "FAULT" ? "#ff8b82" : "#ccc",
+          background: safetyState === "ACTIVE" || safetyState === "FAULT" ? "#421f1f" : "#252526",
+        }}
+      >
+        Safety state: {safetyState}
+        {safetyState === "ACTIVE" && (
+          <div>Latched. Reset is explicit; motion will not resume automatically.</div>
+        )}
+      </div>
+      {safetyError && <div role="alert" style={{ color: "#ff8b82" }}>{safetyError}</div>}
+      {commandError && <div role="alert" style={{ color: "#ff8b82" }}>{commandError}</div>}
+      {safetyState === "ACTIVE" || safetyState === "FAULT" ? (
+        <button
+          type="button"
+          className="ide-btn primary"
+          disabled={safetyPending || safetyState === "FAULT"}
+          onClick={onResetEmergencyStop}
+          style={{ width: "100%", marginBottom: 8 }}
+        >
+          {safetyPending ? "Applying..." : "Reset Emergency Stop"}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="ide-btn"
+          disabled={safetyPending || safetyState !== "READY"}
+          onClick={onEmergencyStop}
+          style={{
+            width: "100%",
+            marginBottom: 8,
+            color: "#fff",
+            background: "#a32323",
+          }}
+        >
+          {safetyPending ? "Applying..." : "EMERGENCY STOP"}
+        </button>
+      )}
+
+      <div
         style={{
           marginBottom: "var(--spacing-sm)",
           fontSize: "var(--font-xs)",
           opacity: 0.75,
         }}
       >
-        Speed magnitude limits: 0.5 m/s linear, 1 rad/s angular. Commands time
-        out after 0.5 s; this is not a safety-rated emergency stop.
+        {robotConfig
+          ? `Limits: ${robotConfig.maxLinearVelocity} m/s linear, ${robotConfig.maxAngularVelocity} rad/s angular; ${robotConfig.commandLeaseMs} ms command lease.`
+          : "Per-robot motion limits are enforced by the ROS service."}{" "}
+        Software stop only; not safety-rated.
       </div>
 
       <div
@@ -294,12 +399,13 @@ export function RobotControls({
           display: "grid",
           gridTemplateColumns: "repeat(3, 48px)",
           justifyContent: "center",
-          opacity: selectedRobot ? 1 : 0.4,
-          pointerEvents: selectedRobot ? "auto" : "none",
+          opacity: selectedRobot && safetyState === "READY" && !safetyPending ? 1 : 0.4,
+          pointerEvents: selectedRobot && safetyState === "READY" && !safetyPending ? "auto" : "none",
         }}
       >
         <div />
         <button
+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0.3, 0)}
         >
@@ -309,6 +415,7 @@ export function RobotControls({
         </button>
         <div />
         <button
+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, 0.5)}
         >
@@ -317,6 +424,7 @@ export function RobotControls({
           />
         </button>
         <button
+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, 0)}
         >
@@ -325,6 +433,7 @@ export function RobotControls({
           />
         </button>
         <button
+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, 0, -0.5)}
         >
@@ -334,6 +443,7 @@ export function RobotControls({
         </button>
         <div />
         <button
+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
           style={btnStyle}
           onClick={() => onCommand(selectedRobot!, -0.3, 0)}
         >
@@ -343,6 +453,73 @@ export function RobotControls({
         </button>
         <div />
       </div>
+      {selectedRobot && robotConfig && (
+        <fieldset
+          disabled={configBusy}
+          style={{ marginTop: 12, border: "1px solid #444", padding: 8 }}
+        >
+          <legend>Robot motion limits</legend>
+          {([
+            ["maxLinearVelocity", "Linear velocity (m/s)"],
+            ["maxAngularVelocity", "Angular velocity (rad/s)"],
+            ["maxLinearAcceleration", "Linear acceleration (m/s²)"],
+            ["maxAngularAcceleration", "Angular acceleration (rad/s²)"],
+            ["commandLeaseMs", "Command lease (ms)"],
+            ["commandTimeoutMs", "Command timeout (ms)"],
+          ] as const).map(([field, label]) => (
+            <label key={field} style={{ display: "block", fontSize: 11, margin: "6px 0" }}>
+              {label}
+              <input
+                type="number"
+                min={field.endsWith("Ms") ? 100 : 0.01}
+                step={field.endsWith("Ms") ? 50 : 0.05}
+                value={robotConfig[field]}
+                onChange={(event) => {
+                  const value = Number(event.target.value);
+                  setRobotConfig((current) => current && { ...current, [field]: value });
+                }}
+                style={{ width: "100%" }}
+              />
+            </label>
+          ))}
+          <label style={{ display: "block", fontSize: 11 }}>
+            Motion mode
+            <select
+              value={robotConfig.permittedMotionModes.includes("full_twist") ? "full_twist" : "planar"}
+              onChange={(event) =>
+                setRobotConfig((current) => current && {
+                  ...current,
+                  permittedMotionModes: [event.target.value],
+                })
+              }
+              style={{ width: "100%" }}
+            >
+              <option value="planar">Planar</option>
+              <option value="full_twist">Full Twist</option>
+            </select>
+          </label>
+          {configError && <div role="alert" style={{ color: "#ff8b82" }}>{configError}</div>}
+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <button type="button" className="ide-btn primary" disabled={configBusy} onClick={() => void saveConfig()}>
+              Save limits
+            </button>
+            <button type="button" className="ide-btn" disabled={configBusy} onClick={() => void saveConfig(true)}>
+              Safe defaults
+            </button>
+          </div>
+        </fieldset>
+      )}
     </div>
   );
+}
+
+interface RobotMotionConfig {
+  topicName: string;
+  maxLinearVelocity: number;
+  maxAngularVelocity: number;
+  maxLinearAcceleration: number;
+  maxAngularAcceleration: number;
+  commandLeaseMs: number;
+  commandTimeoutMs: number;
+  permittedMotionModes: string[];
 }

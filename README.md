@@ -15,9 +15,9 @@ upfront about that than pretend otherwise.
 - **One-click ROS 2 + Gazebo environment** — the app builds, starts, and
   connects to a Docker-based ROS 2 environment automatically on launch. No
   manual Docker/Dev Container setup required.
-- **Live ROS introspection** — a real-time node/topic feed streamed over
-  gRPC while your system runs, plus a live **TF tree** view of your robot's
-  transform frames.
+- **Live ROS status** — node/topic snapshots and TF updates are streamed over
+  authenticated gRPC while the system runs. The current UI does not yet
+  provide full package, service, or action exploration.
 - **3D visualization** — robot state rendered live in a three.js viewport,
   with in-app controls to publish `cmd_vel` commands directly (no manual
   container terminal needed for basic teleop).
@@ -46,23 +46,33 @@ upfront about that than pretend otherwise.
   directories selected in a native picker; file operations reject traversal,
   symlink escapes, and oversized text files.
 - **Authenticated ROS gRPC** — application-generated session credentials,
-  expiry checks, and authenticated event/control requests. Existing containers
-  with non-loopback gRPC bindings are refused rather than treated as secure.
+  expiry checks, and authenticated event/control requests over TLS. The client
+  pins a container-generated CA certificate delivered through Docker's control
+  channel; existing containers with non-loopback gRPC bindings are refused.
 - **Safer world import** — validates SDF input and stores it in a dedicated,
   uniquely named workspace `worlds/` directory rather than overwriting files
   in the workspace root. Imports are XML-parsed, require an SDF root and world
   element, accept supported SDF versions 1.4–1.10, and reject DTDs.
-- **Prioritized ROS events** — critical discovery state is retained separately
-  from coalesced telemetry; reconnecting clients receive the latest discovery
-  snapshots.
-- **Bounded robot commands** — linear velocity magnitude is limited to
-  0.5 m/s, angular velocity magnitude to 1 rad/s, and commands expire after
-  0.5 seconds. These limits are fixed conservative defaults, not robot-specific
-  tuning or a safety-rated emergency stop.
+- **Recoverable ROS events** — selected critical node-lifecycle and safety
+  events are persisted and replayed after reconnect or service restart.
+  Coalesced telemetry and periodic discovery snapshots are best-effort, not
+  journaled. If retained history has a gap, the stream reports it and includes
+  the latest state snapshots where available.
+- **Per-robot command limits** — configure bounded linear/angular velocity,
+  acceleration, planar/full-Twist mode, and command lease/timeout per command
+  topic. Defaults remain conservative (0.5 m/s linear, 1 rad/s angular,
+  0.5-second lease); hard ceilings prevent loosening the built-in bounds.
+- **Software emergency stop** — the 3D View controls can latch motion commands
+  off, publish zero velocity on discovered `/cmd_vel` topics, and require an
+  explicit reset. Stop state and a bounded activation/reset history persist
+  across service restarts.
 
 ---
 
 ## Architecture, briefly
+
+The trust boundaries and subsystem behavior are described in
+[docs/architecture.md](./docs/architecture.md).
 
 This app has two halves that run in different places and talk to each other:
 
@@ -118,8 +128,11 @@ any of this — the app manages the environment for you.
   output (updates in place, doesn't flood the log with duplicate lines).
 - **Start Sim / Stop Sim / Reset Sim** — launches a Gazebo demo world (or
   your own custom world), visualized live in the **3D View** tab.
+- **3D View safety controls** — select a robot command topic to edit its
+  bounded limits, latch the software emergency stop, or explicitly reset it.
+  The backend remains authoritative and rejects commands while stopped.
 - **ROS Log tab** — live feed of ROS 2 node/topic activity.
-- **TF Tree tab** — live transform tree, with an **Explain** action per
+- **TF tab** — live transform updates, with an **Explain** action per
   frame for an AI-generated plain-language breakdown.
 - **AI Assistant (right panel)** — ask questions about your open file,
   recent ROS activity, or build output. Configure your provider/API key in
@@ -136,7 +149,7 @@ any of this — the app manages the environment for you.
 4. Click **Start Sim**, switch to the **3D View** tab.
 5. Use the in-app teleop controls to publish a `cmd_vel` command and watch
    the robot move.
-6. Open the **TF Tree** tab and click **Explain** on a frame.
+6. Open the **TF** tab and click **Explain** on a frame.
 7. Ask the AI assistant: *"what ROS topics are currently active?"* — it
    should answer from live data, not a guess.
 
@@ -146,6 +159,18 @@ any of this — the app manages the environment for you.
 
 - 3D view uses accurately-dimensioned placeholder geometry, not full URDF
   mesh loading yet — visually approximate, not a rendered CAD model.
+- The TF tab currently lists/group-displays received transform edges; it does
+  not yet provide a fully validated hierarchy, stale-frame expiry, or cycle
+  detection.
+- ROS package discovery, detailed node endpoint inspection, and service/action
+  exploration are not implemented. The live ROS view is not a complete graph
+  explorer.
+- URDF editing and AI generation are available, but URDF parsing, Xacro
+  processing, package-resource resolution, and description-based model
+  rendering are not implemented. The 3D view uses placeholder geometry.
+- SDF imports are checked for XML structure, a supported declared version,
+  and a world element; this is not SDFormat schema or resource-reference
+  validation.
 - ROS↔three.js coordinate mapping is a first-pass approximation — rotation
   direction hasn't been rigorously verified against every convention.
 - Only one bundled project template (`basic_publisher`) so far.
@@ -160,11 +185,27 @@ any of this — the app manages the environment for you.
   update is installed. Existing containers with insecure gRPC port bindings
   are detected and blocked, but must be recreated manually with their workspace
   bind-mounted to preserve files.
-- Robot-control limits are not configurable per robot. There is no latched
-  software emergency stop, physical-robot confirmation flow, or safety-rated
-  control guarantee.
-- Workspace selection is still not wired through every backend operation;
-  build and simulation lifecycle currently use the managed default workspace.
+- The software emergency stop is latched and backend-enforced, but there is no
+  physical-robot confirmation flow or safety-rated control guarantee.
+- The ROS workspace picker selects the active workspace for container
+  initialization, builds, simulation, and world imports. It is persisted under
+  `~/.robotics-studio/selected-workspace.txt`; opening an unrelated folder in
+  the file explorer does not change the ROS workspace.
+- Build and simulator subprocesses do not yet share a unified process manager.
+  The Build action can cancel an active streaming `colcon build` by terminating
+  its dedicated process group. Gazebo startup now waits up to 20 seconds for a
+  world-control service and cleans up if startup or bridge setup fails, but
+  generalized process status, timeouts, and application-shutdown cleanup are
+  still incomplete.
+- A bounded, workspace-local journal stores critical node-lifecycle and
+  software safety events (up to 256 records and 4 MiB) and preserves their
+  sequence numbers across service restarts. Telemetry and periodic snapshots are
+  coalesced/best-effort and are not journaled; they do not consume durable
+  sequence numbers. Replaying a range returns retained events, not an
+  exactly-once acknowledgment from the UI. Older-than-retained requests report
+  a gap and include the latest in-memory snapshots when available. Journal
+  write failures are surfaced in event health; failure while recording a
+  safety transition fail-closes the safety controller.
 - AI provider credentials are stored through the operating-system credential
   store. Linux requires an available Secret Service; the app reports an error
   if secure storage is unavailable.
@@ -172,11 +213,22 @@ any of this — the app manages the environment for you.
 ## Security notes
 
 - Native file and directory pickers register approved roots in the Rust
-  backend. Reads, writes, listings, project creation, and `.aiignore` checks
-  are constrained to those roots; text reads/writes are limited to 8 MiB.
-- New ROS containers bind gRPC to `127.0.0.1:50051`. Both gRPC methods require
-  a random 256-bit token with a 24-hour expiry. The token is transferred via a
-  protected file and is never returned to frontend JavaScript.
+  backend. File reads, writes, listings, and `.aiignore` reads are constrained
+  to those roots; text reads/writes are limited to 8 MiB. Template and
+  devcontainer copying still needs descriptor-rooted destination operations.
+- The selected ROS workspace is revalidated by the backend on use. Switching
+  workspaces stops the running managed container for the previous workspace
+  before the new environment is initialized; stopped containers are preserved.
+- New ROS containers publish gRPC only on host loopback and use TLS with a
+  per-container CA and server certificate. The app retrieves the public CA
+  certificate through Docker's control channel and pins it before sending
+  credentials. All gRPC methods also require a random 256-bit token with a
+  24-hour expiry. The token is transferred via a protected file and is never
+  returned to frontend JavaScript.
+- The running ROS service scripts and protocol are copied from the application
+  bundle into `/opt/robotics-studio` inside the container, outside the writable
+  workspace mount. Legacy workspace copies are compared byte-for-byte against
+  bundled files before migration; a source-code marker alone is not trusted.
 - When a stream reports an expired or rejected token, the app performs one
   guarded environment reinitialization: it generates a new token, replaces
   the container credential file, restarts the ROS service, and reconnects.
@@ -186,9 +238,10 @@ any of this — the app manages the environment for you.
 - An existing container with a missing or non-loopback gRPC binding is
   rejected. The app does not automatically replace that container; preserve
   its host workspace and recreate it with a loopback-only mapping.
-- Robot velocity and freshness checks run in both Rust and Python. Commands
-  are checked against combined linear and angular vector magnitudes and are
-  stopped by the server watchdog after 0.5 seconds, but this is not a
+- Robot velocity and freshness checks run in Rust and Python. The ROS service
+  enforces per-topic velocity, acceleration, mode, lease, and timeout settings
+  within hard ceilings; defaults include a 0.5-second command lease. The
+  software emergency stop publishes zero Twist commands but is not a
   replacement for a physical emergency-stop circuit.
 - Imported SDF is checked for XML well-formedness, an SDF root, a world
   element, and a supported declared SDF version. DTDs are rejected. This is
@@ -199,21 +252,30 @@ any of this — the app manages the environment for you.
   metadata is stored in the application settings JSON. Existing plaintext
   credentials are moved to secure storage on first settings load, and the old
   JSON entry is removed only after the secure-store write succeeds.
-- Path validation checks canonical containment and rejects traversal and
-  symlink escapes. It is not a kernel-level descriptor-based sandbox against a
-  local process racing filesystem changes.
+- On Unix, approved-root file reads, writes, listings, and world imports use
+  pinned directory descriptors and no-follow `openat` operations; replacing
+  an approved root is rejected. Windows currently uses canonical-path checks
+  and atomic temporary-file replacement, and does not provide equivalent
+  protection against a local process racing parent-directory changes.
+- Not every operation has been migrated to descriptor-rooted access yet;
+  selected-world source reads and template/project creation remain areas for
+  further platform-specific race hardening.
 
-These controls have not been independently security-audited and are not a
-claim of security certification.
+An independent source review found and this development pass fixed the
+workspace service-marker trust issue and plaintext gRPC credential transport.
+This review and the integration checks are not a claim of security
+certification.
 
 ## Migration notes for existing v0.2.0 installations
 
 - The managed ROS workspace remains in `~/.robotics-studio/ros2-workspace`;
   project files and workspace data are not removed by these changes.
-- On the next environment initialization, the app backs up existing
-  `server.py`, `server_core.py`, and `proto/ros_engine.proto` files under the
-  application config directory, then installs the authenticated server
-  protocol.
+- On the next environment initialization, the app compares existing
+  `server.py`, `server_core.py`, and `proto/ros_engine.proto` files byte-for-byte
+  with trusted bundled copies, backs up modified copies under the application
+  config directory, and installs the bundled versions. The running service is
+  launched from an application-provisioned directory inside the container,
+  not from the workspace mount.
 - Containers whose host gRPC port is bound to an external interface are
   refused. Stop the old container and recreate it with
   `-p 127.0.0.1:50051:50051` and the existing workspace mounted at
@@ -221,20 +283,49 @@ claim of security certification.
 - On first AI settings load, an existing plaintext API key is migrated to the
   operating-system credential store. If that store is unavailable, migration
   fails explicitly and the original settings file is retained for recovery.
+- The emergency stop is **software-only**: it cannot guarantee physical
+  stopping, stop controllers that ignore `/cmd_vel`, or replace a hardware
+  safety circuit. Validate stop behavior on the actual robot and maintain
+  independent hardware safeguards.
 
 ## Development checks
 
-Run the frontend build/type check, Rust formatting/check/tests/lint, and
-isolated Python service-core tests from the repository root:
+Run the frontend build/type check and audit, Rust formatting/check/tests/lint
+and dependency audit, and isolated Python service-core tests from the repository
+root. Install `cargo-audit` 0.23.0 if it is not already available.
 
 ```sh
+cargo install cargo-audit --version 0.23.0 --locked
 npm run build
+npm audit --audit-level=moderate
+cargo audit --file src-tauri/Cargo.lock
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
 python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
 ```
+
+For the live container integration (Docker Desktop or Docker Engine must be
+running), execute:
+
+```sh
+./scripts/docker-integration.sh
+```
+
+The script builds the supported ROS 2 Jazzy/Gazebo Harmonic image, mounts a
+temporary workspace, verifies the pinned-TLS Rust client, gRPC authentication,
+emergency-stop gating, event replay after service restart, Gazebo world/model
+readiness, reset, and ROS-Gazebo topic bridging. It performs no robot movement
+and removes its temporary container and workspace on exit. CI runs the same
+script on its Linux runner.
+
+These are unit/build checks, not Docker/ROS 2/Gazebo integration tests. They
+require Docker Desktop running for a live environment; if it is unavailable,
+simulation and gRPC integration behavior remains unverified. The current
+supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in the
+bundled container. macOS is tested most often; Linux/Windows builds and
+runtime behavior need additional platform CI coverage.
 
 ---
 

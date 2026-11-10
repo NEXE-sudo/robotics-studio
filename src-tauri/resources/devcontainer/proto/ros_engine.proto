@@ -5,7 +5,13 @@ package rosengine;
 
 service RosEngine {
   rpc StreamEvents(Empty) returns (stream WorkspaceEvent);
+  rpc ReplayEvents(ReplayEventsRequest) returns (stream WorkspaceEvent);
   rpc PublishTwist(TwistCommand) returns (Empty);
+  rpc SetEmergencyStop(EmergencyStopRequest) returns (SafetyState);
+  rpc GetSafetyState(Empty) returns (SafetyState);
+  rpc GetRobotConfig(RobotConfigRequest) returns (RobotConfig);
+  rpc SetRobotConfig(RobotConfig) returns (RobotConfig);
+  rpc GetEventHealth(Empty) returns (EventHealth);
 }
 
 message TwistCommand {
@@ -21,6 +27,62 @@ message TwistCommand {
 
 message Empty {}
 
+message ReplayEventsRequest {
+  bool has_after_sequence = 1;
+  uint64 after_sequence = 2;
+}
+
+message EmergencyStopRequest {
+  enum Action {
+    ACTION_UNSPECIFIED = 0;
+    ACTIVATE = 1;
+    RESET = 2;
+  }
+  Action action = 1;
+}
+
+message SafetyState {
+  enum State {
+    READY = 0;
+    ACTIVE = 1;
+    RESET_PENDING = 2;
+    FAULT = 3;
+    DISCONNECTED = 4;
+  }
+  State state = 1;
+  string detail = 2;
+  int64 updated_at_ns = 3;
+}
+
+message RobotConfigRequest {
+  string topic_name = 1;
+}
+
+message RobotConfig {
+  string topic_name = 1;
+  double max_linear_velocity = 2;
+  double max_angular_velocity = 3;
+  double max_linear_acceleration = 4;
+  double max_angular_acceleration = 5;
+  uint32 command_lease_ms = 6;
+  uint32 command_timeout_ms = 7;
+  repeated string permitted_motion_modes = 8;
+  bool reset_to_defaults = 9;
+}
+
+message EventHealth {
+  uint32 queue_capacity = 1;
+  uint32 subscriber_count = 2;
+  uint64 last_sequence = 3;
+  uint64 dropped_telemetry = 4;
+  uint64 critical_overflows = 5;
+  uint32 max_backlog = 6;
+  bool persistence_healthy = 7;
+  string persistence_error = 8;
+  uint64 oldest_available_sequence = 9;
+  uint32 retained_critical_events = 10;
+}
+
 message WorkspaceEvent {
   oneof event {
     NodeStarted node_started = 1;
@@ -29,8 +91,20 @@ message WorkspaceEvent {
     OdometryUpdate odometry_update = 4;
     TFUpdate tf_update = 5;
     NodeSnapshot node_snapshot = 6;
+    SafetyState safety_state = 7;
+    EventHealth event_health = 8;
+    EventRecovery event_recovery = 9;
   }
   int64 timestamp_ns = 10;
+  uint64 sequence = 11;
+}
+
+message EventRecovery {
+  bool gap_detected = 1;
+  uint64 oldest_available_sequence = 2;
+  uint64 latest_sequence = 3;
+  bool snapshot_included = 4;
+  uint32 retained_critical_events = 5;
 }
 
 message NodeSnapshot {

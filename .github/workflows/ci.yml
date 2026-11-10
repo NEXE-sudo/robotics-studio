@@ -40,10 +40,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - run: cargo install cargo-audit --version 0.23.0 --locked
+      - run: cargo audit --file src-tauri/Cargo.lock
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+      - name: Docker ROS 2 and Gazebo integration
+        run: ./scripts/docker-integration.sh
 
   python:
     name: Python service-core tests
@@ -54,4 +58,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
-      - run: python -m py_compile src-tauri/resources/devcontainer/server.py src-tauri/resources/devcontainer/server_core.py
+      - run: python -m py_compile src-tauri/resources/devcontainer/server.py src-tauri/resources/devcontainer/server_core.py src-tauri/resources/devcontainer/test_server_core.py

@@ -206,6 +206,8 @@ function FileTree({
 }
 
 function App() {
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [buildError, setBuildError] = useState<string | null>(null);
   // --- File browser state ---
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [currentPath, setCurrentPath] = useState<string | null>(null);
@@ -267,6 +269,31 @@ function App() {
   const [rosEvents, setRosEvents] = useState<string[]>([]);
   const [rosConnected, setRosConnected] = useState(false);
   const [initializing, setInitializing] = useState(false);
+  const [safetyState, setSafetyState] = useState<
+    "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
+  >("DISCONNECTED");
+  const [safetyError, setSafetyError] = useState<string | null>(null);
+  const [safetyPending, setSafetyPending] = useState(false);
+  const [eventHealth, setEventHealth] = useState<{
+    queueCapacity: number;
+    subscriberCount: number;
+    lastSequence: number;
+    droppedTelemetry: number;
+    criticalOverflows: number;
+    maxBacklog: number;
+    persistenceHealthy: boolean;
+    persistenceError: string;
+    oldestAvailableSequence: number;
+    retainedCriticalEvents: number;
+  } | null>(null);
+  const [eventRecovery, setEventRecovery] = useState<{
+    gapDetected: boolean;
+    oldestAvailableSequence: number;
+    latestSequence: number;
+    snapshotIncluded: boolean;
+    retainedCriticalEvents: number;
+  } | null>(null);
+  const [robotCommandError, setRobotCommandError] = useState<string | null>(null);
   const rosWorkspaceReady = useRef(false);
   const authRecoveryStarted = useRef(false);
   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
@@ -276,9 +303,14 @@ function App() {
   const [buildOutput, setBuildOutput] = useState<string[]>([]);
   const [building, setBuilding] = useState(false);
   const diagnostics = [
+    ...(workspaceError ? [workspaceError] : []),
+    ...(buildError ? [buildError] : []),
     ...setupOutput.filter((line) => line.startsWith("❌")),
     ...buildOutput.filter((line) => /error|failed/i.test(line)),
     ...rosEvents.filter((line) => /NodeCrashed|error/i.test(line)),
+    ...(eventHealth && !eventHealth.persistenceHealthy
+      ? [`Critical ROS event persistence failed: ${eventHealth.persistenceError}`]
+      : []),
   ];
 
   // --- AI chat ---
@@ -512,14 +544,33 @@ function App() {
 
   // ---------- ROS workspace selection ----------
   const pickRosWorkspace = async () => {
-    const selected = await invoke<string | null>("pick_directory");
-    if (selected) {
-      setRosWorkspacePath(selected);
+    try {
+      const selected = await invoke<string | null>("pick_directory");
+      if (selected) {
+        const activeWorkspace = await invoke<string>("set_ros_workspace", {
+          workspaceRoot: selected,
+        });
+        setRosWorkspacePath(activeWorkspace);
+        rosWorkspaceReady.current = false;
+        setRosConnected(false);
+        setSafetyState("DISCONNECTED");
+        setSafetyError(null);
+        setNodeStatus({});
+        setAvailableRobots([]);
+        setWorldPath(null);
+        setEventHealth(null);
+        setEventRecovery(null);
+        setWorkspaceError(null);
+        await initializeRosEnvironment();
+      }
+    } catch (error) {
+      setWorkspaceError(`Could not switch ROS workspace: ${String(error)}`);
     }
   };
 
   // ---------- Build actions ----------
   const triggerBuild = async () => {
+    setBuildError(null);
     setBuildOutput([]);
     setBuilding(true);
     setBottomCollapsed(false);
@@ -529,6 +580,15 @@ function App() {
     } catch (error) {
       setBuilding(false);
       setBuildOutput((prev) => appendLog(prev, `ERROR: ${String(error)}`));
+    }
+  };
+
+  const cancelBuild = async () => {
+    try {
+      await invoke("cancel_colcon_build");
+      setBuildError(null);
+    } catch (error) {
+      setBuildError(`Build cancellation failed: ${String(error)}`);
     }
   };
 
@@ -583,12 +643,39 @@ function App() {
     linearX: number,
     angularZ: number,
   ) => {
+    setRobotCommandError(null);
     try {
       await invoke("publish_twist", {
         command: { topicName, linearX, angularZ },
       });
     } catch (err) {
-      console.error("Twist command failed:", err);
+      setRobotCommandError(String(err));
+    }
+  };
+
+  const requestEmergencyStop = async (activate: boolean) => {
+    if (safetyPending) return;
+    if (!activate && !window.confirm("Reset the latched emergency stop? Motion will remain stopped until a new command is issued.")) {
+      return;
+    }
+    setSafetyPending(true);
+    setSafetyError(null);
+    try {
+      const state = await invoke<{
+        state: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
+        detail: string;
+      }>("set_emergency_stop", { activate });
+      setSafetyState(state.state);
+      if (state.state !== (activate ? "ACTIVE" : "READY")) {
+        setSafetyError(state.detail || "Backend did not confirm the requested safety state.");
+      }
+    } catch (error) {
+      if (activate) {
+        setSafetyState("DISCONNECTED");
+      }
+      setSafetyError(`Emergency-stop request was not confirmed: ${String(error)}`);
+    } finally {
+      setSafetyPending(false);
     }
   };
 
@@ -758,10 +845,12 @@ function App() {
     const unlistenError = listen<string>("ros-error", (event) => {
       console.error("ROS error:", event.payload);
       setRosConnected(false);
+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
     });
 
     const unlistenAuthError = listen<string>("ros-auth-error", (event) => {
       setRosConnected(false);
+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
       setRosEvents((prev) =>
         [...prev.slice(-49), `Authentication: ${event.payload}`],
       );
@@ -773,6 +862,37 @@ function App() {
 
     const unlistenConnecting = listen<void>("ros-connecting", () => {
       setRosConnected(false);
+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
+    });
+    const unlistenSafety = listen<{
+      state: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
+      detail: string;
+    }>("safety-state", (event) => {
+      setSafetyState(event.payload.state);
+      setSafetyError(event.payload.state === "FAULT" ? event.payload.detail : null);
+    });
+    const unlistenEventHealth = listen<{
+      queueCapacity: number;
+      subscriberCount: number;
+      lastSequence: number;
+      droppedTelemetry: number;
+      criticalOverflows: number;
+      maxBacklog: number;
+      persistenceHealthy: boolean;
+      persistenceError: string;
+      oldestAvailableSequence: number;
+      retainedCriticalEvents: number;
+    }>("event-health", (event) => {
+      setEventHealth(event.payload);
+    });
+    const unlistenEventRecovery = listen<{
+      gapDetected: boolean;
+      oldestAvailableSequence: number;
+      latestSequence: number;
+      snapshotIncluded: boolean;
+      retainedCriticalEvents: number;
+    }>("event-recovery", (event) => {
+      setEventRecovery(event.payload);
     });
 
     const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
@@ -812,6 +932,9 @@ function App() {
       unlistenAuthError.then((f) => f());
       unlistenNodeSnapshot.then((f) => f());
       unlistenConnecting.then((f) => f());
+      unlistenSafety.then((f) => f());
+      unlistenEventHealth.then((f) => f());
+      unlistenEventRecovery.then((f) => f());
       unlistenBuildOutput.then((f) => f());
       unlistenBuildError.then((f) => f());
       unlistenBuildFinished.then((f) => f());
@@ -1016,6 +1139,11 @@ function App() {
             </>
           )}
         </button>
+        {building && (
+          <button className="ide-btn" onClick={cancelBuild}>
+            Cancel Build
+          </button>
+        )}
         <select
           value={worldPath ?? "default"}
           onChange={(e) => {
@@ -1880,6 +2008,12 @@ function App() {
                     <RobotControls
                       onCommand={sendTwist}
                       availableRobots={availableRobots}
+                      safetyState={safetyState}
+                      safetyPending={safetyPending}
+                      safetyError={safetyError}
+                      commandError={robotCommandError}
+                      onEmergencyStop={() => void requestEmergencyStop(true)}
+                      onResetEmergencyStop={() => void requestEmergencyStop(false)}
                     />
                   </div>
                 </div>
@@ -1887,6 +2021,21 @@ function App() {
               {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
               {activeTab === "problems" && (
                 <div style={{ padding: 8, fontSize: 12 }}>
+                  {eventHealth && (
+                    <div role="status" style={{ padding: "6px 0", color: !eventHealth.persistenceHealthy ? "#e08080" : eventHealth.criticalOverflows > 0 ? "#e0b060" : "#7cd992" }}>
+                      ROS event queue: {eventHealth.subscriberCount} subscriber(s), backlog {eventHealth.maxBacklog}/{eventHealth.queueCapacity}, critical overflows {eventHealth.criticalOverflows}, coalesced/dropped telemetry {eventHealth.droppedTelemetry}; retained critical events {eventHealth.retainedCriticalEvents}.
+                    </div>
+                  )}
+                  {eventHealth && !eventHealth.persistenceHealthy && (
+                    <div role="alert" style={{ color: "#e08080", padding: "4px 0" }}>
+                      Critical event history is unavailable: {eventHealth.persistenceError}
+                    </div>
+                  )}
+                  {eventRecovery?.gapDetected && (
+                    <div role="status" style={{ color: "#e0b060", padding: "4px 0" }}>
+                      ROS event history had a gap. {eventRecovery.snapshotIncluded ? "Current state snapshots were restored." : "A state snapshot is not available yet."} Oldest retained sequence: {eventRecovery.oldestAvailableSequence}; latest sequence: {eventRecovery.latestSequence}.
+                    </div>
+                  )}
                   {diagnostics.length === 0 ? (
                     <div style={{ color: "#777" }}>No problems reported by recent environment, build, or ROS output.</div>
                   ) : (
