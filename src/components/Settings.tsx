@@ -1,6 +1,5 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { X, Lightbulb } from "lucide-react";
 import {
   KeyBinding,
@@ -10,8 +9,8 @@ import {
 
 interface AIProviderSettings {
   provider: string;
-  api_key: string;
   model: string;
+  has_api_key: boolean;
 }
 
 interface SystemSpecs {
@@ -55,7 +54,11 @@ export default function Settings({
   const [provider, setProvider] = useState("groq");
   const [apiKey, setApiKey] = useState("");
   const [model, setModel] = useState(MODELS_BY_PROVIDER["groq"][0]);
+  const [hasApiKey, setHasApiKey] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
   const [aiSaved, setAiSaved] = useState(false);
+  const [aiSaving, setAiSaving] = useState(false);
+  const credentialLookupId = useRef(0);
 
   // Tab state
   const [activeTab, setActiveTab] = useState<"ai" | "shortcuts" | "system">(
@@ -82,10 +85,10 @@ export default function Settings({
     invoke<AIProviderSettings | null>("load_ai_settings").then((existing) => {
       if (existing) {
         setProvider(existing.provider);
-        setApiKey(existing.api_key);
         setModel(existing.model);
+        setHasApiKey(existing.has_api_key);
       }
-    });
+    }).catch((error) => setAiError(String(error)));
   }, []);
 
   // Load keybindings on mount
@@ -118,16 +121,53 @@ export default function Settings({
 
   // AI Provider tab handlers
   const handleProviderChange = (p: string) => {
+    const lookupId = ++credentialLookupId.current;
     setProvider(p);
     setModel(MODELS_BY_PROVIDER[p][0]);
+    setApiKey("");
+    setHasApiKey(false);
+    setAiError(null);
+    setAiSaved(false);
+    invoke<boolean>("has_ai_credential", { provider: p })
+      .then((exists) => {
+        if (lookupId === credentialLookupId.current) setHasApiKey(exists);
+      })
+      .catch((error) => {
+        if (lookupId === credentialLookupId.current) setAiError(String(error));
+      });
   };
 
   const handleSaveAi = async () => {
-    await invoke("save_ai_settings", {
-      settings: { provider, api_key: apiKey, model },
-    });
-    setAiSaved(true);
-    setTimeout(() => setAiSaved(false), 2000);
+    if (aiSaving) return;
+    const selectedProvider = provider;
+    const selectedApiKey = apiKey;
+    const hadSavedCredential = hasApiKey;
+    setAiSaving(true);
+    setAiError(null);
+    try {
+      await invoke("save_ai_settings", {
+        settings: { provider: selectedProvider, api_key: selectedApiKey, model },
+      });
+      setHasApiKey(hadSavedCredential || selectedApiKey.trim().length > 0);
+      setApiKey("");
+      setAiSaved(true);
+      setTimeout(() => setAiSaved(false), 2000);
+    } catch (error) {
+      setAiError(String(error));
+    } finally {
+      setAiSaving(false);
+    }
+  };
+
+  const handleDeleteAiCredential = async () => {
+    try {
+      await invoke("delete_ai_credential", { provider });
+      setHasApiKey(false);
+      setApiKey("");
+      setAiError(null);
+    } catch (error) {
+      setAiError(String(error));
+    }
   };
 
   // Keyboard shortcuts handlers
@@ -182,14 +222,8 @@ export default function Settings({
 
   const handleImportVsCode = async () => {
     try {
-      const path = await open({
-        filters: [{ name: "JSON", extensions: ["json"] }],
-        multiple: false,
-      });
-
-      if (!path) return;
-
-      const content = await invoke<string>("read_file", { path });
+      const content = await invoke<string | null>("pick_keybindings_file");
+      if (!content) return;
       const vsCodeBindings: VsCodeKeybinding[] = JSON.parse(content);
 
       if (!Array.isArray(vsCodeBindings)) {
@@ -373,6 +407,7 @@ export default function Settings({
               <select
                 value={provider}
                 onChange={(e) => handleProviderChange(e.target.value)}
+                disabled={aiSaving}
                 style={{
                   width: "100%",
                   padding: "var(--spacing-sm)",
@@ -400,6 +435,7 @@ export default function Settings({
               <select
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
+                disabled={aiSaving}
                 style={{
                   width: "100%",
                   padding: "var(--spacing-sm)",
@@ -430,7 +466,10 @@ export default function Settings({
                 type="password"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-..."
+                disabled={aiSaving}
+                placeholder={
+                  hasApiKey ? "Leave blank to keep the saved key" : "Enter API key"
+                }
                 style={{
                   width: "100%",
                   padding: "var(--spacing-sm)",
@@ -440,6 +479,28 @@ export default function Settings({
                   border: "1px solid #3c3c3c",
                 }}
               />
+              <div
+                style={{
+                  fontSize: "var(--font-xs)",
+                  marginBottom: "var(--spacing-md)",
+                  opacity: 0.75,
+                }}
+              >
+                {hasApiKey
+                  ? "A key is stored in the operating-system credential store."
+                  : "No key is stored for this provider."}
+              </div>
+              {aiError && (
+                <div
+                  style={{
+                    color: "#e08080",
+                    fontSize: "var(--font-xs)",
+                    marginBottom: "var(--spacing-sm)",
+                  }}
+                >
+                  {aiError}
+                </div>
+              )}
 
               <div
                 style={{
@@ -459,8 +520,20 @@ export default function Settings({
                     Saved
                   </span>
                 )}
-                <button className="ide-btn primary" onClick={handleSaveAi}>
-                  Save
+                {hasApiKey && (
+                  <button
+                    className="ide-btn"
+                    onClick={handleDeleteAiCredential}
+                  >
+                    Delete Key
+                  </button>
+                )}
+                <button
+                  className="ide-btn primary"
+                  onClick={handleSaveAi}
+                  disabled={aiSaving}
+                >
+                  {aiSaving ? "Saving..." : "Save"}
                 </button>
               </div>
             </div>

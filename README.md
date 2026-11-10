@@ -4,13 +4,13 @@ A native desktop IDE for ROS 2 development — edit code, build with `colcon`,
 run live simulations in Gazebo, visualize robot state in real time, and get
 AI assistance that actually understands your running ROS 2 system.
 
-**Status**: v0.2.0, early-stage. Built solo, in the open. Expect rough
+**Status**: v0.3.0 development target, early-stage. Built solo, in the open. Expect rough
 edges — this is a real, working tool, not a polished 1.0, and I'd rather be
 upfront about that than pretend otherwise.
 
 ---
 
-## What's in v0.2.0
+## What's in the v0.3.0 development target
 
 - **One-click ROS 2 + Gazebo environment** — the app builds, starts, and
   connects to a Docker-based ROS 2 environment automatically on launch. No
@@ -42,6 +42,23 @@ upfront about that than pretend otherwise.
   it doesn't run local models for you yet).
 - **Responsive UI** — scales with window/screen size rather than staying
   pinned at a fixed layout.
+- **Restricted native file access** — file browsing/editing is scoped to
+  directories selected in a native picker; file operations reject traversal,
+  symlink escapes, and oversized text files.
+- **Authenticated ROS gRPC** — application-generated session credentials,
+  expiry checks, and authenticated event/control requests. Existing containers
+  with non-loopback gRPC bindings are refused rather than treated as secure.
+- **Safer world import** — validates SDF input and stores it in a dedicated,
+  uniquely named workspace `worlds/` directory rather than overwriting files
+  in the workspace root. Imports are XML-parsed, require an SDF root and world
+  element, accept supported SDF versions 1.4–1.10, and reject DTDs.
+- **Prioritized ROS events** — critical discovery state is retained separately
+  from coalesced telemetry; reconnecting clients receive the latest discovery
+  snapshots.
+- **Bounded robot commands** — linear velocity magnitude is limited to
+  0.5 m/s, angular velocity magnitude to 1 rad/s, and commands expire after
+  0.5 seconds. These limits are fixed conservative defaults, not robot-specific
+  tuning or a safety-rated emergency stop.
 
 ---
 
@@ -138,40 +155,84 @@ any of this — the app manages the environment for you.
 - Tested most thoroughly on macOS; Linux/Windows should work given the
   Docker-based architecture, but haven't had the same depth of testing.
 - Existing files in the managed ROS workspace are preserved rather than
-  overwritten during startup. Older customized Docker/server resources may
-  therefore need an explicit manual migration to receive newer resource
-  changes.
+  overwritten during startup, except that legacy ROS server/proto files are
+  backed up under the application config directory before the authentication
+  update is installed. Existing containers with insecure gRPC port bindings
+  are detected and blocked, but must be recreated manually with their workspace
+  bind-mounted to preserve files.
+- Robot-control limits are not configurable per robot. There is no latched
+  software emergency stop, physical-robot confirmation flow, or safety-rated
+  control guarantee.
+- Workspace selection is still not wired through every backend operation;
+  build and simulation lifecycle currently use the managed default workspace.
+- AI provider credentials are stored through the operating-system credential
+  store. Linux requires an available Secret Service; the app reports an error
+  if secure storage is unavailable.
 
 ## Security notes
 
-- New ROS containers publish gRPC on `127.0.0.1:50051`, not on all host
-  interfaces. The gRPC service does not yet authenticate callers; do not
-  forward or re-publish this port to another network.
-- Twist commands reject malformed topic names, non-finite values, and
-  linear or angular components outside `-5` to `5`.
-- AI provider credentials are currently stored in the application
-  configuration file and are not yet integrated with the operating
-  system's credential store. Avoid using the app with credentials on
-  shared or untrusted accounts.
-- File commands currently accept paths supplied by the frontend and do
-  not yet enforce a backend-maintained approved-root list. Only open
-  projects and files you trust.
-- Existing containers created before loopback-only port publishing may
-  retain their previous host binding. Check `docker port` before using an
-  existing installation on an untrusted network.
+- Native file and directory pickers register approved roots in the Rust
+  backend. Reads, writes, listings, project creation, and `.aiignore` checks
+  are constrained to those roots; text reads/writes are limited to 8 MiB.
+- New ROS containers bind gRPC to `127.0.0.1:50051`. Both gRPC methods require
+  a random 256-bit token with a 24-hour expiry. The token is transferred via a
+  protected file and is never returned to frontend JavaScript.
+- When a stream reports an expired or rejected token, the app performs one
+  guarded environment reinitialization: it generates a new token, replaces
+  the container credential file, restarts the ROS service, and reconnects.
+  The old token is invalidated when the server restarts. If recovery fails,
+  the app stops automatic auth retries and reports the error. This is a
+  service-restart-based rotation flow, not a separate refresh-token protocol.
+- An existing container with a missing or non-loopback gRPC binding is
+  rejected. The app does not automatically replace that container; preserve
+  its host workspace and recreate it with a loopback-only mapping.
+- Robot velocity and freshness checks run in both Rust and Python. Commands
+  are checked against combined linear and angular vector magnitudes and are
+  stopped by the server watchdog after 0.5 seconds, but this is not a
+  replacement for a physical emergency-stop circuit.
+- Imported SDF is checked for XML well-formedness, an SDF root, a world
+  element, and a supported declared SDF version. DTDs are rejected. This is
+  not full SDFormat schema validation and does not resolve or validate every
+  referenced model or mesh.
+- AI provider credentials are stored separately through macOS Keychain,
+  Windows Credential Manager, or Linux Secret Service. Only provider/model
+  metadata is stored in the application settings JSON. Existing plaintext
+  credentials are moved to secure storage on first settings load, and the old
+  JSON entry is removed only after the secure-store write succeeds.
+- Path validation checks canonical containment and rejects traversal and
+  symlink escapes. It is not a kernel-level descriptor-based sandbox against a
+  local process racing filesystem changes.
 
-These are known security limitations, not a claim of security
-certification.
+These controls have not been independently security-audited and are not a
+claim of security certification.
+
+## Migration notes for existing v0.2.0 installations
+
+- The managed ROS workspace remains in `~/.robotics-studio/ros2-workspace`;
+  project files and workspace data are not removed by these changes.
+- On the next environment initialization, the app backs up existing
+  `server.py`, `server_core.py`, and `proto/ros_engine.proto` files under the
+  application config directory, then installs the authenticated server
+  protocol.
+- Containers whose host gRPC port is bound to an external interface are
+  refused. Stop the old container and recreate it with
+  `-p 127.0.0.1:50051:50051` and the existing workspace mounted at
+  `/workspace`. The application does not delete or automatically replace it.
+- On first AI settings load, an existing plaintext API key is migrated to the
+  operating-system credential store. If that store is unavailable, migration
+  fails explicitly and the original settings file is retained for recovery.
 
 ## Development checks
 
-Run the frontend build/type check, Rust tests and lint, and isolated
-Python service-core tests from the repository root:
+Run the frontend build/type check, Rust formatting/check/tests/lint, and
+isolated Python service-core tests from the repository root:
 
 ```sh
 npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --locked
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
 python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
 ```
 

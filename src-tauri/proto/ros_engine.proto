@@ -1,3 +1,4 @@
+// AUTH_PROTOCOL_VERSION = 1
 syntax = "proto3";
 
 package rosengine;
@@ -15,6 +16,7 @@ message TwistCommand {
   double linear_z = 5;
   double angular_x = 6;
   double angular_y = 7;
+  int64 timestamp_ns = 8;
 }
 
 message Empty {}

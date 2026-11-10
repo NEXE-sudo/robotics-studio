@@ -1,4 +1,167 @@
+use std::collections::HashSet;
 use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+
+const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
+const MAX_WORLD_SIZE: u64 = 10 * 1024 * 1024;
+const MAX_DIRECTORY_ENTRIES: usize = 10_000;
+
+#[derive(Default)]
+struct FsAccess {
+    approved_roots: Mutex<HashSet<PathBuf>>,
+}
+
+impl FsAccess {
+    fn approve_directory(&self, path: &Path) -> Result<PathBuf, String> {
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| format!("Could not resolve selected directory: {error}"))?;
+        if !canonical.is_dir() {
+            return Err("Selected path is not a directory".to_string());
+        }
+
+        self.approved_roots
+            .lock()
+            .map_err(|_| "Filesystem access state is unavailable".to_string())?
+            .insert(canonical.clone());
+        Ok(canonical)
+    }
+
+    fn resolve_existing(&self, path: &Path) -> Result<PathBuf, String> {
+        self.resolve(path, false)
+    }
+
+    fn resolve_for_write(&self, path: &Path) -> Result<PathBuf, String> {
+        self.resolve(path, true)
+    }
+
+    fn resolve(&self, path: &Path, allow_missing_leaf: bool) -> Result<PathBuf, String> {
+        if !path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
+        {
+            return Err(
+                "Path must be absolute and cannot contain traversal components".to_string(),
+            );
+        }
+
+        let candidate = if allow_missing_leaf {
+            let parent = path
+                .parent()
+                .ok_or_else(|| "Invalid destination path".to_string())?
+                .canonicalize()
+                .map_err(|error| format!("Invalid destination directory: {error}"))?;
+            parent.join(
+                path.file_name()
+                    .ok_or_else(|| "Invalid destination filename".to_string())?,
+            )
+        } else {
+            path.canonicalize()
+                .map_err(|error| format!("Could not resolve path: {error}"))?
+        };
+
+        let roots = self
+            .approved_roots
+            .lock()
+            .map_err(|_| "Filesystem access state is unavailable".to_string())?;
+        for root in roots.iter() {
+            let current_root = root
+                .canonicalize()
+                .map_err(|_| "An approved directory is no longer available".to_string())?;
+            if current_root == *root && candidate.starts_with(root) {
+                if allow_missing_leaf && candidate.exists() {
+                    let metadata =
+                        fs::symlink_metadata(&candidate).map_err(|error| error.to_string())?;
+                    if metadata.file_type().is_symlink() {
+                        return Err(
+                            "Symbolic links are not allowed as file destinations".to_string()
+                        );
+                    }
+                }
+                return Ok(candidate);
+            }
+        }
+
+        Err("Path is outside approved directories".to_string())
+    }
+}
+
+fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String> {
+    let path = access.resolve_existing(path)?;
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("Path is not a regular file".to_string());
+    }
+    if metadata.len() > MAX_FILE_SIZE {
+        return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
+    }
+    read_text_file_limited(&path, MAX_FILE_SIZE)
+}
+
+fn read_text_file_limited(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut contents = String::new();
+    file.take(max_bytes + 1)
+        .read_to_string(&mut contents)
+        .map_err(|error| error.to_string())?;
+    if contents.len() as u64 > max_bytes {
+        return Err(format!("File exceeds the {max_bytes}-byte limit"));
+    }
+    Ok(contents)
+}
+
+fn write_approved_file(access: &FsAccess, path: &Path, contents: &str) -> Result<(), String> {
+    if contents.len() as u64 > MAX_FILE_SIZE {
+        return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
+    }
+    let path = access.resolve_for_write(path)?;
+    if path.exists() {
+        let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Destination must be a regular file, not a symbolic link".to_string());
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Destination has no parent directory".to_string())?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| "Destination has no filename".to_string())?
+        .to_string_lossy();
+    let counter = std::sync::atomic::AtomicU64::fetch_add(
+        &FILE_WRITE_COUNTER,
+        1,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let temporary = parent.join(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        counter
+    ));
+    let write_result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        std::io::Write::write_all(&mut file, contents.as_bytes())
+            .map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())?;
+        #[cfg(windows)]
+        if path.exists() {
+            fs::remove_file(&path).map_err(|error| error.to_string())?;
+        }
+        fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+static FILE_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Very small gitignore-style pattern matcher, supporting the common cases:
 ///   *.ext          — match by extension/suffix anywhere in the filename
@@ -18,16 +181,14 @@ fn matches_aiignore_pattern(rel_path: &str, pattern: &str) -> bool {
     }
 
     if let Some(dir) = pattern.strip_suffix('/') {
-        return rel_path
-            .split('/')
-            .any(|component| component == dir);
+        return rel_path.split('/').any(|component| component == dir);
     }
 
     if let Some(ext) = pattern.strip_prefix("*.") {
         return rel_path
             .rsplit('/')
             .next()
-            .map_or(false, |name| name.ends_with(&format!(".{}", ext)));
+            .is_some_and(|name| name.ends_with(&format!(".{}", ext)));
     }
 
     if pattern.contains('*') {
@@ -43,25 +204,40 @@ fn matches_aiignore_pattern(rel_path: &str, pattern: &str) -> bool {
 
 /// Loads `.aiignore` from the given workspace root, if present, and returns
 /// whether `file_path` (absolute) should be excluded from AI context.
-fn is_ignored_by_aiignore(workspace_root: &str, file_path: &str) -> bool {
-    let ignore_file = std::path::Path::new(workspace_root).join(".aiignore");
-    let Ok(contents) = fs::read_to_string(&ignore_file) else {
-        return false;
+fn is_ignored_by_aiignore(
+    access: &FsAccess,
+    workspace_root: &Path,
+    file_path: &Path,
+) -> Result<bool, String> {
+    let workspace_root = access.resolve_existing(workspace_root)?;
+    if !workspace_root.is_dir() {
+        return Err("Workspace path is not a directory".to_string());
+    }
+    let file_path = access.resolve_existing(file_path)?;
+    if !file_path.starts_with(&workspace_root) {
+        return Err("File is outside the selected workspace".to_string());
+    }
+    let ignore_file = workspace_root.join(".aiignore");
+    let contents = match access.resolve_existing(&ignore_file) {
+        Ok(path) => read_approved_file(access, &path)?,
+        Err(_) if !ignore_file.exists() => return Ok(false),
+        Err(error) => return Err(error),
     };
 
-    let rel_path = std::path::Path::new(file_path)
-        .strip_prefix(workspace_root)
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| file_path.to_string());
+    let rel_path = file_path
+        .strip_prefix(&workspace_root)
+        .map_err(|_| "File is outside the selected workspace".to_string())?
+        .to_string_lossy()
+        .to_string();
 
-    contents
+    Ok(contents
         .lines()
-        .any(|pattern| matches_aiignore_pattern(&rel_path, pattern))
+        .any(|pattern| matches_aiignore_pattern(&rel_path, pattern)))
 }
 
 #[tauri::command]
-fn read_file(path: String) -> Result<String, String> {
-    fs::read_to_string(&path).map_err(|e| e.to_string())
+fn read_file(access: tauri::State<'_, FsAccess>, path: String) -> Result<String, String> {
+    read_approved_file(&access, Path::new(&path))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
@@ -72,7 +248,8 @@ struct RecentProject {
 }
 
 fn normalize_recent_projects(mut projects: Vec<RecentProject>) -> Vec<RecentProject> {
-    let mut by_path: std::collections::HashMap<String, RecentProject> = std::collections::HashMap::new();
+    let mut by_path: std::collections::HashMap<String, RecentProject> =
+        std::collections::HashMap::new();
 
     for project in projects.drain(..) {
         let path = project.path.trim().to_string();
@@ -113,8 +290,12 @@ fn normalize_recent_projects(mut projects: Vec<RecentProject>) -> Vec<RecentProj
 }
 
 #[tauri::command]
-fn write_file(path: String, contents: String) -> Result<(), String> {
-    fs::write(&path, contents).map_err(|e| e.to_string())
+fn write_file(
+    access: tauri::State<'_, FsAccess>,
+    path: String,
+    contents: String,
+) -> Result<(), String> {
+    write_approved_file(&access, Path::new(&path), &contents)
 }
 
 #[derive(serde::Serialize)]
@@ -125,11 +306,20 @@ struct FileEntry {
 }
 
 #[tauri::command]
-fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
+fn list_dir(access: tauri::State<'_, FsAccess>, path: String) -> Result<Vec<FileEntry>, String> {
+    let path = access.resolve_existing(Path::new(&path))?;
+    if !path.is_dir() {
+        return Err("Path is not a directory".to_string());
+    }
     let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
     let mut result = Vec::new();
 
-    for entry in entries {
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_DIRECTORY_ENTRIES {
+            return Err(format!(
+                "Directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
+            ));
+        }
         let entry = entry.map_err(|e| e.to_string())?;
         let file_type = entry.file_type().map_err(|e| e.to_string())?;
         let name = entry.file_name().to_string_lossy().to_string();
@@ -145,14 +335,350 @@ fn list_dir(path: String) -> Result<Vec<FileEntry>, String> {
     Ok(result)
 }
 
+#[tauri::command]
+async fn pick_directory(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let selected =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|error| format!("Directory picker failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("Invalid selected directory: {error}"))?;
+    let approved = access.approve_directory(&selected)?;
+    Ok(Some(approved.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn pick_save_path(
+    app: AppHandle,
+    is_xml: bool,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        let dialog = app.dialog().file().set_title("Save generated file");
+        if is_xml {
+            dialog
+                .add_filter("URDF/XML", &["urdf", "xacro", "xml"])
+                .blocking_save_file()
+        } else {
+            dialog.add_filter("Python", &["py"]).blocking_save_file()
+        }
+    })
+    .await
+    .map_err(|error| format!("Save dialog failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let selected = selected
+        .into_path()
+        .map_err(|error| format!("Invalid selected file: {error}"))?;
+    let parent = selected
+        .parent()
+        .ok_or_else(|| "Selected file has no parent directory".to_string())?;
+    access.approve_directory(parent)?;
+    let safe_path = access.resolve_for_write(&selected)?;
+    Ok(Some(safe_path.to_string_lossy().into_owned()))
+}
+
+fn validate_sdf_file(path: &Path, content: &str) -> Result<(), String> {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_none_or(|extension| !extension.eq_ignore_ascii_case("sdf"))
+    {
+        return Err("World files must use the .sdf extension".to_string());
+    }
+    if content.len() as u64 > MAX_WORLD_SIZE {
+        return Err(format!(
+            "World file exceeds the {MAX_WORLD_SIZE}-byte limit"
+        ));
+    }
+    if content.contains('\0') {
+        return Err("World file contains a NUL character".to_string());
+    }
+
+    fn local_name(name: &[u8]) -> &[u8] {
+        name.rsplit(|byte| *byte == b':').next().unwrap_or(name)
+    }
+
+    fn version_from_attributes(
+        element: &quick_xml::events::BytesStart<'_>,
+        decoder: quick_xml::encoding::Decoder,
+    ) -> Result<String, String> {
+        for attribute in element.attributes().with_checks(true) {
+            let attribute =
+                attribute.map_err(|error| format!("Malformed SDF XML attribute: {error}"))?;
+            if attribute.key.as_ref() == b"version" {
+                return attribute
+                    .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
+                    .map(|value| value.into_owned())
+                    .map_err(|error| format!("Malformed SDF version attribute: {error}"));
+            }
+        }
+        Err("SDF root element is missing its version attribute".to_string())
+    }
+
+    let mut reader = quick_xml::Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+    let mut root_seen = false;
+    let mut root_closed = false;
+    let mut world_seen = false;
+    let mut depth = 0usize;
+    let mut version = None;
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(element)) => {
+                if !root_seen {
+                    if local_name(element.name().as_ref()) != b"sdf" {
+                        return Err("World file root element must be <sdf>".to_string());
+                    }
+                    version = Some(version_from_attributes(&element, reader.decoder())?);
+                    root_seen = true;
+                } else if root_closed {
+                    return Err("SDF document contains content after its root element".to_string());
+                } else if depth == 1 && local_name(element.name().as_ref()) == b"world" {
+                    world_seen = true;
+                }
+                depth += 1;
+            }
+            Ok(quick_xml::events::Event::Empty(element)) => {
+                if !root_seen {
+                    if local_name(element.name().as_ref()) != b"sdf" {
+                        return Err("World file root element must be <sdf>".to_string());
+                    }
+                    version = Some(version_from_attributes(&element, reader.decoder())?);
+                    root_seen = true;
+                    root_closed = true;
+                } else if root_closed {
+                    return Err("SDF document contains content after its root element".to_string());
+                } else if depth == 1 && local_name(element.name().as_ref()) == b"world" {
+                    world_seen = true;
+                }
+            }
+            Ok(quick_xml::events::Event::End(_)) => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    root_closed = true;
+                }
+            }
+            Ok(quick_xml::events::Event::DocType(_)) => {
+                return Err("SDF documents must not contain a DTD".to_string());
+            }
+            Ok(quick_xml::events::Event::Text(text)) if depth == 0 => {
+                let text_bytes: &[u8] = text.as_ref();
+                if !text_bytes.iter().all(u8::is_ascii_whitespace) {
+                    return Err("SDF document contains text outside its root element".to_string());
+                }
+            }
+            Ok(quick_xml::events::Event::CData(_)) if depth == 0 => {
+                return Err("SDF document contains data outside its root element".to_string());
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("Malformed SDF XML: {error}")),
+        }
+    }
+
+    if !root_seen || !root_closed || depth != 0 {
+        return Err("SDF document is incomplete".to_string());
+    }
+    let version = version.ok_or_else(|| "SDF version is missing".to_string())?;
+    if !world_seen {
+        return Err("SDF world document must contain a <world> element".to_string());
+    }
+    if !matches!(
+        version.as_str(),
+        "1.4" | "1.5" | "1.6" | "1.7" | "1.8" | "1.9" | "1.10"
+    ) {
+        return Err(format!("Unsupported SDF version: {version}"));
+    }
+    Ok(())
+}
+
+fn import_world_contents(
+    workspace: &Path,
+    source: &Path,
+    content: &str,
+) -> Result<PathBuf, String> {
+    validate_sdf_file(source, content)?;
+    let workspace = workspace
+        .canonicalize()
+        .map_err(|error| format!("ROS workspace is unavailable: {error}"))?;
+    let worlds_dir = workspace.join("worlds");
+    match fs::symlink_metadata(&worlds_dir) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err("World import directory must not be a symbolic link".to_string());
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err("World import path is not a directory".to_string());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&worlds_dir).map_err(|error| error.to_string())?;
+        }
+        Err(error) => return Err(error.to_string()),
+    }
+    let canonical_worlds = worlds_dir
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve world import directory: {error}"))?;
+    if !canonical_worlds.starts_with(&workspace) {
+        return Err("World import directory escapes the ROS workspace".to_string());
+    }
+
+    let source_stem = source
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("world");
+    let safe_stem = source_stem
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(48)
+        .collect::<String>();
+    let safe_stem = if safe_stem.is_empty() {
+        "world"
+    } else {
+        &safe_stem
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+
+    for attempt in 0..100u32 {
+        let name = format!(
+            "{safe_stem}-{timestamp}-{}-{attempt}.sdf",
+            std::process::id()
+        );
+        let destination = canonical_worlds.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(mut file) => {
+                if let Err(error) = std::io::Write::write_all(&mut file, content.as_bytes()) {
+                    let _ = fs::remove_file(&destination);
+                    return Err(format!("Could not import world file: {error}"));
+                }
+                return Ok(destination);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Could not import world file: {error}")),
+        }
+    }
+    Err("Could not allocate a unique world filename".to_string())
+}
+
+#[tauri::command]
+async fn import_world(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("SDF World", &["sdf"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| format!("World picker failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let source = selected
+        .into_path()
+        .map_err(|error| format!("Invalid selected world file: {error}"))?;
+    let metadata = fs::metadata(&source).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_WORLD_SIZE {
+        return Err(format!(
+            "World file must be a regular file no larger than {MAX_WORLD_SIZE} bytes"
+        ));
+    }
+    let content = read_text_file_limited(&source, MAX_WORLD_SIZE)
+        .map_err(|error| format!("Could not read selected world file: {error}"))?;
+    validate_sdf_file(&source, &content)?;
+
+    let workspace = PathBuf::from(get_default_workspace_dir()?);
+    fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
+    access.approve_directory(&workspace)?;
+    let imported = import_world_contents(&workspace, &source, &content)?;
+    Ok(Some(imported.to_string_lossy().into_owned()))
+}
+
+#[tauri::command]
+async fn pick_keybindings_file(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .blocking_pick_file()
+    })
+    .await
+    .map_err(|error| format!("File picker failed: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("Invalid selected file: {error}"))?;
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_FILE_SIZE {
+        return Err("Selected file is not a regular file or exceeds the size limit".to_string());
+    }
+    read_text_file_limited(&path, MAX_FILE_SIZE)
+        .map(Some)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(FsAccess::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            read_file, write_file, list_dir, start_ros_stream, run_colcon_build, run_colcon_build_streaming, start_gazebo_sim, stop_gazebo_sim, reset_gazebo_sim, ask_ai, initialize_ros_environment, publish_twist,
-            save_ai_settings, load_ai_settings, save_keybindings, load_keybindings, save_recent_projects, load_recent_projects, get_system_specs, list_templates, create_project_from_template, check_aiignore
+            read_file,
+            write_file,
+            list_dir,
+            pick_directory,
+            pick_save_path,
+            pick_keybindings_file,
+            import_world,
+            start_ros_stream,
+            run_colcon_build,
+            run_colcon_build_streaming,
+            start_gazebo_sim,
+            stop_gazebo_sim,
+            reset_gazebo_sim,
+            ask_ai,
+            initialize_ros_environment,
+            publish_twist,
+            save_ai_settings,
+            load_ai_settings,
+            delete_ai_credential,
+            has_ai_credential,
+            save_keybindings,
+            load_keybindings,
+            save_recent_projects,
+            load_recent_projects,
+            get_system_specs,
+            list_templates,
+            create_project_from_template,
+            check_aiignore
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -165,10 +691,15 @@ pub mod rosengine {
 use rosengine::ros_engine_client::RosEngineClient;
 use rosengine::Empty;
 
-use tauri::{AppHandle, Emitter};
 use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter};
 
 static STREAM_RUNNING: AtomicBool = AtomicBool::new(false);
+
+fn stop_stream_for_auth_recovery(app: &AppHandle, message: &str) {
+    let _ = app.emit("ros-auth-error", message.to_string());
+    STREAM_RUNNING.store(false, Ordering::SeqCst);
+}
 
 #[tauri::command]
 async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
@@ -180,52 +711,75 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
 
     tauri::async_runtime::spawn(async move {
         loop {
+            let token = match read_grpc_auth_token(&app) {
+                Ok(token) => token,
+                Err(error) => {
+                    stop_stream_for_auth_recovery(&app, &error);
+                    return;
+                }
+            };
             let _ = app.emit("ros-connecting", ());
             println!("[ros-stream] attempting connection to localhost:50051");
             let client_result = tokio::time::timeout(
-    std::time::Duration::from_secs(5),
-    RosEngineClient::connect("http://localhost:50051"),
-).await;
+                std::time::Duration::from_secs(5),
+                RosEngineClient::connect("http://localhost:50051"),
+            )
+            .await;
 
-let mut client = match client_result {
-    Ok(Ok(c)) => {
-    println!("[ros-stream] connected successfully");
-    c
-}
-    Ok(Err(e)) => {
-        println!("[ros-stream] connection failed: {}", e);
-        let _ = app.emit("ros-error", format!("Connection failed: {}", e));
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        continue;
-    }
-    Err(_) => {
-        println!("[ros-stream] connection attempt timed out");
-        let _ = app.emit("ros-error", "Connection attempt timed out".to_string());
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        continue;
-    }
-};
-let mut stream = match tokio::time::timeout(
-    std::time::Duration::from_secs(5),
-    client.stream_events(Empty {}),
-)
-.await
-{
-    Ok(Ok(s)) => {
-        println!("[ros-stream] stream_events established, awaiting messages");
-        s.into_inner()
-    }
-    Ok(Err(e)) => {
-        let _ = app.emit("ros-error", format!("Stream failed: {}", e));
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        continue;
-    }
-    Err(_) => {
-        let _ = app.emit("ros-error", "stream_events timed out".to_string());
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        continue;
-    }
-};
+            let mut client = match client_result {
+                Ok(Ok(c)) => {
+                    println!("[ros-stream] connected successfully");
+                    c
+                }
+                Ok(Err(e)) => {
+                    println!("[ros-stream] connection failed: {}", e);
+                    let _ = app.emit("ros-error", format!("Connection failed: {}", e));
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                Err(_) => {
+                    println!("[ros-stream] connection attempt timed out");
+                    let _ = app.emit("ros-error", "Connection attempt timed out".to_string());
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+            let request = match authenticated_request(Empty {}, &token) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = app.emit("ros-error", error);
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
+            let mut stream = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                client.stream_events(request),
+            )
+            .await
+            {
+                Ok(Ok(s)) => {
+                    println!("[ros-stream] stream_events established, awaiting messages");
+                    s.into_inner()
+                }
+                Ok(Err(e)) if e.code() == tonic::Code::Unauthenticated => {
+                    stop_stream_for_auth_recovery(
+                        &app,
+                        "ROS authentication was rejected. The session will be renewed.",
+                    );
+                    return;
+                }
+                Ok(Err(e)) => {
+                    let _ = app.emit("ros-error", format!("Stream failed: {}", e));
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                Err(_) => {
+                    let _ = app.emit("ros-error", "stream_events timed out".to_string());
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+            };
 
             loop {
                 match stream.message().await {
@@ -233,39 +787,56 @@ let mut stream = match tokio::time::timeout(
                         println!("[ros-stream] received event: {:?}", evt);
                         let _ = app.emit("ros-event", format!("{:?}", evt));
 
-                        if let Some(rosengine::workspace_event::Event::OdometryUpdate(odom)) = &evt.event {
-                            let _ = app.emit("odometry-update", OdometryUpdate {
-                                node: odom.topic_name.clone(),
-                                x: odom.x,
-                                y: odom.y,
-                                z: odom.z,
-                                qx: odom.qx,
-                                qy: odom.qy,
-                                qz: odom.qz,
-                                qw: odom.qw,
-                            });
+                        if let Some(rosengine::workspace_event::Event::OdometryUpdate(odom)) =
+                            &evt.event
+                        {
+                            let _ = app.emit(
+                                "odometry-update",
+                                OdometryUpdate {
+                                    node: odom.topic_name.clone(),
+                                    x: odom.x,
+                                    y: odom.y,
+                                    z: odom.z,
+                                    qx: odom.qx,
+                                    qy: odom.qy,
+                                    qz: odom.qz,
+                                    qw: odom.qw,
+                                },
+                            );
                         }
 
                         if let Some(rosengine::workspace_event::Event::TfUpdate(tf)) = &evt.event {
-                            let _ = app.emit("tf-update", TfUpdate {
-                                parent_frame: tf.parent_frame.clone(),
-                                child_frame: tf.child_frame.clone(),
-                                x: tf.x,
-                                y: tf.y,
-                                z: tf.z,
-                                qx: tf.qx,
-                                qy: tf.qy,
-                                qz: tf.qz,
-                                qw: tf.qw,
-                            });
+                            let _ = app.emit(
+                                "tf-update",
+                                TfUpdate {
+                                    parent_frame: tf.parent_frame.clone(),
+                                    child_frame: tf.child_frame.clone(),
+                                    x: tf.x,
+                                    y: tf.y,
+                                    z: tf.z,
+                                    qx: tf.qx,
+                                    qy: tf.qy,
+                                    qz: tf.qz,
+                                    qw: tf.qw,
+                                },
+                            );
                         }
-                        if let Some(rosengine::workspace_event::Event::NodeSnapshot(snap)) = &evt.event {
+                        if let Some(rosengine::workspace_event::Event::NodeSnapshot(snap)) =
+                            &evt.event
+                        {
                             let _ = app.emit("node-snapshot", snap.node_names.clone());
                         }
                     }
                     Ok(None) => {
                         let _ = app.emit("ros-error", "Stream closed by server".to_string());
                         break;
+                    }
+                    Err(e) if e.code() == tonic::Code::Unauthenticated => {
+                        stop_stream_for_auth_recovery(
+                            &app,
+                            "ROS authentication expired. The session will be renewed.",
+                        );
+                        return;
                     }
                     Err(e) => {
                         let _ = app.emit("ros-error", format!("Stream error: {}", e));
@@ -287,25 +858,22 @@ let mut stream = match tokio::time::timeout(
 
 use rosengine::TwistCommand;
 
-const MAX_LINEAR_VELOCITY: f64 = 5.0;
-const MAX_ANGULAR_VELOCITY: f64 = 5.0;
+const MAX_LINEAR_VELOCITY: f64 = 0.5;
+const MAX_ANGULAR_VELOCITY: f64 = 1.0;
 
 fn is_valid_ros_topic(topic_name: &str) -> bool {
     topic_name.len() <= 200
         && topic_name.starts_with('/')
-        && topic_name
-            .split('/')
-            .skip(1)
-            .all(|segment| {
-                !segment.is_empty()
-                    && segment
-                        .chars()
-                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-                    && segment
-                        .chars()
-                        .next()
-                        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-            })
+        && topic_name.split('/').skip(1).all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+                && segment
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        })
 }
 
 fn is_safe_project_component(value: &str) -> bool {
@@ -314,7 +882,10 @@ fn is_safe_project_component(value: &str) -> bool {
         && value
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
-        && value.chars().next().is_some_and(|ch| ch.is_ascii_alphabetic())
+        && value
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
 }
 
 fn validate_velocity(value: f64, maximum: f64) -> Result<(), String> {
@@ -326,8 +897,22 @@ fn validate_velocity(value: f64, maximum: f64) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-async fn publish_twist(
+fn validate_velocity_vector(values: [f64; 3], maximum: f64, axis: &str) -> Result<(), String> {
+    for value in values {
+        validate_velocity(value, maximum)?;
+    }
+    let magnitude = values[0].hypot(values[1]).hypot(values[2]);
+    if magnitude > maximum {
+        return Err(format!(
+            "{axis} velocity magnitude must not exceed {maximum}"
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TwistInput {
     topic_name: String,
     linear_x: Option<f64>,
     linear_y: Option<f64>,
@@ -335,35 +920,66 @@ async fn publish_twist(
     angular_x: Option<f64>,
     angular_y: Option<f64>,
     angular_z: Option<f64>,
-) -> Result<(), String> {
+}
+
+#[tauri::command]
+async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String> {
+    let TwistInput {
+        topic_name,
+        linear_x,
+        linear_y,
+        linear_z,
+        angular_x,
+        angular_y,
+        angular_z,
+    } = command;
     if !is_valid_ros_topic(&topic_name) {
         return Err("Invalid ROS topic name".to_string());
     }
-    for (value, limit) in [
-        (linear_x.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
-        (linear_y.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
-        (linear_z.unwrap_or(0.0), MAX_LINEAR_VELOCITY),
-        (angular_x.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
-        (angular_y.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
-        (angular_z.unwrap_or(0.0), MAX_ANGULAR_VELOCITY),
-    ] {
-        validate_velocity(value, limit)?;
-    }
+    validate_velocity_vector(
+        [
+            linear_x.unwrap_or(0.0),
+            linear_y.unwrap_or(0.0),
+            linear_z.unwrap_or(0.0),
+        ],
+        MAX_LINEAR_VELOCITY,
+        "Linear",
+    )?;
+    validate_velocity_vector(
+        [
+            angular_x.unwrap_or(0.0),
+            angular_y.unwrap_or(0.0),
+            angular_z.unwrap_or(0.0),
+        ],
+        MAX_ANGULAR_VELOCITY,
+        "Angular",
+    )?;
 
     let mut client = RosEngineClient::connect("http://localhost:50051")
         .await
         .map_err(|_| docker_lost_connection_message())?;
 
+    let token = read_grpc_auth_token(&app)?;
+    let timestamp_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos()
+        .try_into()
+        .map_err(|_| "Command timestamp is out of range".to_string())?;
     client
-        .publish_twist(TwistCommand {
-            topic_name,
-            linear_x: linear_x.unwrap_or(0.0),
-            linear_y: linear_y.unwrap_or(0.0),
-            linear_z: linear_z.unwrap_or(0.0),
-            angular_x: angular_x.unwrap_or(0.0),
-            angular_y: angular_y.unwrap_or(0.0),
-            angular_z: angular_z.unwrap_or(0.0),
-        })
+        .publish_twist(authenticated_request(
+            TwistCommand {
+                topic_name,
+                linear_x: linear_x.unwrap_or(0.0),
+                linear_y: linear_y.unwrap_or(0.0),
+                linear_z: linear_z.unwrap_or(0.0),
+                angular_x: angular_x.unwrap_or(0.0),
+                angular_y: angular_y.unwrap_or(0.0),
+                angular_z: angular_z.unwrap_or(0.0),
+                timestamp_ns,
+            },
+            &token,
+        )?)
         .await
         .map_err(|_| docker_lost_connection_message())?;
 
@@ -415,6 +1031,52 @@ fn ensure_docker_available() -> Result<(), String> {
     }
 }
 
+fn ensure_loopback_grpc_binding(container_id: &str) -> Result<(), String> {
+    let output = docker_command()
+        .args([
+            "inspect",
+            "--format",
+            "{{json .HostConfig.PortBindings}}",
+            container_id,
+        ])
+        .output()
+        .map_err(|error| format!("Could not verify ROS container port binding: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not verify ROS container port binding: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let bindings: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("Could not parse ROS container port binding: {error}"))?;
+    let is_loopback_only = bindings
+        .get("50051/tcp")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|entries| {
+            !entries.is_empty()
+                && entries.iter().all(|entry| {
+                    entry.get("HostIp").and_then(serde_json::Value::as_str) == Some("127.0.0.1")
+                })
+        });
+    if !is_loopback_only {
+        let _ = docker_command()
+            .args([
+                "exec",
+                container_id,
+                "bash",
+                "-c",
+                "pkill -f '[p]ython3 server.py'",
+            ])
+            .output();
+        return Err(
+            "This ROS container publishes gRPC beyond loopback. Its port binding cannot be changed in place; stop it and recreate the container with its existing workspace bind-mounted to preserve files."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn find_dev_container() -> Result<String, String> {
     if ensure_docker_available().is_err() {
         return Err(docker_lost_connection_message());
@@ -423,13 +1085,7 @@ fn find_dev_container() -> Result<String, String> {
     let workspace_path = get_default_workspace_dir()?;
     let filter = format!("label=devcontainer.local_folder={}", workspace_path);
     let output = docker_command()
-        .args([
-            "ps",
-            "--filter",
-            &filter,
-            "--format",
-            "{{.Names}}",
-        ])
+        .args(["ps", "--filter", &filter, "--format", "{{.Names}}"])
         .output()
         .map_err(|_| docker_lost_connection_message())?;
 
@@ -441,6 +1097,7 @@ fn find_dev_container() -> Result<String, String> {
     if name.is_empty() {
         Err("No running dev container found for this workspace".to_string())
     } else {
+        ensure_loopback_grpc_binding(&name)?;
         Ok(name)
     }
 }
@@ -474,7 +1131,7 @@ use std::io::{BufReader, Read};
 use std::process::Stdio;
 
 /// Event payload for streaming log output from Docker/build processes.
-/// Distinguishes between "append" (finalized line with \n) and "replace" 
+/// Distinguishes between "append" (finalized line with \n) and "replace"
 /// (in-progress update with \r) to properly render Docker BuildKit progress.
 #[derive(serde::Serialize, Clone)]
 struct LogEvent {
@@ -487,21 +1144,20 @@ struct LogEvent {
 /// before displaying in plain text UI.
 fn strip_ansi_codes(input: &str) -> String {
     let mut result = String::new();
-    let mut chars = input.chars().peekable();
-    
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            // Start of an ANSI escape sequence; consume until 'm' or other terminator
-            while let Some(c) = chars.next() {
-                if c.is_alphabetic() {
-                    break; // End of escape sequence
-                }
+    let mut skipping_escape = false;
+
+    for ch in input.chars() {
+        if skipping_escape {
+            if ch.is_alphabetic() {
+                skipping_escape = false;
             }
+        } else if ch == '\x1b' {
+            skipping_escape = true;
         } else {
             result.push(ch);
         }
     }
-    
+
     result
 }
 
@@ -513,12 +1169,14 @@ fn strip_ansi_codes(input: &str) -> String {
 struct StreamLineBuffer {
     /// Accumulated bytes not yet terminated by \n or \r.
     pending: Vec<u8>,
+    discarding_long_line: bool,
 }
 
 impl StreamLineBuffer {
     fn new() -> Self {
         StreamLineBuffer {
             pending: Vec::new(),
+            discarding_long_line: false,
         }
     }
 
@@ -526,6 +1184,15 @@ impl StreamLineBuffer {
     /// Any bytes that don't end with a delimiter are kept in the pending buffer
     /// for the next call, ensuring lines split across chunks are assembled correctly.
     fn process_chunk(&mut self, chunk: &[u8]) -> Vec<(String, String)> {
+        if self.discarding_long_line {
+            let Some(delimiter) = chunk.iter().position(|byte| matches!(byte, b'\n' | b'\r'))
+            else {
+                return Vec::new();
+            };
+            self.discarding_long_line = false;
+            return self.process_chunk(&chunk[delimiter + 1..]);
+        }
+
         let mut result = Vec::new();
 
         // Add chunk to pending buffer
@@ -559,12 +1226,26 @@ impl StreamLineBuffer {
             }
         }
 
+        if self.pending.len() > MAX_PENDING_LINE_BYTES {
+            let text = String::from_utf8_lossy(&self.pending[..MAX_PENDING_LINE_BYTES]);
+            result.push((
+                "append".to_string(),
+                format!("{} [line truncated]", strip_ansi_codes(&text)),
+            ));
+            self.pending.clear();
+            self.discarding_long_line = true;
+        }
+
         result
     }
 
     /// Flush any remaining bytes in the buffer as a final "append" event.
     /// Call this when EOF is reached to ensure no data is lost.
     fn flush(&mut self) -> Option<(String, String)> {
+        if self.discarding_long_line {
+            self.discarding_long_line = false;
+            return None;
+        }
         if !self.pending.is_empty() {
             let text = String::from_utf8_lossy(&self.pending).to_string();
             let text = strip_ansi_codes(&text);
@@ -576,6 +1257,8 @@ impl StreamLineBuffer {
         None
     }
 }
+
+const MAX_PENDING_LINE_BYTES: usize = 64 * 1024;
 
 fn stream_process_output<R: Read + Send + 'static>(
     reader: R,
@@ -708,7 +1391,10 @@ fn detect_models_in_sdf(sdf_content: &str) -> Vec<String> {
 }
 
 #[tauri::command]
-fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
+fn start_gazebo_sim(
+    world_path: Option<String>,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<String, String> {
     let container_name = find_dev_container()?;
 
     // Defensively kill any existing instances, and actively verify
@@ -717,13 +1403,15 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     for attempt in 0..10 {
         let kill_result = docker_command()
             .args([
-                "exec", &container_name,
-                "bash", "-c",
+                "exec",
+                &container_name,
+                "bash",
+                "-c",
                 "pkill -9 -f '[g]z sim -s' ; pkill -9 -f '[/]parameter_bridge '",
             ])
             .output();
 
-        if let Err(_) = &kill_result {
+        if kill_result.is_err() {
             return Err(docker_lost_connection_message());
         }
 
@@ -731,14 +1419,20 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
 
         let check = docker_command()
             .args([
-                "exec", &container_name,
-                "bash", "-c",
+                "exec",
+                &container_name,
+                "bash",
+                "-c",
                 "pgrep -f '[g]z sim -s' ; pgrep -f '[/]parameter_bridge '",
             ])
             .output()
             .map_err(|_| docker_lost_connection_message())?;
 
-        eprintln!("DEBUG attempt {}: check.stdout = {:?}", attempt, String::from_utf8_lossy(&check.stdout));
+        eprintln!(
+            "DEBUG attempt {}: check.stdout = {:?}",
+            attempt,
+            String::from_utf8_lossy(&check.stdout)
+        );
 
         if check.stdout.is_empty() {
             break;
@@ -753,29 +1447,41 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
 
     // Determine which world file to use, and read its content (for model
     // auto-detection) either from our bundled copy or the user-selected one.
+    let workspace = PathBuf::from(get_default_workspace_dir()?)
+        .canonicalize()
+        .map_err(|error| format!("ROS workspace is unavailable: {error}"))?;
     let (container_world_path, sdf_content) = match &world_path {
         Some(host_path) => {
-            // Copy the custom world into the container's /workspace so
-            // Gazebo (running inside the container) can actually reach it.
-            let file_name = std::path::Path::new(host_path)
-                .file_name()
-                .ok_or("Invalid world file path")?
-                .to_string_lossy()
-                .to_string();
-            let content = std::fs::read_to_string(host_path).map_err(|e| e.to_string())?;
-            let dest = format!("{}/{}", get_default_workspace_dir()?, file_name);
-            std::fs::write(&dest, &content).map_err(|e| e.to_string())?;
-            (format!("/workspace/{}", file_name), content)
+            let host_path = access.resolve_existing(Path::new(host_path))?;
+            let worlds_dir = workspace
+                .join("worlds")
+                .canonicalize()
+                .map_err(|error| format!("Imported worlds are unavailable: {error}"))?;
+            if !host_path.starts_with(&worlds_dir) {
+                return Err(
+                    "Custom worlds must be imported into the managed worlds directory".to_string(),
+                );
+            }
+            let content = read_approved_file(&access, &host_path)?;
+            validate_sdf_file(&host_path, &content)?;
+            let relative = host_path
+                .strip_prefix(&workspace)
+                .map_err(|_| "World file is outside the ROS workspace".to_string())?;
+            let relative = relative.to_string_lossy().replace('\\', "/");
+            (format!("/workspace/{relative}"), content)
         }
         None => {
-            let dest = format!("{}/diff_drive.sdf", get_default_workspace_dir()?);
-            let content = std::fs::read_to_string(&dest).map_err(|e| e.to_string())?;
+            let bundled_path = workspace.join("diff_drive.sdf");
+            let content = read_approved_file(&access, &bundled_path)?;
             ("/workspace/diff_drive.sdf".to_string(), content)
         }
     };
 
     let models = detect_models_in_sdf(&sdf_content);
-    let robot_models: Vec<&String> = models.iter().filter(|m| m.as_str() != "ground_plane").collect();
+    let robot_models: Vec<&String> = models
+        .iter()
+        .filter(|m| m.as_str() != "ground_plane")
+        .collect();
 
     let gz_result = docker_command()
         .args([
@@ -806,13 +1512,16 @@ fn start_gazebo_sim(world_path: Option<String>) -> Result<String, String> {
     let mut bridge_topics = Vec::new();
     for model in &robot_models {
         bridge_topics.push(format!(
-            "/model/{}/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist", model
+            "/model/{}/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist",
+            model
         ));
         bridge_topics.push(format!(
-            "/model/{}/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry", model
+            "/model/{}/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry",
+            model
         ));
         bridge_topics.push(format!(
-            "/model/{}/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V", model
+            "/model/{}/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V",
+            model
         ));
     }
 
@@ -847,8 +1556,10 @@ fn stop_gazebo_sim() -> Result<String, String> {
 
     let result = docker_command()
         .args([
-            "exec", &container_name,
-            "bash", "-c",
+            "exec",
+            &container_name,
+            "bash",
+            "-c",
             "pkill -f 'gz sim' ; pkill -f parameter_bridge",
         ])
         .output()
@@ -863,8 +1574,10 @@ fn reset_gazebo_sim() -> Result<String, String> {
 
     let result = docker_command()
         .args([
-            "exec", &container_name,
-            "bash", "-c",
+            "exec",
+            &container_name,
+            "bash",
+            "-c",
             "gz service -s /world/default/control --reqtype gz.msgs.WorldControl \
              --reptype gz.msgs.Boolean --timeout 2000 --req 'reset: {all: true}'",
         ])
@@ -880,9 +1593,16 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<()
     copy_dir_recursive_impl(src, dst, 0)
 }
 
-fn copy_dir_recursive_impl(src: &std::path::Path, dst: &std::path::Path, depth: u32) -> Result<(), String> {
+fn copy_dir_recursive_impl(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+    depth: u32,
+) -> Result<(), String> {
     if depth > 50 {
-        return Err(format!("copy_dir_recursive exceeded max depth (50) — possible cyclic path: {:?} -> {:?}", src, dst));
+        return Err(format!(
+            "copy_dir_recursive exceeded max depth (50) — possible cyclic path: {:?} -> {:?}",
+            src, dst
+        ));
     }
     std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
@@ -905,7 +1625,221 @@ fn copy_dir_recursive_impl(src: &std::path::Path, dst: &std::path::Path, depth: 
     Ok(())
 }
 
-fn start_ros_engine_server(container_id: &str) -> Result<(), String> {
+const GRPC_AUTH_CONTAINER_PATH: &str = "/run/robotics-studio/grpc-auth.json";
+const GRPC_AUTH_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
+const AUTH_PROTOCOL_MARKER: &str = "AUTH_PROTOCOL_VERSION = 1";
+
+#[derive(Serialize, Deserialize)]
+struct GrpcAuthCredentials {
+    token: String,
+    expires_at: u64,
+}
+
+fn create_grpc_auth_file(app: &AppHandle) -> Result<(PathBuf, String), String> {
+    let mut random = [0u8; 32];
+    getrandom::fill(&mut random)
+        .map_err(|error| format!("Could not generate gRPC credentials: {error}"))?;
+    let token = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs()
+        .saturating_add(GRPC_AUTH_LIFETIME_SECONDS);
+    let credentials = GrpcAuthCredentials {
+        token: token.clone(),
+        expires_at,
+    };
+
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+    let path = directory.join("grpc-auth.json");
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let temporary = directory.join(format!(".grpc-auth-{}-{timestamp}.tmp", std::process::id()));
+    let serialized = serde_json::to_vec(&credentials).map_err(|error| error.to_string())?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("Could not create gRPC credential file: {error}"))?;
+    if let Err(error) =
+        std::io::Write::write_all(&mut file, &serialized).and_then(|_| file.sync_all())
+    {
+        let _ = fs::remove_file(&temporary);
+        return Err(format!("Could not write gRPC credential file: {error}"));
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|error| format!("Could not rotate gRPC credentials: {error}"))?;
+    }
+    fs::rename(&temporary, &path)
+        .map_err(|error| format!("Could not rotate gRPC credentials: {error}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Could not protect gRPC credentials: {error}"))?;
+    }
+    Ok((path, token))
+}
+
+fn read_grpc_auth_token(app: &AppHandle) -> Result<String, String> {
+    let path = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?
+        .join("grpc-auth.json");
+    let credentials: GrpcAuthCredentials = serde_json::from_slice(
+        &fs::read(path).map_err(|_| "ROS authentication is not initialized".to_string())?,
+    )
+    .map_err(|_| "ROS authentication credentials are invalid".to_string())?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_secs();
+    if credentials.token.len() != 64 || now >= credentials.expires_at {
+        return Err(
+            "ROS authentication credentials have expired; restart the ROS environment".to_string(),
+        );
+    }
+    Ok(credentials.token)
+}
+
+fn install_grpc_auth_file(container_id: &str, host_path: &Path) -> Result<(), String> {
+    let directory = docker_command()
+        .args([
+            "exec",
+            container_id,
+            "bash",
+            "-c",
+            "mkdir -p /run/robotics-studio && chmod 700 /run/robotics-studio",
+        ])
+        .output()
+        .map_err(|error| format!("Could not prepare ROS authentication: {error}"))?;
+    if !directory.status.success() {
+        return Err(format!(
+            "Could not prepare ROS authentication: {}",
+            String::from_utf8_lossy(&directory.stderr)
+        ));
+    }
+    let destination = format!("{container_id}:{GRPC_AUTH_CONTAINER_PATH}");
+    let copied = docker_command()
+        .args(["cp", &host_path.to_string_lossy(), &destination])
+        .output()
+        .map_err(|error| format!("Could not transfer ROS authentication: {error}"))?;
+    if !copied.status.success() {
+        return Err(format!(
+            "Could not transfer ROS authentication: {}",
+            String::from_utf8_lossy(&copied.stderr)
+        ));
+    }
+    let protected = docker_command()
+        .args([
+            "exec",
+            container_id,
+            "chmod",
+            "600",
+            GRPC_AUTH_CONTAINER_PATH,
+        ])
+        .output()
+        .map_err(|error| format!("Could not protect ROS authentication: {error}"))?;
+    if !protected.status.success() {
+        return Err(format!(
+            "Could not protect ROS authentication: {}",
+            String::from_utf8_lossy(&protected.stderr)
+        ));
+    }
+    Ok(())
+}
+
+fn install_authenticated_server_files(
+    resource_dir: &Path,
+    workspace_dir: &Path,
+    backup_dir: &Path,
+) -> Result<(), String> {
+    fs::create_dir_all(backup_dir)
+        .map_err(|error| format!("Could not prepare server migration backup: {error}"))?;
+    for file_name in ["server.py", "server_core.py", "proto/ros_engine.proto"] {
+        let bundled_path = resource_dir.join(file_name);
+        let target_path = workspace_dir.join(file_name);
+        let bundled = fs::read(&bundled_path)
+            .map_err(|error| format!("Could not read bundled {file_name}: {error}"))?;
+        let installed = match fs::symlink_metadata(&target_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!("Workspace {file_name} must not be a symbolic link"));
+            }
+            Ok(_) => Some(
+                fs::read(&target_path)
+                    .map_err(|error| format!("Could not inspect workspace {file_name}: {error}"))?,
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Could not inspect workspace {file_name}: {error}")),
+        };
+        if installed.as_ref().is_some_and(|contents| {
+            String::from_utf8_lossy(contents).contains(AUTH_PROTOCOL_MARKER)
+        }) {
+            continue;
+        }
+
+        if installed.is_some() {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| error.to_string())?
+                .as_nanos();
+            let backup_path = backup_dir.join(format!(
+                "{}.pre-auth-{}-{timestamp}",
+                file_name.replace('/', "_"),
+                std::process::id()
+            ));
+            fs::copy(&target_path, &backup_path)
+                .map_err(|error| format!("Could not preserve existing {file_name}: {error}"))?;
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos();
+        let target_parent = target_path
+            .parent()
+            .ok_or_else(|| format!("Invalid workspace path for {file_name}"))?;
+        let target_name = target_path
+            .file_name()
+            .ok_or_else(|| format!("Invalid workspace filename for {file_name}"))?
+            .to_string_lossy();
+        let temporary = target_parent.join(format!(
+            ".{target_name}.auth-{}-{timestamp}.tmp",
+            std::process::id()
+        ));
+        fs::write(&temporary, bundled)
+            .map_err(|error| format!("Could not stage secure {file_name}: {error}"))?;
+        #[cfg(windows)]
+        if target_path.exists() {
+            fs::remove_file(&target_path)
+                .map_err(|error| format!("Could not update secure {file_name}: {error}"))?;
+        }
+        if let Err(error) = fs::rename(&temporary, &target_path) {
+            let _ = fs::remove_file(&temporary);
+            return Err(format!("Could not install secure {file_name}: {error}"));
+        }
+    }
+    Ok(())
+}
+
+fn start_ros_engine_server(container_id: &str, auth_file: &Path) -> Result<(), String> {
     let generate = docker_command()
         .args([
             "exec",
@@ -924,20 +1858,18 @@ fn start_ros_engine_server(container_id: &str) -> Result<(), String> {
         ));
     }
 
-    let running = docker_command()
+    install_grpc_auth_file(container_id, auth_file)?;
+
+    let _ = docker_command()
         .args([
             "exec",
             container_id,
             "bash",
             "-c",
-            "pgrep -f '[p]ython3 server.py'",
+            "pkill -f '[p]ython3 server.py'",
         ])
         .output()
-        .map_err(|error| format!("Failed to inspect ROS engine process: {error}"))?;
-
-    if running.status.success() && !running.stdout.is_empty() {
-        return Ok(());
-    }
+        .map_err(|error| format!("Could not rotate the ROS engine session: {error}"))?;
 
     let started = docker_command()
         .args([
@@ -946,7 +1878,7 @@ fn start_ros_engine_server(container_id: &str) -> Result<(), String> {
             container_id,
             "bash",
             "-c",
-            "source /opt/ros/jazzy/setup.bash && cd /workspace && exec python3 server.py > /tmp/server.log 2>&1",
+            "source /opt/ros/jazzy/setup.bash && cd /workspace && ROBOTICS_STUDIO_AUTH_FILE=/run/robotics-studio/grpc-auth.json exec python3 server.py > /tmp/server.log 2>&1",
         ])
         .output()
         .map_err(|error| format!("Failed to start ROS engine server: {error}"))?;
@@ -960,7 +1892,17 @@ fn start_ros_engine_server(container_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn wait_for_ros_engine(container_id: &str) -> Result<(), String> {
+fn authenticated_request<T>(message: T, token: &str) -> Result<tonic::Request<T>, String> {
+    let mut request = tonic::Request::new(message);
+    let token = tonic::metadata::MetadataValue::try_from(token)
+        .map_err(|error| format!("Could not encode ROS authentication metadata: {error}"))?;
+    request
+        .metadata_mut()
+        .insert("x-robotics-studio-token", token);
+    Ok(request)
+}
+
+async fn wait_for_ros_engine(container_id: &str, token: &str) -> Result<(), String> {
     for _ in 0..30 {
         if let Ok(Ok(mut client)) = tokio::time::timeout(
             std::time::Duration::from_secs(2),
@@ -970,7 +1912,7 @@ async fn wait_for_ros_engine(container_id: &str) -> Result<(), String> {
         {
             if tokio::time::timeout(
                 std::time::Duration::from_secs(2),
-                client.stream_events(Empty {}),
+                client.stream_events(authenticated_request(Empty {}, token)?),
             )
             .await
             .is_ok_and(|result| result.is_ok())
@@ -984,7 +1926,9 @@ async fn wait_for_ros_engine(container_id: &str) -> Result<(), String> {
     let logs = docker_command()
         .args(["exec", container_id, "cat", "/tmp/server.log"])
         .output()
-        .map_err(|error| format!("gRPC service did not become ready; could not read logs: {error}"))?;
+        .map_err(|error| {
+            format!("gRPC service did not become ready; could not read logs: {error}")
+        })?;
     Err(format!(
         "gRPC service did not become ready: {}",
         String::from_utf8_lossy(&logs.stdout)
@@ -992,7 +1936,10 @@ async fn wait_for_ros_engine(container_id: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
+async fn initialize_ros_environment(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<(), String> {
     if INITIALIZATION_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("ROS environment initialization is already in progress".to_string());
     }
@@ -1002,18 +1949,34 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         let _ = app.emit("init-error", err.clone());
         return Err(err);
     }
+    let (auth_file, auth_token) = create_grpc_auth_file(&app)?;
 
     let resource_path = app
         .path()
-        .resolve("resources/devcontainer", tauri::path::BaseDirectory::Resource)
+        .resolve(
+            "resources/devcontainer",
+            tauri::path::BaseDirectory::Resource,
+        )
         .map_err(|e| e.to_string())?;
 
     let workspace_dir = get_default_workspace_dir()?;
-    let workspace_path = std::path::Path::new(&workspace_dir);
+    let workspace_path = Path::new(&workspace_dir);
+    fs::create_dir_all(workspace_path).map_err(|error| error.to_string())?;
+    let workspace_dir = access
+        .approve_directory(workspace_path)?
+        .to_string_lossy()
+        .into_owned();
+    let workspace_path = Path::new(&workspace_dir);
 
-    // Install missing bundled files without overwriting resources a user may
-    // have modified in the workspace.
+    // Install missing resources and preserve legacy server files before updating
+    // the authentication-critical ROS service scripts.
     copy_dir_recursive(&resource_path, workspace_path)?;
+    let backup_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?
+        .join("server-migration-backups");
+    install_authenticated_server_files(&resource_path, workspace_path, &backup_dir)?;
 
     let filter = format!("label=devcontainer.local_folder={}", workspace_dir);
 
@@ -1054,6 +2017,7 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
                 String::from_utf8_lossy(&started.stderr)
             ));
         }
+        ensure_loopback_grpc_binding(&container_name)?;
 
         let app = app.clone();
         let workspace_dir = workspace_dir.clone();
@@ -1066,8 +2030,8 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
                     text: "Existing environment found. Checking ROS engine...".to_string(),
                 },
             );
-            let result = match start_ros_engine_server(&container_name) {
-                Ok(()) => wait_for_ros_engine(&container_name).await,
+            let result = match start_ros_engine_server(&container_name, &auth_file) {
+                Ok(()) => wait_for_ros_engine(&container_name, &auth_token).await,
                 Err(error) => Err(error),
             };
             match result {
@@ -1086,7 +2050,8 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         let _initialization_guard = initialization_guard;
         let event = LogEvent {
             kind: "append".to_string(),
-            text: "Building Docker image (this may take several minutes on first run)...".to_string(),
+            text: "Building Docker image (this may take several minutes on first run)..."
+                .to_string(),
         };
         let _ = app.emit("init-progress", event);
 
@@ -1128,7 +2093,10 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         };
 
         if !build_status.success() {
-            let _ = app.emit("init-error", "Docker build failed — see progress log above".to_string());
+            let _ = app.emit(
+                "init-error",
+                "Docker build failed — see progress log above".to_string(),
+            );
             return;
         }
 
@@ -1140,12 +2108,18 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
 
         let run_output = docker_command()
             .args([
-                "run", "-d",
-                "--label", &format!("devcontainer.local_folder={}", workspace_dir),
-                "-p", "127.0.0.1:50051:50051",
-                "-v", &format!("{}:/workspace", workspace_dir),
+                "run",
+                "-d",
+                "--label",
+                &format!("devcontainer.local_folder={}", workspace_dir),
+                "-p",
+                "127.0.0.1:50051:50051",
+                "-v",
+                &format!("{}:/workspace", workspace_dir),
                 "robotics-studio-ros2",
-                "tail", "-f", "/dev/null",
+                "tail",
+                "-f",
+                "/dev/null",
             ])
             .output();
 
@@ -1158,11 +2132,20 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         };
 
         if !run_output.status.success() {
-            let _ = app.emit("init-error", String::from_utf8_lossy(&run_output.stderr).to_string());
+            let _ = app.emit(
+                "init-error",
+                String::from_utf8_lossy(&run_output.stderr).to_string(),
+            );
             return;
         }
 
-        let container_id = String::from_utf8_lossy(&run_output.stdout).trim().to_string();
+        let container_id = String::from_utf8_lossy(&run_output.stdout)
+            .trim()
+            .to_string();
+        if let Err(error) = ensure_loopback_grpc_binding(&container_id) {
+            let _ = app.emit("init-error", error.clone());
+            return;
+        }
 
         let event = LogEvent {
             kind: "append".to_string(),
@@ -1170,8 +2153,8 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
         };
         let _ = app.emit("init-progress", event);
 
-        match start_ros_engine_server(&container_id) {
-            Ok(()) => match wait_for_ros_engine(&container_id).await {
+        match start_ros_engine_server(&container_id, &auth_file) {
+            Ok(()) => match wait_for_ros_engine(&container_id, &auth_token).await {
                 Ok(()) => {
                     let _ = app.emit("init-finished", workspace_dir.clone());
                 }
@@ -1191,8 +2174,67 @@ async fn initialize_ros_environment(app: AppHandle) -> Result<(), String> {
 #[derive(Serialize, Deserialize, Clone)]
 struct AIProviderSettings {
     provider: String, // "groq" | "anthropic" | "openai"
+    model: String,
+}
+
+#[derive(Deserialize)]
+struct SaveAIProviderSettings {
+    provider: String,
     api_key: String,
     model: String,
+}
+
+#[derive(Serialize)]
+struct PublicAIProviderSettings {
+    provider: String,
+    model: String,
+    has_api_key: bool,
+}
+
+trait CredentialProvider {
+    fn get(&self, provider: &str) -> Result<Option<String>, String>;
+    fn set(&self, provider: &str, secret: &str) -> Result<(), String>;
+    fn delete(&self, provider: &str) -> Result<(), String>;
+}
+
+struct SystemCredentialProvider;
+
+impl CredentialProvider for SystemCredentialProvider {
+    fn get(&self, provider: &str) -> Result<Option<String>, String> {
+        let entry = credential_entry(provider)?;
+        match entry.get_password() {
+            Ok(secret) => Ok(Some(secret)),
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(error) => Err(format!("Secure credential storage is unavailable: {error}")),
+        }
+    }
+
+    fn set(&self, provider: &str, secret: &str) -> Result<(), String> {
+        credential_entry(provider)?
+            .set_password(secret)
+            .map_err(|error| format!("Could not store the AI credential securely: {error}"))
+    }
+
+    fn delete(&self, provider: &str) -> Result<(), String> {
+        match credential_entry(provider)?.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(error) => Err(format!("Could not delete the AI credential: {error}")),
+        }
+    }
+}
+
+fn validate_ai_provider(provider: &str) -> Result<(), String> {
+    if matches!(provider, "groq" | "anthropic" | "openai") {
+        Ok(())
+    } else {
+        Err("Unsupported AI provider".to_string())
+    }
+}
+
+fn credential_entry(provider: &str) -> Result<keyring::Entry, String> {
+    validate_ai_provider(provider)?;
+    keyring::Entry::new("com.kartik.robotics-studio.ai", provider)
+        .map_err(|error| format!("Could not access secure credential storage: {error}"))
 }
 
 fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -1201,23 +2243,89 @@ fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(dir.join("ai_settings.json"))
 }
 
-#[tauri::command]
-fn save_ai_settings(app: AppHandle, settings: AIProviderSettings) -> Result<(), String> {
-    let path = settings_path(&app)?;
-    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    std::fs::write(path, json).map_err(|e| e.to_string())?;
+fn write_ai_settings_file(path: &Path, settings: &AIProviderSettings) -> Result<(), String> {
+    let json = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    let temporary = path.with_extension(format!(
+        "json.{}.{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| error.to_string())?
+            .as_nanos()
+    ));
+    fs::write(&temporary, json).map_err(|error| error.to_string())?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
     Ok(())
 }
 
 #[tauri::command]
-fn load_ai_settings(app: AppHandle) -> Result<Option<AIProviderSettings>, String> {
+fn save_ai_settings(app: AppHandle, settings: SaveAIProviderSettings) -> Result<(), String> {
+    validate_ai_provider(&settings.provider)?;
+    let credentials = SystemCredentialProvider;
+    if !settings.api_key.trim().is_empty() {
+        credentials.set(&settings.provider, settings.api_key.trim())?;
+    }
+    let stored = AIProviderSettings {
+        provider: settings.provider,
+        model: settings.model,
+    };
+    let path = settings_path(&app)?;
+    write_ai_settings_file(&path, &stored)
+}
+
+#[tauri::command]
+fn load_ai_settings(app: AppHandle) -> Result<Option<PublicAIProviderSettings>, String> {
     let path = settings_path(&app)?;
     if !path.exists() {
         return Ok(None);
     }
-    let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let settings: AIProviderSettings = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-    Ok(Some(settings))
+    let json = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let mut value: serde_json::Value =
+        serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    if let Some(api_key) = value
+        .get("api_key")
+        .and_then(serde_json::Value::as_str)
+        .filter(|secret| !secret.trim().is_empty())
+    {
+        let provider = value
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "Legacy AI settings have no provider".to_string())?;
+        SystemCredentialProvider.set(provider, api_key.trim())?;
+        value
+            .as_object_mut()
+            .ok_or_else(|| "Invalid AI settings format".to_string())?
+            .remove("api_key");
+        let migrated: AIProviderSettings =
+            serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+        write_ai_settings_file(&path, &migrated)?;
+    }
+    let settings: AIProviderSettings =
+        serde_json::from_value(value).map_err(|error| error.to_string())?;
+    validate_ai_provider(&settings.provider)?;
+    let has_api_key = SystemCredentialProvider.get(&settings.provider)?.is_some();
+    Ok(Some(PublicAIProviderSettings {
+        provider: settings.provider,
+        model: settings.model,
+        has_api_key,
+    }))
+}
+
+#[tauri::command]
+fn delete_ai_credential(provider: String) -> Result<(), String> {
+    SystemCredentialProvider.delete(&provider)
+}
+
+#[tauri::command]
+fn has_ai_credential(provider: String) -> Result<bool, String> {
+    Ok(SystemCredentialProvider.get(&provider)?.is_some())
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -1265,23 +2373,41 @@ fn recent_projects_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 }
 
 #[tauri::command]
-fn save_recent_projects(app: AppHandle, projects: Vec<RecentProject>) -> Result<(), String> {
+fn save_recent_projects(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+    projects: Vec<RecentProject>,
+) -> Result<(), String> {
     let path = recent_projects_path(&app)?;
     let normalized = normalize_recent_projects(projects);
+    for project in &normalized {
+        access.resolve_existing(Path::new(&project.path))?;
+    }
     let json = serde_json::to_string_pretty(&normalized).map_err(|e| e.to_string())?;
     std::fs::write(path, json).map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-fn load_recent_projects(app: AppHandle) -> Result<Vec<RecentProject>, String> {
+fn load_recent_projects(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+) -> Result<Vec<RecentProject>, String> {
     let path = recent_projects_path(&app)?;
     if !path.exists() {
         return Ok(vec![]);
     }
     let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let projects: Vec<RecentProject> = serde_json::from_str(&json).unwrap_or_default();
-    Ok(normalize_recent_projects(projects))
+    let projects: Vec<RecentProject> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+    let projects = normalize_recent_projects(projects);
+    for project in &projects {
+        if let Ok(path) = Path::new(&project.path).canonicalize() {
+            if path.is_dir() {
+                access.approve_directory(&path)?;
+            }
+        }
+    }
+    Ok(projects)
 }
 
 #[derive(Serialize)]
@@ -1312,11 +2438,13 @@ fn get_system_specs() -> Result<SystemSpecs, String> {
 #[cfg(target_os = "macos")]
 fn get_total_ram_gb() -> Result<u64, String> {
     let output = std::process::Command::new("sysctl")
-        .args(&["-n", "hw.memsize"])
+        .args(["-n", "hw.memsize"])
         .output()
         .map_err(|e| e.to_string())?;
     let bytes_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let bytes: u64 = bytes_str.parse().map_err(|_| "Failed to parse RAM size".to_string())?;
+    let bytes: u64 = bytes_str
+        .parse()
+        .map_err(|_| "Failed to parse RAM size".to_string())?;
     Ok(bytes / (1024 * 1024 * 1024))
 }
 
@@ -1329,7 +2457,9 @@ fn get_total_ram_gb() -> Result<u64, String> {
     let output_str = String::from_utf8_lossy(&output.stdout);
     let parts: Vec<&str> = output_str.split_whitespace().collect();
     if parts.len() >= 2 {
-        let kb: u64 = parts[1].parse().map_err(|_| "Failed to parse RAM size".to_string())?;
+        let kb: u64 = parts[1]
+            .parse()
+            .map_err(|_| "Failed to parse RAM size".to_string())?;
         Ok(kb / (1024 * 1024))
     } else {
         Err("Failed to parse /proc/meminfo".to_string())
@@ -1361,19 +2491,21 @@ fn get_cpu_count() -> u32 {
 fn get_gpu_info() -> Option<(String, Option<u64>)> {
     // Try to get GPU info from system_profiler on macOS
     let output = std::process::Command::new("system_profiler")
-        .args(&["SPDisplaysDataType"])
+        .args(["SPDisplaysDataType"])
         .output()
         .ok()?;
     let output_str = String::from_utf8_lossy(&output.stdout);
-    
+
     // Simple parsing: look for "Chip Model:" and "VRAM:"
     let mut gpu_name = None;
     let mut vram_gb = None;
-    
+
     for line in output_str.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("Chip Model:") {
-            gpu_name = trimmed.strip_prefix("Chip Model:").map(|s| s.trim().to_string());
+            gpu_name = trimmed
+                .strip_prefix("Chip Model:")
+                .map(|s| s.trim().to_string());
         }
         if trimmed.starts_with("VRAM") {
             // Try to extract VRAM amount (e.g., "10 GB")
@@ -1384,18 +2516,16 @@ fn get_gpu_info() -> Option<(String, Option<u64>)> {
             }
         }
     }
-    
+
     gpu_name.map(|name| (name, vram_gb))
 }
 
 #[cfg(target_os = "linux")]
 fn get_gpu_info() -> Option<(String, Option<u64>)> {
     // Try lspci on Linux
-    let output = std::process::Command::new("lspci")
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("lspci").output().ok()?;
     let output_str = String::from_utf8_lossy(&output.stdout);
-    
+
     for line in output_str.lines() {
         if line.contains("VGA") || line.contains("3D") {
             // Extract GPU name from lspci output
@@ -1415,7 +2545,7 @@ fn get_gpu_info() -> Option<(String, Option<u64>)> {
         .output()
         .ok()?;
     let output_str = String::from_utf8_lossy(&output.stdout);
-    
+
     let lines: Vec<&str> = output_str.lines().collect();
     if lines.len() > 1 {
         let data_line = lines[1];
@@ -1495,12 +2625,13 @@ struct ClaudeResponse {
     content: Vec<ClaudeContentBlock>,
 }
 
-fn format_provider_http_error(provider: &str, model: &str, status: reqwest::StatusCode, body: &str) -> String {
-    let snippet = body
-        .trim()
-        .chars()
-        .take(200)
-        .collect::<String>();
+fn format_provider_http_error(
+    provider: &str,
+    model: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> String {
+    let snippet = body.trim().chars().take(200).collect::<String>();
     let snippet = if snippet.len() < body.trim().len() {
         format!("{}...", snippet)
     } else {
@@ -1509,12 +2640,15 @@ fn format_provider_http_error(provider: &str, model: &str, status: reqwest::Stat
 
     match status {
         reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN => {
-            format!("Invalid API key for {}. Check your key in Settings.", provider)
+            format!(
+                "Invalid API key for {}. Check your key in Settings.",
+                provider
+            )
         }
         reqwest::StatusCode::TOO_MANY_REQUESTS => {
             format!("Rate limited by {}. Wait a moment and try again.", provider)
         }
-        reqwest::StatusCode::NOT_FOUND => { 
+        reqwest::StatusCode::NOT_FOUND => {
             format!(
                 "Model '{}' not found for {}. It may have been deprecated — check available models in Settings.",
                 model, provider
@@ -1531,9 +2665,9 @@ fn format_provider_http_error(provider: &str, model: &str, status: reqwest::Stat
     }
 }
 
-#[tauri::command]
-async fn ask_ai(
-    app: AppHandle,
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskAiInput {
     user_message: String,
     open_file_content: Option<String>,
     open_file_path: Option<String>,
@@ -1542,9 +2676,30 @@ async fn ask_ai(
     recent_build_output: Vec<String>,
     tf_context: Option<String>,
     mode: Option<String>,
+}
+
+#[tauri::command]
+async fn ask_ai(
+    app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
+    input: AskAiInput,
 ) -> Result<String, String> {
-    let settings = load_ai_settings(app)?
-        .ok_or_else(|| "No AI provider configured. Open Settings to add your API key.".to_string())?;
+    let AskAiInput {
+        user_message,
+        open_file_content,
+        open_file_path,
+        workspace_root,
+        recent_ros_events,
+        recent_build_output,
+        tf_context,
+        mode,
+    } = input;
+    let settings = load_ai_settings(app.clone())?.ok_or_else(|| {
+        "No AI provider configured. Open Settings to add your API key.".to_string()
+    })?;
+    let api_key = SystemCredentialProvider
+        .get(&settings.provider)?
+        .ok_or_else(|| "No API key stored for the selected AI provider".to_string())?;
 
     // --- Context assembly (unchanged, provider-agnostic) ---
     let mut context = String::new();
@@ -1555,13 +2710,13 @@ async fn ask_ai(
              before or after. Use rclpy, follow standard ROS 2 node conventions (a class \
              extending Node, a main() function with rclpy.init/spin/shutdown). Base it on \
              any workspace context below if relevant (e.g., existing topic names, package \
-             structure).\n\n"
+             structure).\n\n",
         ),
         Some("generate_launch") => String::from(
             "You are a ROS 2 launch file generator. The user wants a ROS 2 Python launch file. \
              Output ONLY a single Python code block using ```python fences — no explanation \
              before or after. Follow standard ROS 2 launch conventions (LaunchDescription, \
-             generate_launch_description()).\n\n"
+             generate_launch_description()).\n\n",
         ),
         Some("generate_urdf") => String::from(
             "You are a ROS 2 robot description generator. The user wants a URDF or xacro file \
@@ -1571,13 +2726,13 @@ async fn ask_ai(
              them with correct parent/child and joint type. If workspace context mentions \
              specific link/frame names (e.g., from TF data or existing topics), reuse those \
              names for consistency. Prefer plain URDF unless the user explicitly asks for \
-             xacro macros/parameters.\n\n"
+             xacro macros/parameters.\n\n",
         ),
         Some("explain_error") => String::from(
             "You are a ROS 2 / robotics debugging assistant. The user wants their most recent \
              build error or runtime error explained. Be concise and specific: name the likely \
              root cause, then give a concrete fix. Reference the actual error text from the \
-             context below rather than generic advice.\n\n"
+             context below rather than generic advice.\n\n",
         ),
         Some("explain_tf") => String::from(
             "You are a ROS 2 / robotics TF (transform tree) assistant. The user wants a specific \
@@ -1592,29 +2747,35 @@ async fn ask_ai(
              worth double-checking (e.g., an unexpectedly large offset, a non-normalized \
              quaternion, or a frame pair that doesn't follow common conventions). Be concise — \
              a few short paragraphs, not an exhaustive lecture. Do not invent details about the \
-             robot that aren't supported by the frame names or values given.\n\n"
+             robot that aren't supported by the frame names or values given.\n\n",
         ),
         _ => String::from(
             "You are an AI coding assistant. Answer the user's question directly and accurately. \
              Only reference ROS 2, robotics concepts, or the workspace context below if it is \
-             actually relevant to the question — do not force a connection that isn't there.\n\n"
+             actually relevant to the question — do not force a connection that isn't there.\n\n",
         ),
     };
 
-    if open_file_path.as_deref().map_or(false, |p| p.ends_with(".py"))
-        || recent_ros_events.iter().any(|e| e.contains("WorkspaceEvent")) {
+    if open_file_path
+        .as_deref()
+        .is_some_and(|p| p.ends_with(".py"))
+        || recent_ros_events
+            .iter()
+            .any(|e| e.contains("WorkspaceEvent"))
+    {
         system_context.push_str("This workspace appears to involve ROS 2 development.\n\n");
     }
 
     let file_is_ignored = match (&open_file_path, &workspace_root) {
-        (Some(path), Some(root)) => is_ignored_by_aiignore(root, path),
+        (Some(path), Some(root)) => {
+            is_ignored_by_aiignore(&access, Path::new(root), Path::new(path))?
+        }
         _ => false,
     };
 
     if file_is_ignored {
-        context.push_str(
-            "Currently open file: [path excluded — matches a pattern in .aiignore]\n\n",
-        );
+        context
+            .push_str("Currently open file: [path excluded — matches a pattern in .aiignore]\n\n");
     } else if let Some(path) = &open_file_path {
         context.push_str(&format!("Currently open file: {}\n\n", path));
     }
@@ -1658,69 +2819,111 @@ async fn ask_ai(
         "groq" => {
             let request_body = GroqRequest {
                 model: settings.model.clone(),
-                messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
+                messages: vec![GroqMessage {
+                    role: "user".to_string(),
+                    content: full_prompt,
+                }],
             };
             let response = client
                 .post("https://api.groq.com/openai/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", settings.api_key))
+                .header("Authorization", format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
                 .json(&request_body)
-                .send().await.map_err(|e| e.to_string())?;
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.map_err(|e| e.to_string())?;
-                return Err(format_provider_http_error("groq", &settings.model, status, &body));
+                return Err(format_provider_http_error(
+                    "groq",
+                    &settings.model,
+                    status,
+                    &body,
+                ));
             }
 
             let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
-            parsed.choices.into_iter().next().map(|c| c.message.content)
+            parsed
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content)
                 .ok_or_else(|| "No response from AI".to_string())
         }
         "anthropic" => {
             let request_body = ClaudeRequest {
                 model: settings.model.clone(),
                 max_tokens: 1024,
-                messages: vec![ClaudeMessage { role: "user".to_string(), content: full_prompt }],
+                messages: vec![ClaudeMessage {
+                    role: "user".to_string(),
+                    content: full_prompt,
+                }],
             };
             let response = client
                 .post("https://api.anthropic.com/v1/messages")
-                .header("x-api-key", settings.api_key)
+                .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .json(&request_body)
-                .send().await.map_err(|e| e.to_string())?;
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.map_err(|e| e.to_string())?;
-                return Err(format_provider_http_error("anthropic", &settings.model, status, &body));
+                return Err(format_provider_http_error(
+                    "anthropic",
+                    &settings.model,
+                    status,
+                    &body,
+                ));
             }
 
             let parsed: ClaudeResponse = response.json().await.map_err(|e| e.to_string())?;
-            parsed.content.into_iter().next().and_then(|b| b.text)
+            parsed
+                .content
+                .into_iter()
+                .next()
+                .and_then(|b| b.text)
                 .ok_or_else(|| "No response from AI".to_string())
         }
         "openai" => {
             let request_body = GroqRequest {
                 model: settings.model.clone(),
-                messages: vec![GroqMessage { role: "user".to_string(), content: full_prompt }],
+                messages: vec![GroqMessage {
+                    role: "user".to_string(),
+                    content: full_prompt,
+                }],
             };
             let response = client
                 .post("https://api.openai.com/v1/chat/completions")
-                .header("Authorization", format!("Bearer {}", settings.api_key))
+                .header("Authorization", format!("Bearer {}", api_key))
                 .header("content-type", "application/json")
                 .json(&request_body)
-                .send().await.map_err(|e| e.to_string())?;
+                .send()
+                .await
+                .map_err(|e| e.to_string())?;
 
             if !response.status().is_success() {
                 let status = response.status();
                 let body = response.text().await.map_err(|e| e.to_string())?;
-                return Err(format_provider_http_error("openai", &settings.model, status, &body));
+                return Err(format_provider_http_error(
+                    "openai",
+                    &settings.model,
+                    status,
+                    &body,
+                ));
             }
 
             let parsed: GroqResponse = response.json().await.map_err(|e| e.to_string())?;
-            parsed.choices.into_iter().next().map(|c| c.message.content)
+            parsed
+                .choices
+                .into_iter()
+                .next()
+                .map(|c| c.message.content)
                 .ok_or_else(|| "No response from AI".to_string())
         }
         other => Err(format!("Unknown provider: {}", other)),
@@ -1728,8 +2931,12 @@ async fn ask_ai(
 }
 
 #[tauri::command]
-fn check_aiignore(workspace_root: String, file_path: String) -> bool {
-    is_ignored_by_aiignore(&workspace_root, &file_path)
+fn check_aiignore(
+    access: tauri::State<'_, FsAccess>,
+    workspace_root: String,
+    file_path: String,
+) -> Result<bool, String> {
+    is_ignored_by_aiignore(&access, Path::new(&workspace_root), Path::new(&file_path))
 }
 
 #[tauri::command]
@@ -1756,6 +2963,7 @@ fn list_templates(app: AppHandle) -> Result<Vec<String>, String> {
 #[tauri::command]
 fn create_project_from_template(
     app: AppHandle,
+    access: tauri::State<'_, FsAccess>,
     template_name: String,
     destination_dir: String,
     project_name: String,
@@ -1791,15 +2999,18 @@ fn create_project_from_template(
         return Err(format!("Template '{}' not found", template_name));
     }
 
-    let destination_root = std::path::Path::new(&destination_dir)
-        .canonicalize()
+    let destination_root = access
+        .resolve_existing(Path::new(&destination_dir))
         .map_err(|e| format!("Invalid project destination: {e}"))?;
     if !destination_root.is_dir() {
         return Err("Project destination must be a directory".to_string());
     }
     let dest = destination_root.join(&project_name);
     if dest.exists() {
-        return Err(format!("A folder named '{}' already exists there", project_name));
+        return Err(format!(
+            "A folder named '{}' already exists there",
+            project_name
+        ));
     }
 
     std::fs::create_dir(&dest).map_err(|e| format!("Could not create project directory: {e}"))?;
@@ -1825,6 +3036,62 @@ struct OdometryUpdate {
     qy: f64,
     qz: f64,
     qw: f64,
+}
+
+#[cfg(test)]
+mod credential_store_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct MockCredentialProvider {
+        entries: Mutex<HashMap<String, String>>,
+    }
+
+    impl CredentialProvider for MockCredentialProvider {
+        fn get(&self, provider: &str) -> Result<Option<String>, String> {
+            Ok(self
+                .entries
+                .lock()
+                .map_err(|_| "mock store lock failed".to_string())?
+                .get(provider)
+                .cloned())
+        }
+
+        fn set(&self, provider: &str, secret: &str) -> Result<(), String> {
+            self.entries
+                .lock()
+                .map_err(|_| "mock store lock failed".to_string())?
+                .insert(provider.to_string(), secret.to_string());
+            Ok(())
+        }
+
+        fn delete(&self, provider: &str) -> Result<(), String> {
+            self.entries
+                .lock()
+                .map_err(|_| "mock store lock failed".to_string())?
+                .remove(provider);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn mock_provider_supports_replacement_retrieval_and_deletion() {
+        let provider = MockCredentialProvider::default();
+        assert_eq!(provider.get("groq").unwrap(), None);
+        provider.set("groq", "old").unwrap();
+        assert_eq!(provider.get("groq").unwrap(), Some("old".to_string()));
+        provider.set("groq", "new").unwrap();
+        assert_eq!(provider.get("groq").unwrap(), Some("new".to_string()));
+        provider.delete("groq").unwrap();
+        assert_eq!(provider.get("groq").unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_unknown_credential_providers() {
+        assert!(validate_ai_provider("groq").is_ok());
+        assert!(validate_ai_provider("unknown").is_err());
+    }
 }
 
 #[cfg(test)]
@@ -1880,10 +3147,19 @@ mod validation_tests {
 
     #[test]
     fn rejects_non_finite_and_unbounded_velocity() {
-        assert!(validate_velocity(1.0, MAX_LINEAR_VELOCITY).is_ok());
+        assert!(validate_velocity(0.5, MAX_LINEAR_VELOCITY).is_ok());
+        assert!(validate_velocity(0.6, MAX_LINEAR_VELOCITY).is_err());
         assert!(validate_velocity(f64::NAN, MAX_LINEAR_VELOCITY).is_err());
         assert!(validate_velocity(f64::INFINITY, MAX_LINEAR_VELOCITY).is_err());
         assert!(validate_velocity(5.1, MAX_LINEAR_VELOCITY).is_err());
+    }
+
+    #[test]
+    fn validates_combined_linear_and_angular_velocity_magnitudes() {
+        assert!(validate_velocity_vector([0.3, 0.3, 0.0], 0.5, "Linear").is_ok());
+        assert!(validate_velocity_vector([0.4, 0.4, 0.0], 0.5, "Linear").is_err());
+        assert!(validate_velocity_vector([0.8, 0.8, 0.0], 1.0, "Angular").is_err());
+        assert!(validate_velocity_vector([f64::NAN, 0.0, 0.0], 0.5, "Linear").is_err());
     }
 
     #[test]
@@ -1896,8 +3172,171 @@ mod validation_tests {
 }
 
 #[cfg(test)]
+mod filesystem_security_tests {
+    use super::*;
+
+    struct TempDirectory(PathBuf);
+
+    impl TempDirectory {
+        fn new() -> Self {
+            static NEXT_DIRECTORY: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "robotics-studio-test-{}-{unique}-{}",
+                std::process::id(),
+                NEXT_DIRECTORY.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDirectory {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn approved_root_allows_normal_reads_and_writes() {
+        let directory = TempDirectory::new();
+        let access = FsAccess::default();
+        access.approve_directory(&directory.0).unwrap();
+        let file = directory.0.join("robot.py");
+
+        write_approved_file(&access, &file, "print('ok')").unwrap();
+
+        assert_eq!(read_approved_file(&access, &file).unwrap(), "print('ok')");
+    }
+
+    #[test]
+    fn rejects_paths_outside_root_and_parent_traversal() {
+        let directory = TempDirectory::new();
+        let outside = TempDirectory::new();
+        let access = FsAccess::default();
+        access.approve_directory(&directory.0).unwrap();
+
+        assert!(access.resolve_existing(&outside.0).is_err());
+        assert!(access
+            .resolve_existing(&directory.0.join("../outside"))
+            .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_escape_from_approved_root() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDirectory::new();
+        let outside = TempDirectory::new();
+        let access = FsAccess::default();
+        access.approve_directory(&directory.0).unwrap();
+        symlink(&outside.0, directory.0.join("escape")).unwrap();
+
+        assert!(access
+            .resolve_existing(&directory.0.join("escape"))
+            .is_err());
+    }
+
+    #[test]
+    fn imports_worlds_to_unique_safe_paths_without_overwriting() {
+        let directory = TempDirectory::new();
+        let source = Path::new("../../Dockerfile.sdf");
+        let sdf = "<sdf version=\"1.9\"><world name=\"test\"/></sdf>";
+        let first = import_world_contents(&directory.0, source, sdf).unwrap();
+        let second = import_world_contents(&directory.0, source, sdf).unwrap();
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(directory.0.canonicalize().unwrap().join("worlds")));
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("Dockerfile-"));
+        assert_eq!(fs::read_to_string(first).unwrap(), sdf);
+        assert_eq!(fs::read_to_string(second).unwrap(), sdf);
+    }
+
+    #[test]
+    fn rejects_invalid_world_document_and_extension() {
+        let directory = TempDirectory::new();
+        assert!(
+            import_world_contents(&directory.0, Path::new("world.txt"), "<sdf></sdf>").is_err()
+        );
+        assert!(
+            import_world_contents(&directory.0, Path::new("world.sdf"), "<world></world>").is_err()
+        );
+    }
+
+    #[test]
+    fn validates_sdf_xml_root_and_supported_version() {
+        let path = Path::new("world.sdf");
+        assert!(validate_sdf_file(
+            path,
+            "<?xml version=\"1.0\"?><sdf version=\"1.10\"><world name=\"demo\"/></sdf>"
+        )
+        .is_ok());
+        assert!(validate_sdf_file(path, "<sdf version=\"1.9\"><world></sdf>").is_err());
+        assert!(validate_sdf_file(path, "<sdf version=\"1.11\"/>").is_err());
+        assert!(validate_sdf_file(path, "<sdf version=\"1.9\"/>").is_err());
+        assert!(validate_sdf_file(path, "<world version=\"1.9\"/>").is_err());
+        assert!(validate_sdf_file(path, "<!DOCTYPE sdf><sdf version=\"1.9\"/>").is_err());
+        assert!(validate_sdf_file(
+            path,
+            "<sdf version=\"1.9\"><world/></sdf><sdf version=\"1.9\"><world/></sdf>"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn accepts_namespaced_sdf_root() {
+        assert!(validate_sdf_file(
+            Path::new("world.sdf"),
+            "<sd:sdf xmlns:sd=\"urn:sdformat\" version=\"1.9\"><sd:world name=\"demo\"/></sd:sdf>"
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_world_destination() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TempDirectory::new();
+        let outside = TempDirectory::new();
+        symlink(&outside.0, directory.0.join("worlds")).unwrap();
+
+        assert!(
+            import_world_contents(&directory.0, Path::new("world.sdf"), "<sdf></sdf>").is_err()
+        );
+        assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
 mod stream_line_buffer_tests {
     use super::*;
+
+    #[test]
+    fn test_unterminated_line_is_truncated_and_bounded() {
+        let mut buffer = StreamLineBuffer::new();
+        let oversized = vec![b'x'; MAX_PENDING_LINE_BYTES + 4096];
+
+        let events = buffer.process_chunk(&oversized);
+
+        assert_eq!(events.len(), 1);
+        assert!(events[0].1.ends_with("[line truncated]"));
+        assert!(buffer.pending.len() <= MAX_PENDING_LINE_BYTES);
+        assert!(buffer.discarding_long_line);
+        assert!(buffer
+            .process_chunk(&vec![b'y'; MAX_PENDING_LINE_BYTES])
+            .is_empty());
+        assert_eq!(buffer.process_chunk(b"\nshort line\n")[0].1, "short line");
+    }
 
     #[test]
     fn test_single_chunk_complete_multibyte_utf8() {
@@ -1908,7 +3347,10 @@ mod stream_line_buffer_tests {
         let events = buf.process_chunk(chunk);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, "append");
-        assert!(events[0].1.contains("─"), "Multi-byte UTF-8 character should be decoded");
+        assert!(
+            events[0].1.contains("─"),
+            "Multi-byte UTF-8 character should be decoded"
+        );
     }
 
     #[test]
@@ -1917,7 +3359,7 @@ mod stream_line_buffer_tests {
         // The character '─' (U+2500) is E2 94 80 in UTF-8.
         // Split as: "Box: " + first 2 bytes of '─' in chunk 1, last byte + "\n" in chunk 2.
         let mut buf = StreamLineBuffer::new();
-        
+
         // First chunk: "Box: " (5 bytes ASCII) + E2 94 (first 2 bytes of '─')
         let chunk1 = b"Box: \xE2\x94";
         let events1 = buf.process_chunk(chunk1);
@@ -1929,8 +3371,7 @@ mod stream_line_buffer_tests {
         assert_eq!(events2.len(), 1, "Should emit one complete line");
         assert_eq!(events2[0].0, "append");
         assert_eq!(
-            events2[0].1,
-            "Box: ─ line",
+            events2[0].1, "Box: ─ line",
             "Split UTF-8 character should reassemble exactly, got '{}'",
             events2[0].1
         );
@@ -1949,7 +3390,10 @@ mod stream_line_buffer_tests {
         let events2 = buf.process_chunk(chunk2);
         assert_eq!(events2.len(), 1, "Should emit one complete line");
         assert_eq!(events2[0].0, "append");
-        assert_eq!(events2[0].1, "Downloading layer 3/8", "Should combine both chunks into one line");
+        assert_eq!(
+            events2[0].1, "Downloading layer 3/8",
+            "Should combine both chunks into one line"
+        );
     }
 
     #[test]
@@ -1959,9 +3403,13 @@ mod stream_line_buffer_tests {
         let mut buf = StreamLineBuffer::new();
         let chunk = b"Pulling fs layer\rDownloading 10%\rDownloading 45%\rDownloading 100%\n";
         let events = buf.process_chunk(chunk);
-        
+
         // Should produce 4 events: 3 "replace" and 1 final "append"
-        assert_eq!(events.len(), 4, "Should emit 4 events (3 replace + 1 append)");
+        assert_eq!(
+            events.len(),
+            4,
+            "Should emit 4 events (3 replace + 1 append)"
+        );
         assert_eq!(events[0].0, "replace");
         assert_eq!(events[0].1, "Pulling fs layer");
         assert_eq!(events[1].0, "replace");
@@ -1992,15 +3440,15 @@ mod stream_line_buffer_tests {
         // This test ensures we don't panic when a multi-byte UTF-8 sequence
         // happens to end exactly at the boundary of a chunk (the old code would panic here).
         let mut buf = StreamLineBuffer::new();
-        
+
         // First chunk ends with a complete multi-byte character (3-byte UTF-8)
         let chunk1 = "Test─".as_bytes(); // ends with complete ─
         let _events1 = buf.process_chunk(chunk1);
-        
+
         // Second chunk continues with more text
         let chunk2 = b"more\n";
         let events2 = buf.process_chunk(chunk2);
-        
+
         // Should not panic and should produce one event
         assert_eq!(events2.len(), 1);
         assert_eq!(events2[0].0, "append");

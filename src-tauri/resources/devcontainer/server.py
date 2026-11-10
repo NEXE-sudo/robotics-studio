@@ -2,12 +2,15 @@ import threading
 import queue
 import time
 import logging
+import os
 
 import grpc
 from concurrent import futures
 
 import rclpy
 from rclpy.node import Node
+
+AUTH_PROTOCOL_VERSION = 1
 
 import sys
 sys.path.append('generated')
@@ -17,7 +20,13 @@ from tf2_msgs.msg import TFMessage
 
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
-from server_core import EventHub, validate_twist_request
+from server_core import (
+    CommandLeaseManager,
+    EventHub,
+    is_valid_auth_token,
+    load_auth_credentials,
+    validate_twist_request,
+)
 
 LOGGER = logging.getLogger("ros_engine")
 
@@ -29,6 +38,10 @@ class RosIntrospector(Node):
         self.odom_subscribers = {}
         self.timer = self.create_timer(2.0, self.tick)
         self.twist_publishers = {}
+        self.command_leases = CommandLeaseManager()
+        self.command_timeout_timer = self.create_timer(
+            0.1, self.stop_expired_commands
+        )
         self.tf_subscribers = {}
 
     def odom_callback(self, msg, topic_name):
@@ -45,7 +58,11 @@ class RosIntrospector(Node):
             ),
             timestamp_ns=time.time_ns()
         )
-        self.event_hub.publish(evt)
+        self.event_hub.publish(
+            evt,
+            priority="telemetry",
+            key=("odometry", topic_name),
+        )
 
     def tf_callback(self, msg, topic_name):
         for transform in msg.transforms:
@@ -63,7 +80,11 @@ class RosIntrospector(Node):
                 ),
                 timestamp_ns=time.time_ns()
             )
-            self.event_hub.publish(evt)
+            self.event_hub.publish(
+                evt,
+                priority="telemetry",
+                key=("tf", transform.child_frame_id),
+            )
 
     def tick(self):
         try:
@@ -81,14 +102,14 @@ class RosIntrospector(Node):
                 node_started=ros_engine_pb2.NodeStarted(node_name=name),
                 timestamp_ns=time.time_ns()
             )
-            self.event_hub.publish(evt)
+            self.event_hub.publish(evt, key=("node", name))
 
         for name in disappeared:
             evt = ros_engine_pb2.WorkspaceEvent(
                 node_crashed=ros_engine_pb2.NodeCrashed(node_name=name),
                 timestamp_ns=time.time_ns()
             )
-            self.event_hub.publish(evt)
+            self.event_hub.publish(evt, key=("node", name))
 
         self.known_nodes = nodes
 
@@ -132,13 +153,21 @@ class RosIntrospector(Node):
             topic_snapshot=ros_engine_pb2.TopicSnapshot(topics=topic_msgs),
             timestamp_ns=time.time_ns()
         )
-        self.event_hub.publish(evt)
+        self.event_hub.publish(
+            evt,
+            key="topic_snapshot",
+            snapshot=True,
+        )
 
         node_evt = ros_engine_pb2.WorkspaceEvent(
             node_snapshot=ros_engine_pb2.NodeSnapshot(node_names=list(nodes)),
             timestamp_ns=time.time_ns()
         )
-        self.event_hub.publish(node_evt)
+        self.event_hub.publish(
+            node_evt,
+            key="node_snapshot",
+            snapshot=True,
+        )
 
     def publish_twist(self, topic_name, linear_x, linear_y=0.0, linear_z=0.0, angular_x=0.0, angular_y=0.0, angular_z=0.0):
         if topic_name not in self.twist_publishers:
@@ -151,13 +180,34 @@ class RosIntrospector(Node):
         msg.angular.y = angular_y
         msg.angular.z = angular_z
         self.twist_publishers[topic_name].publish(msg)
+        self.command_leases.refresh(topic_name)
+
+    def stop_expired_commands(self):
+        for topic_name in self.command_leases.take_expired():
+            publisher = self.twist_publishers.get(topic_name)
+            if publisher is not None:
+                publisher.publish(Twist())
 
 class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-    def __init__(self, event_hub: EventHub, ros_node):
+    def __init__(self, event_hub: EventHub, ros_node, auth_token, auth_expires_at):
         self.event_hub = event_hub
         self.ros_node = ros_node
+        self.auth_token = auth_token
+        self.auth_expires_at = auth_expires_at
+
+    def _require_authentication(self, context):
+        provided = dict(context.invocation_metadata()).get(
+            "x-robotics-studio-token"
+        )
+        if not is_valid_auth_token(provided, self.auth_token, self.auth_expires_at):
+            context.abort(
+                grpc.StatusCode.UNAUTHENTICATED,
+                "A valid Robotics Studio session token is required",
+            )
+        return provided
 
     def PublishTwist(self, request, context):
+        self._require_authentication(context)
         try:
             validate_twist_request(request)
             self.ros_node.publish_twist(
@@ -177,10 +227,20 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
         return ros_engine_pb2.Empty()
 
     def StreamEvents(self, request, context):
+        provided = self._require_authentication(context)
         subscriber = self.event_hub.subscribe()
         LOGGER.info("ROS event stream opened")
         try:
             while context.is_active():
+                if not is_valid_auth_token(
+                    provided,
+                    self.auth_token,
+                    self.auth_expires_at,
+                ):
+                    context.abort(
+                        grpc.StatusCode.UNAUTHENTICATED,
+                        "The Robotics Studio session token has expired",
+                    )
                 try:
                     yield subscriber.get(timeout=1.0)
                 except queue.Empty:
@@ -199,6 +259,11 @@ def main():
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    credential_path = os.environ.get(
+        "ROBOTICS_STUDIO_AUTH_FILE",
+        "/run/robotics-studio/grpc-auth.json",
+    )
+    auth_token, auth_expires_at = load_auth_credentials(credential_path)
     rclpy.init()
     event_hub = EventHub()
     node = RosIntrospector(event_hub)
@@ -208,7 +273,7 @@ def main():
 
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     ros_engine_pb2_grpc.add_RosEngineServicer_to_server(
-        RosEngineServicer(event_hub, node), server
+        RosEngineServicer(event_hub, node, auth_token, auth_expires_at), server
     )
     server.add_insecure_port('[::]:50051')
     server.start()

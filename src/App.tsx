@@ -6,7 +6,6 @@ import { listen, emit } from "@tauri-apps/api/event";
 import TFTree from "./components/TFTree";
 import Settings from "./components/Settings";
 import NewProjectModal from "./components/NewProjectModal";
-import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   KeyBinding,
   DEFAULT_KEYBINDINGS,
@@ -57,6 +56,21 @@ interface LogEvent {
 }
 
 const MAX_RECENT_PROJECTS = 8;
+const MAX_LOG_LINES = 1000;
+const MAX_LOG_CHARACTERS = 2_000_000;
+
+function trimLog(lines: string[]) {
+  const trimmed = lines.slice(-MAX_LOG_LINES);
+  let characters = trimmed.reduce((total, line) => total + line.length, 0);
+  while (characters > MAX_LOG_CHARACTERS && trimmed.length > 1) {
+    characters -= trimmed.shift()?.length ?? 0;
+  }
+  return trimmed;
+}
+
+function appendLog(lines: string[], line: string) {
+  return trimLog([...lines, line]);
+}
 
 function normalizeRecentProjects(projects: RecentProject[]) {
   const byPath = new Map<string, RecentProject>();
@@ -241,12 +255,11 @@ function App() {
   const [keymap, setKeymap] = useState<KeyBinding[]>(DEFAULT_KEYBINDINGS);
 
   const pickCustomWorld = async () => {
-    const selected = await open({
-      filters: [{ name: "SDF World", extensions: ["sdf"] }],
-      multiple: false,
-    });
-    if (typeof selected === "string") {
-      setWorldPath(selected);
+    try {
+      const selected = await invoke<string | null>("import_world");
+      if (selected) setWorldPath(selected);
+    } catch (error) {
+      console.error("World import failed:", error);
     }
   };
 
@@ -254,6 +267,8 @@ function App() {
   const [rosEvents, setRosEvents] = useState<string[]>([]);
   const [rosConnected, setRosConnected] = useState(false);
   const [initializing, setInitializing] = useState(false);
+  const rosWorkspaceReady = useRef(false);
+  const authRecoveryStarted = useRef(false);
   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
   const [currentSetupLine, setCurrentSetupLine] = useState<string>(""); // Current line for toast
 
@@ -394,8 +409,8 @@ function App() {
   }, []);
 
   const pickFolder = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") {
+    const selected = await invoke<string | null>("pick_directory");
+    if (selected) {
       await loadFolder(selected);
     }
   };
@@ -489,21 +504,16 @@ function App() {
   };
 
   const saveGeneratedCode = async (code: string, isXml: boolean) => {
-    const selected = await save({
-      defaultPath: currentPath ?? undefined,
-      filters: isXml
-        ? [{ name: "URDF/XML", extensions: ["urdf", "xacro", "xml"] }]
-        : [{ name: "Python", extensions: ["py"] }],
-    });
-    if (typeof selected === "string") {
+    const selected = await invoke<string | null>("pick_save_path", { isXml });
+    if (selected) {
       await invoke("write_file", { path: selected, contents: code });
     }
   };
 
   // ---------- ROS workspace selection ----------
   const pickRosWorkspace = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") {
+    const selected = await invoke<string | null>("pick_directory");
+    if (selected) {
       setRosWorkspacePath(selected);
     }
   };
@@ -518,7 +528,7 @@ function App() {
       await invoke("run_colcon_build_streaming");
     } catch (error) {
       setBuilding(false);
-      setBuildOutput((prev) => [...prev, `ERROR: ${String(error)}`]);
+      setBuildOutput((prev) => appendLog(prev, `ERROR: ${String(error)}`));
     }
   };
 
@@ -529,7 +539,7 @@ function App() {
     try {
       await invoke("initialize_ros_environment");
     } catch (err) {
-      setSetupOutput((prev) => [...prev, `❌ ${err}`]);
+      setSetupOutput((prev) => appendLog(prev, `❌ ${err}`));
       setCurrentSetupLine(`❌ ${err}`);
       setInitializing(false);
     }
@@ -574,7 +584,9 @@ function App() {
     angularZ: number,
   ) => {
     try {
-      await invoke("publish_twist", { topicName, linearX, angularZ });
+      await invoke("publish_twist", {
+        command: { topicName, linearX, angularZ },
+      });
     } catch (err) {
       console.error("Twist command failed:", err);
     }
@@ -594,14 +606,16 @@ function App() {
 
     try {
       const response = await invoke<string>("ask_ai", {
-        userMessage: question,
-        openFileContent: activeFile?.content || null,
-        openFilePath: activeFile?.path || null,
-        workspaceRoot: currentPath ?? null,
-        recentRosEvents: rosEvents,
-        recentBuildOutput: buildOutput,
-        tfContext: tfContext ?? null,
-        mode: mode ?? null,
+        input: {
+          userMessage: question,
+          openFileContent: activeFile?.content || null,
+          openFilePath: activeFile?.path || null,
+          workspaceRoot: currentPath ?? null,
+          recentRosEvents: rosEvents,
+          recentBuildOutput: buildOutput,
+          tfContext: tfContext ?? null,
+          mode: mode ?? null,
+        },
       });
       setChatHistory((prev) => [
         ...prev,
@@ -711,6 +725,7 @@ function App() {
     const unlistenEvent = listen<string>("ros-event", (event) => {
       setRosEvents((prev) => [...prev.slice(-49), event.payload]);
       setRosConnected(true);
+      authRecoveryStarted.current = false;
 
       // Extract any cmd_vel topics from TopicSnapshot events, so the
       // robot control dropdown reflects whatever's actually in the
@@ -745,6 +760,17 @@ function App() {
       setRosConnected(false);
     });
 
+    const unlistenAuthError = listen<string>("ros-auth-error", (event) => {
+      setRosConnected(false);
+      setRosEvents((prev) =>
+        [...prev.slice(-49), `Authentication: ${event.payload}`],
+      );
+      if (rosWorkspaceReady.current && !authRecoveryStarted.current) {
+        authRecoveryStarted.current = true;
+        void initializeRosEnvironment();
+      }
+    });
+
     const unlistenConnecting = listen<void>("ros-connecting", () => {
       setRosConnected(false);
     });
@@ -764,23 +790,26 @@ function App() {
         });
       } else {
         // Append a new line
-        setBuildOutput((prev) => [...prev, text]);
+        setBuildOutput((prev) => appendLog(prev, text));
       }
     });
     const unlistenBuildError = listen<string>("build-error", (event) => {
-      setBuildOutput((prev) => [...prev, `ERROR: ${event.payload}`]);
+      setBuildOutput((prev) => appendLog(prev, `ERROR: ${event.payload}`));
     });
     const unlistenBuildFinished = listen<boolean>("build-finished", (event) => {
       setBuilding(false);
-      setBuildOutput((prev) => [
-        ...prev,
-        event.payload ? "[✓ Build succeeded]" : "[✗ Build failed]",
-      ]);
+      setBuildOutput((prev) =>
+        appendLog(
+          prev,
+          event.payload ? "[✓ Build succeeded]" : "[✗ Build failed]",
+        ),
+      );
     });
 
     return () => {
       unlistenEvent.then((f) => f());
       unlistenError.then((f) => f());
+      unlistenAuthError.then((f) => f());
       unlistenNodeSnapshot.then((f) => f());
       unlistenConnecting.then((f) => f());
       unlistenBuildOutput.then((f) => f());
@@ -805,19 +834,23 @@ function App() {
         });
       } else {
         // Append a new line
-        setSetupOutput((prev) => [...prev.slice(-99), text]);
+        setSetupOutput((prev) => appendLog(prev, text));
       }
       // Always update the toast's current line
       setCurrentSetupLine(text);
     });
     const unlistenFinished = listen<string>("init-finished", (event) => {
+      rosWorkspaceReady.current = true;
       setRosWorkspacePath(event.payload);
-      setSetupOutput((prev) => [...prev, "✅ ROS environment ready"]);
+      setSetupOutput((prev) => appendLog(prev, "✅ ROS environment ready"));
       setCurrentSetupLine("✅ ROS environment ready");
       setInitializing(false);
+      void invoke("start_ros_stream").catch((error) => {
+        setRosEvents((prev) => [...prev.slice(-49), `ROS stream failed: ${error}`]);
+      });
     });
     const unlistenError = listen<string>("init-error", (event) => {
-      setSetupOutput((prev) => [...prev, `❌ ${event.payload}`]);
+      setSetupOutput((prev) => appendLog(prev, `❌ ${event.payload}`));
       setCurrentSetupLine(`❌ ${event.payload}`);
       setInitializing(false);
     });

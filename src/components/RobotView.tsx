@@ -280,6 +280,17 @@ export function RobotControls({
 
       <div
         style={{
+          marginBottom: "var(--spacing-sm)",
+          fontSize: "var(--font-xs)",
+          opacity: 0.75,
+        }}
+      >
+        Speed magnitude limits: 0.5 m/s linear, 1 rad/s angular. Commands time
+        out after 0.5 s; this is not a safety-rated emergency stop.
+      </div>
+
+      <div
+        style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 48px)",
           justifyContent: "center",

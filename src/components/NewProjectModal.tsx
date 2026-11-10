@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { X } from "lucide-react";
 
@@ -29,8 +28,8 @@ export default function NewProjectModal({ onClose, onProjectCreated }: Props) {
   }, []);
 
   const pickDestination = async () => {
-    const selected = await open({ directory: true, multiple: false });
-    if (typeof selected === "string") setDestinationDir(selected);
+    const selected = await invoke<string | null>("pick_directory");
+    if (selected) setDestinationDir(selected);
   };
 
   const canCreate =
