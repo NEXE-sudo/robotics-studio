@@ -307,7 +307,9 @@ function App() {
     snapshotIncluded: boolean;
     retainedCriticalEvents: number;
   } | null>(null);
-  const [robotCommandError, setRobotCommandError] = useState<string | null>(null);
+  const [robotCommandError, setRobotCommandError] = useState<string | null>(
+    null,
+  );
   const rosWorkspaceReady = useRef(false);
   const authRecoveryStarted = useRef(false);
   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
@@ -323,7 +325,9 @@ function App() {
     ...buildOutput.filter((line) => /error|failed/i.test(line)),
     ...rosEvents.filter((line) => /NodeCrashed|error/i.test(line)),
     ...(eventHealth && !eventHealth.persistenceHealthy
-      ? [`Critical ROS event persistence failed: ${eventHealth.persistenceError}`]
+      ? [
+          `Critical ROS event persistence failed: ${eventHealth.persistenceError}`,
+        ]
       : []),
   ];
 
@@ -692,7 +696,12 @@ function App() {
 
   const requestEmergencyStop = async (activate: boolean) => {
     if (safetyPending) return;
-    if (!activate && !window.confirm("Reset the latched emergency stop? Motion will remain stopped until a new command is issued.")) {
+    if (
+      !activate &&
+      !window.confirm(
+        "Reset the latched emergency stop? Motion will remain stopped until a new command is issued.",
+      )
+    ) {
       return;
     }
     setSafetyPending(true);
@@ -704,13 +713,17 @@ function App() {
       }>("set_emergency_stop", { activate });
       setSafetyState(state.state);
       if (state.state !== (activate ? "ACTIVE" : "READY")) {
-        setSafetyError(state.detail || "Backend did not confirm the requested safety state.");
+        setSafetyError(
+          state.detail || "Backend did not confirm the requested safety state.",
+        );
       }
     } catch (error) {
       if (activate) {
         setSafetyState("DISCONNECTED");
       }
-      setSafetyError(`Emergency-stop request was not confirmed: ${String(error)}`);
+      setSafetyError(
+        `Emergency-stop request was not confirmed: ${String(error)}`,
+      );
     } finally {
       setSafetyPending(false);
     }
@@ -882,15 +895,20 @@ function App() {
     const unlistenError = listen<string>("ros-error", (event) => {
       console.error("ROS error:", event.payload);
       setRosConnected(false);
-      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
+      setSafetyState((state) =>
+        state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
+      );
     });
 
     const unlistenAuthError = listen<string>("ros-auth-error", (event) => {
       setRosConnected(false);
-      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
-      setRosEvents((prev) =>
-        [...prev.slice(-49), `Authentication: ${event.payload}`],
+      setSafetyState((state) =>
+        state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
       );
+      setRosEvents((prev) => [
+        ...prev.slice(-49),
+        `Authentication: ${event.payload}`,
+      ]);
       if (rosWorkspaceReady.current && !authRecoveryStarted.current) {
         authRecoveryStarted.current = true;
         void initializeRosEnvironment();
@@ -899,14 +917,18 @@ function App() {
 
     const unlistenConnecting = listen<void>("ros-connecting", () => {
       setRosConnected(false);
-      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
+      setSafetyState((state) =>
+        state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
+      );
     });
     const unlistenSafety = listen<{
       state: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
       detail: string;
     }>("safety-state", (event) => {
       setSafetyState(event.payload.state);
-      setSafetyError(event.payload.state === "FAULT" ? event.payload.detail : null);
+      setSafetyError(
+        event.payload.state === "FAULT" ? event.payload.detail : null,
+      );
     });
     const unlistenEventHealth = listen<{
       queueCapacity: number;
@@ -1006,7 +1028,10 @@ function App() {
       setCurrentSetupLine("✅ ROS environment ready");
       setInitializing(false);
       void invoke("start_ros_stream").catch((error) => {
-        setRosEvents((prev) => [...prev.slice(-49), `ROS stream failed: ${error}`]);
+        setRosEvents((prev) => [
+          ...prev.slice(-49),
+          `ROS stream failed: ${error}`,
+        ]);
       });
     });
     const unlistenError = listen<string>("init-error", (event) => {
@@ -1423,7 +1448,14 @@ function App() {
                   </div>
 
                   {rosPackagesLoading && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.7 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                        opacity: 0.7,
+                      }}
+                    >
                       <LoaderCircle size={14} className="spin" />
                       Loading packages...
                     </div>
@@ -1435,77 +1467,141 @@ function App() {
                     </div>
                   )}
 
-                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length === 0 && (
-                    <div style={{ opacity: 0.6 }}>
-                      No ROS packages discovered in the active environment.
-                    </div>
-                  )}
+                  {!rosPackagesLoading &&
+                    !rosPackagesError &&
+                    rosPackages.length === 0 && (
+                      <div style={{ opacity: 0.6 }}>
+                        No ROS packages discovered in the active environment.
+                      </div>
+                    )}
 
-                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length > 0 && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                      {rosPackages.map((pkg) => (
-                        <div
-                          key={pkg.name}
-                          style={{
-                            background: "rgba(255,255,255,0.02)",
-                            border: "1px solid rgba(255,255,255,0.08)",
-                            borderRadius: 6,
-                            padding: 8,
-                          }}
-                        >
-                          <div style={{ fontWeight: 600, color: "#e8e8e8", marginBottom: 4 }}>
-                            {pkg.name}
-                          </div>
-                          <div style={{ opacity: 0.7, wordBreak: "break-word", marginBottom: 4 }}>
-                            {pkg.path}
-                          </div>
-                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-                            {pkg.package_type && (
-                              <span style={{ background: "rgba(79,195,247,0.12)", borderRadius: 999, padding: "2px 6px" }}>
-                                {pkg.package_type}
-                              </span>
-                            )}
-                            {pkg.version && (
-                              <span style={{ background: "rgba(124,217,146,0.12)", borderRadius: 999, padding: "2px 6px" }}>
-                                v{pkg.version}
-                              </span>
-                            )}
-                          </div>
-                          {pkg.dependencies.length > 0 && (
-                            <div style={{ marginTop: 6 }}>
-                              <div style={{ opacity: 0.6, marginBottom: 2 }}>Dependencies</div>
-                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                                {pkg.dependencies.slice(0, 8).map((dep) => (
-                                  <span key={`${pkg.name}-${dep}`} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 999, padding: "2px 6px" }}>
-                                    {dep}
-                                  </span>
-                                ))}
+                  {!rosPackagesLoading &&
+                    !rosPackagesError &&
+                    rosPackages.length > 0 && (
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 8,
+                        }}
+                      >
+                        {rosPackages.map((pkg) => (
+                          <div
+                            key={pkg.name}
+                            style={{
+                              background: "rgba(255,255,255,0.02)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              borderRadius: 6,
+                              padding: 8,
+                            }}
+                          >
+                            <div
+                              style={{
+                                fontWeight: 600,
+                                color: "#e8e8e8",
+                                marginBottom: 4,
+                              }}
+                            >
+                              {pkg.name}
+                            </div>
+                            <div
+                              style={{
+                                opacity: 0.7,
+                                wordBreak: "break-word",
+                                marginBottom: 4,
+                              }}
+                            >
+                              {pkg.path}
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                flexWrap: "wrap",
+                                gap: 6,
+                              }}
+                            >
+                              {pkg.package_type && (
+                                <span
+                                  style={{
+                                    background: "rgba(79,195,247,0.12)",
+                                    borderRadius: 999,
+                                    padding: "2px 6px",
+                                  }}
+                                >
+                                  {pkg.package_type}
+                                </span>
+                              )}
+                              {pkg.version && (
+                                <span
+                                  style={{
+                                    background: "rgba(124,217,146,0.12)",
+                                    borderRadius: 999,
+                                    padding: "2px 6px",
+                                  }}
+                                >
+                                  v{pkg.version}
+                                </span>
+                              )}
+                            </div>
+                            {pkg.dependencies.length > 0 && (
+                              <div style={{ marginTop: 6 }}>
+                                <div style={{ opacity: 0.6, marginBottom: 2 }}>
+                                  Dependencies
+                                </div>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 4,
+                                  }}
+                                >
+                                  {pkg.dependencies.slice(0, 8).map((dep) => (
+                                    <span
+                                      key={`${pkg.name}-${dep}`}
+                                      style={{
+                                        background: "rgba(255,255,255,0.04)",
+                                        borderRadius: 999,
+                                        padding: "2px 6px",
+                                      }}
+                                    >
+                                      {dep}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
-                            </div>
-                          )}
-                          {(pkg.executables.length > 0 || pkg.launch_files.length > 0 || pkg.config_files.length > 0) && (
-                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
-                              {pkg.executables.length > 0 && (
-                                <div style={{ opacity: 0.6 }}>
-                                  Executables: {pkg.executables.join(", ")}
-                                </div>
-                              )}
-                              {pkg.launch_files.length > 0 && (
-                                <div style={{ opacity: 0.6 }}>
-                                  Launch: {pkg.launch_files.join(", ")}
-                                </div>
-                              )}
-                              {pkg.config_files.length > 0 && (
-                                <div style={{ opacity: 0.6 }}>
-                                  Config: {pkg.config_files.join(", ")}
-                                </div>
-                              )}
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                            )}
+                            {(pkg.executables.length > 0 ||
+                              pkg.launch_files.length > 0 ||
+                              pkg.config_files.length > 0) && (
+                              <div
+                                style={{
+                                  marginTop: 6,
+                                  display: "flex",
+                                  flexDirection: "column",
+                                  gap: 2,
+                                }}
+                              >
+                                {pkg.executables.length > 0 && (
+                                  <div style={{ opacity: 0.6 }}>
+                                    Executables: {pkg.executables.join(", ")}
+                                  </div>
+                                )}
+                                {pkg.launch_files.length > 0 && (
+                                  <div style={{ opacity: 0.6 }}>
+                                    Launch: {pkg.launch_files.join(", ")}
+                                  </div>
+                                )}
+                                {pkg.config_files.length > 0 && (
+                                  <div style={{ opacity: 0.6 }}>
+                                    Config: {pkg.config_files.join(", ")}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
                 </div>
               )}
             </div>
@@ -2064,7 +2160,12 @@ function App() {
                 >
                   <div style={{ marginBottom: 12 }}>
                     <strong>ROS environment</strong>
-                    <div style={{ marginTop: 4, color: rosConnected ? "#7cd992" : "#e0b060" }}>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        color: rosConnected ? "#7cd992" : "#e0b060",
+                      }}
+                    >
                       {initializing
                         ? "Initializing"
                         : rosConnected
@@ -2074,13 +2175,24 @@ function App() {
                   </div>
                   <div style={{ marginBottom: 12 }}>
                     <strong>Selected workspace</strong>
-                    <div style={{ marginTop: 4, color: "#aaa", overflowWrap: "anywhere" }}>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        color: "#aaa",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
                       {rosWorkspacePath ?? "No ROS workspace selected"}
                     </div>
                   </div>
                   <div style={{ marginBottom: 12 }}>
                     <strong>Build</strong>
-                    <div style={{ marginTop: 4, color: building ? "#e0b060" : "#aaa" }}>
+                    <div
+                      style={{
+                        marginTop: 4,
+                        color: building ? "#e0b060" : "#aaa",
+                      }}
+                    >
                       {building ? "Running" : "Idle"}
                     </div>
                   </div>
@@ -2089,7 +2201,9 @@ function App() {
                   </div>
                   {Object.keys(nodeStatus).length === 0 ? (
                     <div style={{ color: "#777" }}>
-                      {rosConnected ? "No nodes reported" : "Unavailable while disconnected"}
+                      {rosConnected
+                        ? "No nodes reported"
+                        : "Unavailable while disconnected"}
                     </div>
                   ) : (
                     Object.entries(nodeStatus).map(([name, status]) => (
@@ -2102,11 +2216,17 @@ function App() {
                           padding: "4px 0",
                         }}
                       >
-                        <span style={{ color: status === "alive" ? "#7cd992" : "#e08080" }}>
+                        <span
+                          style={{
+                            color: status === "alive" ? "#7cd992" : "#e08080",
+                          }}
+                        >
                           {status === "alive" ? "●" : "○"}
                         </span>
                         <span style={{ fontFamily: "monospace" }}>{name}</span>
-                        <span style={{ marginLeft: "auto", opacity: 0.6 }}>{status}</span>
+                        <span style={{ marginLeft: "auto", opacity: 0.6 }}>
+                          {status}
+                        </span>
                       </div>
                     ))
                   )}
@@ -2131,7 +2251,9 @@ function App() {
                       safetyError={safetyError}
                       commandError={robotCommandError}
                       onEmergencyStop={() => void requestEmergencyStop(true)}
-                      onResetEmergencyStop={() => void requestEmergencyStop(false)}
+                      onResetEmergencyStop={() =>
+                        void requestEmergencyStop(false)
+                      }
                     />
                   </div>
                 </div>
@@ -2140,25 +2262,59 @@ function App() {
               {activeTab === "problems" && (
                 <div style={{ padding: 8, fontSize: 12 }}>
                   {eventHealth && (
-                    <div role="status" style={{ padding: "6px 0", color: !eventHealth.persistenceHealthy ? "#e08080" : eventHealth.criticalOverflows > 0 ? "#e0b060" : "#7cd992" }}>
-                      ROS event queue: {eventHealth.subscriberCount} subscriber(s), backlog {eventHealth.maxBacklog}/{eventHealth.queueCapacity}, critical overflows {eventHealth.criticalOverflows}, coalesced/dropped telemetry {eventHealth.droppedTelemetry}; retained critical events {eventHealth.retainedCriticalEvents}.
+                    <div
+                      role="status"
+                      style={{
+                        padding: "6px 0",
+                        color: !eventHealth.persistenceHealthy
+                          ? "#e08080"
+                          : eventHealth.criticalOverflows > 0
+                            ? "#e0b060"
+                            : "#7cd992",
+                      }}
+                    >
+                      ROS event queue: {eventHealth.subscriberCount}{" "}
+                      subscriber(s), backlog {eventHealth.maxBacklog}/
+                      {eventHealth.queueCapacity}, critical overflows{" "}
+                      {eventHealth.criticalOverflows}, coalesced/dropped
+                      telemetry {eventHealth.droppedTelemetry}; retained
+                      critical events {eventHealth.retainedCriticalEvents}.
                     </div>
                   )}
                   {eventHealth && !eventHealth.persistenceHealthy && (
-                    <div role="alert" style={{ color: "#e08080", padding: "4px 0" }}>
-                      Critical event history is unavailable: {eventHealth.persistenceError}
+                    <div
+                      role="alert"
+                      style={{ color: "#e08080", padding: "4px 0" }}
+                    >
+                      Critical event history is unavailable:{" "}
+                      {eventHealth.persistenceError}
                     </div>
                   )}
                   {eventRecovery?.gapDetected && (
-                    <div role="status" style={{ color: "#e0b060", padding: "4px 0" }}>
-                      ROS event history had a gap. {eventRecovery.snapshotIncluded ? "Current state snapshots were restored." : "A state snapshot is not available yet."} Oldest retained sequence: {eventRecovery.oldestAvailableSequence}; latest sequence: {eventRecovery.latestSequence}.
+                    <div
+                      role="status"
+                      style={{ color: "#e0b060", padding: "4px 0" }}
+                    >
+                      ROS event history had a gap.{" "}
+                      {eventRecovery.snapshotIncluded
+                        ? "Current state snapshots were restored."
+                        : "A state snapshot is not available yet."}{" "}
+                      Oldest retained sequence:{" "}
+                      {eventRecovery.oldestAvailableSequence}; latest sequence:{" "}
+                      {eventRecovery.latestSequence}.
                     </div>
                   )}
                   {diagnostics.length === 0 ? (
-                    <div style={{ color: "#777" }}>No problems reported by recent environment, build, or ROS output.</div>
+                    <div style={{ color: "#777" }}>
+                      No problems reported by recent environment, build, or ROS
+                      output
+                    </div>
                   ) : (
                     diagnostics.slice(-50).map((diagnostic, index) => (
-                      <div key={`${index}-${diagnostic}`} style={{ color: "#e08080", padding: "4px 0" }}>
+                      <div
+                        key={`${index}-${diagnostic}`}
+                        style={{ color: "#e08080", padding: "4px 0" }}
+                      >
                         {diagnostic}
                       </div>
                     ))
