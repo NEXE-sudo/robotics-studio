@@ -136,7 +136,7 @@ print("Selected-workspace ROS package discovery passed")
 PY
 
 docker exec "$container" bash -lc \
-  'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
+  'source /opt/ros/jazzy/setup.bash && /opt/robotics-studio/venv/bin/python -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
 
 docker exec "$container" bash -lc '
   set -eu
@@ -175,7 +175,7 @@ printf '{"token":"%s","expires_at":%s}' "$token" "$expires_at" |
 
 start_ros_server() {
   docker exec -d "$container" bash -lc \
-    'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated exec python3 /opt/robotics-studio/server.py >/tmp/server.log 2>&1'
+    'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated exec /opt/robotics-studio/venv/bin/python /opt/robotics-studio/server.py >/tmp/server.log 2>&1'
   for attempt in $(seq 1 30); do
     if docker exec "$container" bash -lc \
       'grep -q "running on port 50051" /tmp/server.log' 2>/dev/null; then
@@ -200,7 +200,7 @@ echo "SDFormat schema validation accepted the valid world and rejected invalid g
 start_ros_server
 
 docker exec -i "$container" bash -lc \
-  'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && python3 -' <<'PY'
+  'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && /opt/robotics-studio/venv/bin/python -' <<'PY'
 import sys
 import time
 
@@ -258,14 +258,19 @@ publisher = node.create_publisher(
         durability=DurabilityPolicy.TRANSIENT_LOCAL,
     ),
 )
+dynamic_publisher = node.create_publisher(TFMessage, "/tf", 10)
 joint_state_publisher = node.create_publisher(JointState, "/joint_states", 10)
 deadline = time.monotonic() + 8
 while (
     publisher.get_subscription_count() == 0
+    or dynamic_publisher.get_subscription_count() == 0
     or joint_state_publisher.get_subscription_count() == 0
 ) and time.monotonic() < deadline:
     rclpy.spin_once(node, timeout_sec=0.1)
 assert publisher.get_subscription_count() > 0, "ROS service did not subscribe to /tf_static"
+assert (
+    dynamic_publisher.get_subscription_count() > 0
+), "ROS service did not subscribe to /tf"
 assert (
     joint_state_publisher.get_subscription_count() > 0
 ), "ROS service did not subscribe to /joint_states"
@@ -276,22 +281,34 @@ transform.child_frame_id = "integration_base"
 transform.transform.translation.x = 0.25
 transform.transform.rotation.w = 1.0
 publisher.publish(TFMessage(transforms=[transform]))
+dynamic_transform = TransformStamped()
+dynamic_transform.header.frame_id = "odom"
+dynamic_transform.child_frame_id = "integration_dynamic_base"
+dynamic_transform.transform.translation.x = 1.5
+dynamic_transform.transform.rotation.w = 1.0
+dynamic_publisher.publish(TFMessage(transforms=[dynamic_transform]))
 joint_state = JointState()
 joint_state.name = ["integration_joint"]
 joint_state.position = [0.5]
 joint_state_publisher.publish(joint_state)
 
-tf_verified = False
+static_tf_verified = False
+dynamic_tf_verified = False
 graph_verified = False
 joint_state_verified = False
 for event in events:
     event_type = event.WhichOneof("event")
     if event_type == "tf_update":
-        assert event.tf_update.parent_frame == "map"
-        assert event.tf_update.child_frame == "integration_base"
-        assert event.tf_update.topic_name == "/tf_static"
-        assert abs(event.tf_update.x - 0.25) < 1e-9
-        tf_verified = True
+        if event.tf_update.topic_name == "/tf_static":
+            assert event.tf_update.parent_frame == "map"
+            assert event.tf_update.child_frame == "integration_base"
+            assert abs(event.tf_update.x - 0.25) < 1e-9
+            static_tf_verified = True
+        elif event.tf_update.topic_name == "/tf":
+            assert event.tf_update.parent_frame == "odom"
+            assert event.tf_update.child_frame == "integration_dynamic_base"
+            assert abs(event.tf_update.x - 1.5) < 1e-9
+            dynamic_tf_verified = True
     elif event_type == "joint_state_update":
         joint_state_verified = (
             event.joint_state_update.topic_name == "/joint_states"
@@ -327,21 +344,28 @@ for event in events:
                 and "/robotics_studio_tf_integration" in action_info.server_nodes
                 and "/robotics_studio_tf_integration" in action_info.client_nodes
             )
-    if tf_verified and graph_verified and joint_state_verified:
+    if (
+        static_tf_verified
+        and dynamic_tf_verified
+        and graph_verified
+        and joint_state_verified
+    ):
         break
 else:
     raise AssertionError(
-        "ROS service did not stream TF, joint-state, and graph details"
+        "ROS service did not stream static/dynamic TF, joint-state, and graph details"
     )
 if not graph_verified:
     raise AssertionError("ROS graph snapshot omitted the /tf_static publisher endpoint")
 if not joint_state_verified:
     raise AssertionError("ROS service did not stream the joint-state update")
+if not dynamic_tf_verified:
+    raise AssertionError("ROS service did not stream the dynamic TF update")
 
 events.cancel()
 node.destroy_node()
 rclpy.shutdown()
-print("Live ROS TF, joint-state, and graph endpoint discovery passed")
+print("Live ROS static/dynamic TF, joint-state, and graph endpoint discovery passed")
 PY
 
 ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
@@ -350,7 +374,7 @@ ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
     --ignored --exact \
     ros_docker_integration_tests::pinned_tls_client_authenticates_to_docker_ros_service
 
-docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && /opt/robotics-studio/venv/bin/python -' <<'PY'
 import json
 import sys
 import time
@@ -413,9 +437,9 @@ print("Authenticated TLS, stop/reset enforcement and event replay passed")
 PY
 
 docker exec "$container" bash -lc \
-  "pkill -TERM -f '[p]ython3 /opt/robotics-studio/server.py' || true"
+  "pkill -TERM -f '[v]env/bin/python /opt/robotics-studio/server.py' || true"
 start_ros_server
-docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && /opt/robotics-studio/venv/bin/python -' <<'PY'
 import json
 import sys
 

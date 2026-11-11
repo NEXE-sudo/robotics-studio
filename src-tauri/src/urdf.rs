@@ -35,6 +35,24 @@ pub struct RobotVisual {
 pub struct RobotLink {
     pub name: String,
     pub visuals: Vec<RobotVisual>,
+    pub collisions: Vec<RobotVisual>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotJointLimit {
+    pub lower: Option<f64>,
+    pub upper: Option<f64>,
+    pub effort: Option<f64>,
+    pub velocity: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotMimic {
+    pub joint: String,
+    pub multiplier: f64,
+    pub offset: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -46,6 +64,8 @@ pub struct RobotJoint {
     pub child: String,
     pub origin: RobotOrigin,
     pub axis: [f64; 3],
+    pub limit: Option<RobotJointLimit>,
+    pub mimic: Option<RobotMimic>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -121,6 +141,48 @@ fn parse_origin(attributes: &HashMap<String, String>) -> Result<RobotOrigin, Str
     })
 }
 
+fn parse_optional_number(
+    attributes: &HashMap<String, String>,
+    name: &str,
+    description: &str,
+) -> Result<Option<f64>, String> {
+    attributes
+        .get(name)
+        .map(|value| parse_number(value, description))
+        .transpose()
+}
+
+fn parse_joint_limit(attributes: &HashMap<String, String>) -> Result<RobotJointLimit, String> {
+    let limit = RobotJointLimit {
+        lower: parse_optional_number(attributes, "lower", "joint lower limit")?,
+        upper: parse_optional_number(attributes, "upper", "joint upper limit")?,
+        effort: parse_optional_number(attributes, "effort", "joint effort limit")?,
+        velocity: parse_optional_number(attributes, "velocity", "joint velocity limit")?,
+    };
+    if limit
+        .lower
+        .zip(limit.upper)
+        .is_some_and(|(lower, upper)| lower > upper)
+    {
+        return Err("URDF joint lower limit must not exceed its upper limit".to_string());
+    }
+    if limit.effort.is_some_and(|value| value <= 0.0)
+        || limit.velocity.is_some_and(|value| value <= 0.0)
+    {
+        return Err("URDF joint effort and velocity limits must be positive".to_string());
+    }
+    Ok(limit)
+}
+
+fn parse_mimic(attributes: &HashMap<String, String>) -> Result<RobotMimic, String> {
+    Ok(RobotMimic {
+        joint: required_attribute(attributes, "joint")?.to_string(),
+        multiplier: parse_optional_number(attributes, "multiplier", "mimic multiplier")?
+            .unwrap_or(1.0),
+        offset: parse_optional_number(attributes, "offset", "mimic offset")?.unwrap_or(0.0),
+    })
+}
+
 fn parse_color(value: &str) -> Result<[f64; 4], String> {
     let color = parse_vector(value, "material rgba")?;
     if color
@@ -193,6 +255,48 @@ fn validate_robot_tree(links: &[RobotLink], joints: &[RobotJoint]) -> Result<Str
     if joint_names.len() != joints.len() {
         return Err("URDF contains duplicate joint names".to_string());
     }
+    let joints_by_name = joints
+        .iter()
+        .map(|joint| (joint.name.as_str(), joint))
+        .collect::<HashMap<_, _>>();
+    for joint in joints {
+        if let Some(mimic) = &joint.mimic {
+            if !joints_by_name.contains_key(mimic.joint.as_str()) {
+                return Err(format!(
+                    "Joint '{}' mimics undefined joint '{}'",
+                    joint.name, mimic.joint
+                ));
+            }
+            if mimic.joint == joint.name {
+                return Err(format!("Joint '{}' cannot mimic itself", joint.name));
+            }
+        }
+    }
+
+    fn visit_mimic(
+        name: &str,
+        joints: &HashMap<&str, &RobotJoint>,
+        visiting: &mut HashSet<String>,
+        visited: &mut HashSet<String>,
+    ) -> Result<(), String> {
+        if visited.contains(name) {
+            return Ok(());
+        }
+        if !visiting.insert(name.to_string()) {
+            return Err("URDF joint mimic relationships contain a cycle".to_string());
+        }
+        if let Some(source) = joints.get(name).and_then(|joint| joint.mimic.as_ref()) {
+            visit_mimic(&source.joint, joints, visiting, visited)?;
+        }
+        visiting.remove(name);
+        visited.insert(name.to_string());
+        Ok(())
+    }
+    let mut visiting = HashSet::new();
+    let mut visited = HashSet::new();
+    for joint in joints {
+        visit_mimic(&joint.name, &joints_by_name, &mut visiting, &mut visited)?;
+    }
 
     let mut child_links = HashSet::new();
     let mut children_by_parent: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -264,6 +368,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
     let mut current_link = None::<RobotLink>;
     let mut current_joint = None::<RobotJoint>;
     let mut current_visual = None::<RobotVisual>;
+    let mut current_collision = None::<RobotVisual>;
     let mut links = Vec::new();
     let mut joints = Vec::new();
     let mut warnings = Vec::new();
@@ -302,6 +407,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                         current_link = Some(RobotLink {
                             name: required_attribute(&attributes, "name")?.to_string(),
                             visuals: Vec::new(),
+                            collisions: Vec::new(),
                         });
                     }
                     "joint" if parent == Some("robot") => {
@@ -315,6 +421,8 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                             child: String::new(),
                             origin: RobotOrigin::default(),
                             axis: [1.0, 0.0, 0.0],
+                            limit: None,
+                            mimic: None,
                         });
                     }
                     "visual" if parent == Some("link") => {
@@ -329,9 +437,26 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                             color: None,
                         });
                     }
+                    "collision" if parent == Some("link") => {
+                        if current_collision.is_some() {
+                            return Err("Nested URDF <collision> elements are invalid".to_string());
+                        }
+                        current_collision = Some(RobotVisual {
+                            origin: RobotOrigin::default(),
+                            geometry: RobotGeometry::Unsupported {
+                                description: String::new(),
+                            },
+                            color: None,
+                        });
+                    }
                     "origin" if parent == Some("visual") => {
                         if let Some(visual) = current_visual.as_mut() {
                             visual.origin = parse_origin(&attributes)?;
+                        }
+                    }
+                    "origin" if parent == Some("collision") => {
+                        if let Some(collision) = current_collision.as_mut() {
+                            collision.origin = parse_origin(&attributes)?;
                         }
                     }
                     "origin" if parent == Some("joint") => {
@@ -356,6 +481,39 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                             }
                         }
                     }
+                    "limit" if parent == Some("joint") => {
+                        if let Some(joint) = current_joint.as_mut() {
+                            if joint.limit.is_some() {
+                                return Err(format!(
+                                    "Joint '{}' defines more than one limit",
+                                    joint.name
+                                ));
+                            }
+                            joint.limit = Some(parse_joint_limit(&attributes)?);
+                        }
+                    }
+                    "mimic" if parent == Some("joint") => {
+                        if let Some(joint) = current_joint.as_mut() {
+                            if joint.mimic.is_some() {
+                                return Err(format!(
+                                    "Joint '{}' defines more than one mimic relationship",
+                                    joint.name
+                                ));
+                            }
+                            joint.mimic = Some(parse_mimic(&attributes)?);
+                        }
+                    }
+                    "inertial" if parent == Some("link") => {
+                        warnings.push(
+                            "URDF inertial properties are not used in the preview".to_string(),
+                        );
+                    }
+                    "material" if parent == Some("robot") => {
+                        warnings.push(
+                            "Robot-level named materials are not resolved in the preview"
+                                .to_string(),
+                        );
+                    }
                     "color" if parent == Some("material") => {
                         if let (Some(visual), Some(color)) =
                             (current_visual.as_mut(), attributes.get("rgba"))
@@ -364,7 +522,8 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                         }
                     }
                     "box" | "cylinder" | "sphere" | "mesh" if parent == Some("geometry") => {
-                        if let Some(visual) = current_visual.as_mut() {
+                        if let Some(visual) = current_visual.as_mut().or(current_collision.as_mut())
+                        {
                             if !matches!(
                                 visual.geometry,
                                 RobotGeometry::Unsupported { ref description }
@@ -395,6 +554,9 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                         }
                         "visual" => {
                             return Err("URDF visual is missing a geometry".to_string());
+                        }
+                        "collision" => {
+                            return Err("URDF collision is missing a geometry".to_string());
                         }
                         "joint" => {
                             return Err("URDF joint must define parent and child links".to_string());
@@ -437,6 +599,35 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                             ));
                         }
                         link.visuals.push(visual);
+                    }
+                    "collision" => {
+                        let collision = current_collision
+                            .take()
+                            .ok_or_else(|| "URDF collision state is inconsistent".to_string())?;
+                        if matches!(
+                            collision.geometry,
+                            RobotGeometry::Unsupported { ref description }
+                                if description.is_empty()
+                        ) {
+                            return Err(
+                                "URDF collision is missing a supported geometry".to_string()
+                            );
+                        }
+                        if let RobotGeometry::Unsupported { description } = &collision.geometry {
+                            warnings.push(format!(
+                                "Collision mesh geometry '{description}' is not rendered in this preview"
+                            ));
+                        }
+                        let link = current_link
+                            .as_mut()
+                            .ok_or_else(|| "URDF collision is outside a link".to_string())?;
+                        if link.collisions.len() >= MAX_VISUALS_PER_LINK {
+                            return Err(format!(
+                                "Link '{}' contains too many collision elements",
+                                link.name
+                            ));
+                        }
+                        link.collisions.push(collision);
                     }
                     "link" => {
                         if links.len() >= MAX_LINKS {
@@ -601,5 +792,45 @@ mod tests {
         ));
         assert_eq!(robot.warnings.len(), 1);
         assert!(robot.warnings[0].contains("base.stl"));
+    }
+
+    #[test]
+    fn parses_joint_limits_mimic_relationships_and_collision_geometry() {
+        let robot = parse_robot_description(
+            r#"<robot name="bounded">
+                <link name="base"/>
+                <link name="follower">
+                    <collision>
+                        <origin xyz="0 0 0.1"/>
+                        <geometry><box size="0.2 0.3 0.4"/></geometry>
+                    </collision>
+                </link>
+                <joint name="driver" type="revolute">
+                    <parent link="base"/><child link="follower"/>
+                    <limit lower="-1" upper="1" effort="4" velocity="2"/>
+                </joint>
+                <joint name="mimic_driver" type="continuous">
+                    <parent link="follower"/><child link="tool"/>
+                    <mimic joint="driver" multiplier="-2" offset="0.25"/>
+                </joint>
+                <link name="tool"/>
+            </robot>"#,
+        )
+        .unwrap();
+        assert_eq!(robot.joints[0].limit.as_ref().unwrap().lower, Some(-1.0));
+        assert_eq!(robot.joints[0].limit.as_ref().unwrap().upper, Some(1.0));
+        assert_eq!(robot.joints[1].mimic.as_ref().unwrap().joint, "driver");
+        assert_eq!(robot.links[1].collisions[0].origin.xyz, [0.0, 0.0, 0.1]);
+        assert_eq!(robot.links[1].collisions.len(), 1);
+    }
+
+    #[test]
+    fn rejects_invalid_joint_limits_and_mimic_relationships() {
+        let invalid_limit = r#"<robot name="test"><link name="a"/><link name="b"/><joint name="j" type="revolute"><parent link="a"/><child link="b"/><limit lower="2" upper="1"/></joint></robot>"#;
+        assert!(parse_robot_description(invalid_limit).is_err());
+        let missing_mimic = r#"<robot name="test"><link name="a"/><link name="b"/><joint name="j" type="revolute"><parent link="a"/><child link="b"/><mimic joint="missing"/></joint></robot>"#;
+        assert!(parse_robot_description(missing_mimic).is_err());
+        let mimic_cycle = r#"<robot name="test"><link name="a"/><link name="b"/><link name="c"/><joint name="one" type="revolute"><parent link="a"/><child link="b"/><mimic joint="two"/></joint><joint name="two" type="revolute"><parent link="b"/><child link="c"/><mimic joint="one"/></joint></robot>"#;
+        assert!(parse_robot_description(mimic_cycle).is_err());
     }
 }

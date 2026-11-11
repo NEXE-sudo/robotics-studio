@@ -15,19 +15,22 @@ This version is still in development and is not release-ready. See
   diagnostics.
 - Bounded read-only ROS graph snapshots with node namespaces, topic
   publisher/subscriber identities and QoS, service types/endpoints, and action
-  server/client discovery.
+  server/client discovery, grouped by fully qualified node identity in the UI.
 - Reliable transient-local subscription to `/tf_static`.
 - Bounded URDF parsing for primitive visuals and connected link trees, with
   safe rejection of malformed or unsupported descriptions.
 - Three.js rendering for box, cylinder, and sphere visuals and supported
   fixed/revolute/continuous/prismatic joints; live `/joint_states` updates are
-  streamed to the preview.
+  streamed to the preview. Joint limits and mimic relationships are applied,
+  and supported collision primitives can be toggled in the preview.
 - Dependency-free frontend unit tests for TF graph construction and robot
   geometry/joint transforms.
 - Docker integration coverage for selected-workspace package discovery,
   malformed package manifests, installed executables, workspace isolation,
-  live ROS graph endpoints, `/tf_static` and `/joint_states` delivery, and
-  valid/invalid SDFormat schema checks.
+  live ROS graph endpoints, static and dynamic TF plus `/joint_states`
+  delivery, and valid/invalid SDFormat schema checks.
+- Build-process state and cancellation feedback that distinguishes a stop
+  request from confirmed process termination.
 
 ### Security and reliability
 
@@ -44,6 +47,11 @@ This version is still in development and is not release-ready. See
   explorer, avoiding a bypass of the backend's bounded motion/safety path.
 - Gazebo validates the selected SDF against the installed SDFormat schema
   before startup; external model/mesh resource validation remains incomplete.
+- Workspace package discovery reports inaccessible tree errors rather than
+  silently returning an empty package inventory.
+- The ROS container isolates its pinned Python gRPC runtime and code-generation
+  packages in a virtual environment so ROS/colcon retain their system Python
+  dependencies.
 - Existing v0.3.0 protections include TLS-pinned authenticated gRPC,
   approved-root filesystem access, bounded motion commands, persistent
   software stop state, critical event replay, and structural SDF checks.

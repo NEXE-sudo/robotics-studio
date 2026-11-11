@@ -15,8 +15,11 @@ selection.
 
 The ROS service source and generated protobuf modules run from
 `/opt/robotics-studio` inside the container, outside the writable workspace
-mount. The service persists its event journal, safety state, robot limits, and
-workspace data under `/workspace/.robotics-studio`.
+mount. Its gRPC runtime and code-generation dependencies are installed in an
+isolated Python virtual environment with access to ROS system packages; the
+system Python remains available to `colcon`. The service persists its event
+journal, safety state, robot limits, and workspace data under
+`/workspace/.robotics-studio`.
 
 ## gRPC trust model
 
@@ -74,9 +77,12 @@ other general file editing uses the separately approved editor folder.
 ## Process and simulation lifecycle
 
 The `colcon build` operation has a dedicated process group and a cancellation
-path. Gazebo startup waits for a world control service before launching the
-bridge, and failed startup attempts trigger cleanup. Reset targets the active
-world's discovered control service rather than assuming a `default` world.
+path. Build lifecycle state distinguishes starting, running, stopping, and
+terminal outcomes; a stop request is not reported as cancellation until the
+process has exited. Gazebo startup waits for a world control service before
+launching the bridge, and failed startup attempts trigger cleanup. Reset
+targets the active world's discovered control service rather than assuming a
+`default` world.
 
 Build, container, Gazebo, and bridge processes do not yet share a centralized
 process registry. General execution timeouts, unified status reporting,
@@ -106,8 +112,11 @@ validation rather than a replacement for `tf2`.
 When an active editor file is a `.urdf`, the native backend parses a bounded
 URDF subset and the frontend renders box, cylinder, and sphere visuals with a
 connected link tree. Fixed, revolute, continuous, and prismatic joint states
-are updated from bounded `/joint_states` telemetry. Mesh visuals are surfaced
-as warnings and skipped. Xacro expansion, mesh/package resource resolution,
+are updated from bounded `/joint_states` telemetry, with supported joint
+limits and mimic relationships applied. Supported primitive collision
+geometry can be toggled in the preview. Mesh visuals are surfaced as warnings
+and skipped; inertial properties and robot-level named materials are not used
+in rendering. Xacro expansion, mesh/package resource resolution,
 floating/planar joints, and full URDF semantics are not implemented. The
 ROS-to-three.js coordinate mapping still needs broader convention validation.
 

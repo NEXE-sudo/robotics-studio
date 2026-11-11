@@ -63,7 +63,11 @@ function buildPlaceholderRobot(node: string): RobotInstance {
   caster.castShadow = true;
   group.add(caster);
 
-  return { group, updateJoints: () => undefined };
+  return {
+    group,
+    updateJoints: () => undefined,
+    setCollisionVisible: () => undefined,
+  };
 }
 
 export default function RobotView({
@@ -76,6 +80,8 @@ export default function RobotView({
   const [robotDescription, setRobotDescription] =
     useState<RobotDescription | null>(null);
   const [descriptionError, setDescriptionError] = useState<string | null>(null);
+  const [showCollisions, setShowCollisions] = useState(false);
+  const collisionVisibleRef = useRef(false);
 
   useEffect(() => {
     if (!descriptionContent) {
@@ -101,6 +107,13 @@ export default function RobotView({
       active = false;
     };
   }, [descriptionContent]);
+
+  useEffect(() => {
+    collisionVisibleRef.current = showCollisions;
+    Object.values(robotsRef.current).forEach((robot) =>
+      robot.setCollisionVisible(showCollisions),
+    );
+  }, [showCollisions]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -177,6 +190,7 @@ export default function RobotView({
 
     if (robotDescription) {
       const preview = buildRobotInstance(robotDescription);
+      preview.setCollisionVisible(collisionVisibleRef.current);
       scene.add(preview.group);
       robotsRef.current["__description_preview__"] = preview;
     }
@@ -200,6 +214,7 @@ export default function RobotView({
       robotsRef.current = {};
       if (robotDescription) {
         const preview = buildRobotInstance(robotDescription);
+        preview.setCollisionVisible(collisionVisibleRef.current);
         scene.add(preview.group);
         robotsRef.current["__description_preview__"] = preview;
       }
@@ -220,6 +235,7 @@ export default function RobotView({
             (robotDescription
               ? buildRobotInstance(robotDescription)
               : buildPlaceholderRobot(node));
+          robot.setCollisionVisible(collisionVisibleRef.current);
           if (robotsRef.current["__description_preview__"]) {
             delete robotsRef.current["__description_preview__"];
           } else {
@@ -294,6 +310,21 @@ export default function RobotView({
         position: "relative",
       }}
     >
+      {robotDescription && (
+        <button
+          type="button"
+          aria-pressed={showCollisions}
+          onClick={() => setShowCollisions((visible) => !visible)}
+          style={{
+            position: "absolute",
+            zIndex: 1,
+            left: 8,
+            bottom: 8,
+          }}
+        >
+          {showCollisions ? "Hide" : "Show"} collision geometry
+        </button>
+      )}
       {(descriptionError || robotDescription?.warnings.length) && (
         <div
           role={descriptionError ? "alert" : "status"}

@@ -331,6 +331,8 @@ function App() {
   // --- Build output ---
   const [buildOutput, setBuildOutput] = useState<string[]>([]);
   const [building, setBuilding] = useState(false);
+  const [buildCancellationRequested, setBuildCancellationRequested] =
+    useState(false);
   const diagnostics = [
     ...(workspaceError ? [workspaceError] : []),
     ...(buildError ? [buildError] : []),
@@ -668,6 +670,7 @@ function App() {
   const triggerBuild = async () => {
     setBuildError(null);
     setBuildOutput([]);
+    setBuildCancellationRequested(false);
     setBuilding(true);
     setBottomCollapsed(false);
     setActiveTab("build");
@@ -681,10 +684,12 @@ function App() {
   };
 
   const cancelBuild = async () => {
+    setBuildCancellationRequested(true);
     try {
       await invoke("cancel_colcon_build");
       setBuildError(null);
     } catch (error) {
+      setBuildCancellationRequested(false);
       setBuildError(`Build cancellation failed: ${String(error)}`);
     }
   };
@@ -1039,12 +1044,20 @@ function App() {
     const unlistenBuildError = listen<string>("build-error", (event) => {
       setBuildOutput((prev) => appendLog(prev, `ERROR: ${event.payload}`));
     });
-    const unlistenBuildFinished = listen<boolean>("build-finished", (event) => {
+    const unlistenBuildFinished = listen<{
+      success: boolean;
+      cancelled: boolean;
+    }>("build-finished", (event) => {
       setBuilding(false);
+      setBuildCancellationRequested(false);
       setBuildOutput((prev) =>
         appendLog(
           prev,
-          event.payload ? "[✓ Build succeeded]" : "[✗ Build failed]",
+          event.payload.success
+            ? "[✓ Build succeeded]"
+            : event.payload.cancelled
+              ? "[✓ Build cancellation confirmed]"
+              : "[✗ Build failed]",
         ),
       );
     });
@@ -1267,8 +1280,13 @@ function App() {
           )}
         </button>
         {building && (
-          <button className="ide-btn" onClick={cancelBuild}>
-            Cancel Build
+          <button
+            className="ide-btn"
+            onClick={cancelBuild}
+            disabled={buildCancellationRequested}
+            aria-live="polite"
+          >
+            {buildCancellationRequested ? "Stopping build…" : "Cancel Build"}
           </button>
         )}
         <select

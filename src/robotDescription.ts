@@ -20,6 +20,20 @@ export interface RobotVisual {
 export interface RobotLink {
   name: string;
   visuals: RobotVisual[];
+  collisions: RobotVisual[];
+}
+
+export interface RobotJointLimit {
+  lower: number | null;
+  upper: number | null;
+  effort: number | null;
+  velocity: number | null;
+}
+
+export interface RobotMimic {
+  joint: string;
+  multiplier: number;
+  offset: number;
 }
 
 export interface RobotJoint {
@@ -29,6 +43,8 @@ export interface RobotJoint {
   child: string;
   origin: RobotOrigin;
   axis: [number, number, number];
+  limit: RobotJointLimit | null;
+  mimic: RobotMimic | null;
 }
 
 export interface RobotDescription {
@@ -42,9 +58,10 @@ export interface RobotDescription {
 export interface RobotInstance {
   group: THREE.Group;
   updateJoints: (positions: ReadonlyMap<string, number>) => void;
+  setCollisionVisible: (visible: boolean) => void;
 }
 
-function createVisual(visual: RobotVisual) {
+function createVisual(visual: RobotVisual, collision = false) {
   const { geometry, color } = visual;
   let shape: THREE.BufferGeometry;
   switch (geometry.kind) {
@@ -66,12 +83,18 @@ function createVisual(visual: RobotVisual) {
       return null;
   }
 
+  const opacity = collision
+    ? Math.min(color?.[3] ?? 0.35, 0.35)
+    : color?.[3] ?? 1;
   const material = new THREE.MeshStandardMaterial({
-    color: color
+    color: collision
+      ? new THREE.Color(0xe34b4b)
+      : color
       ? new THREE.Color(color[0], color[1], color[2])
       : new THREE.Color(0x80aaff),
-    opacity: color?.[3] ?? 1,
-    transparent: (color?.[3] ?? 1) < 1,
+    opacity,
+    transparent: collision || opacity < 1,
+    wireframe: collision,
   });
   const mesh = new THREE.Mesh(shape, material);
   if (geometry.kind === "cylinder") mesh.rotation.x = Math.PI / 2;
@@ -100,6 +123,12 @@ export function buildRobotInstance(
     string,
     { joint: RobotJoint; motion: THREE.Group }
   >();
+  const collisionObjects: THREE.Object3D[] = [];
+  const limitPosition = (joint: RobotJoint, position: number) =>
+    Math.max(
+      joint.limit?.lower ?? Number.NEGATIVE_INFINITY,
+      Math.min(joint.limit?.upper ?? Number.POSITIVE_INFINITY, position),
+    );
 
   const buildLink = (name: string): THREE.Group => {
     const definition = links.get(name);
@@ -111,6 +140,14 @@ export function buildRobotInstance(
     for (const visual of definition.visuals) {
       const mesh = createVisual(visual);
       if (mesh) link.add(mesh);
+    }
+    for (const collision of definition.collisions) {
+      const mesh = createVisual(collision, true);
+      if (mesh) {
+        mesh.visible = false;
+        collisionObjects.push(mesh);
+        link.add(mesh);
+      }
     }
 
     for (const joint of jointsByParent.get(name) ?? []) {
@@ -139,8 +176,40 @@ export function buildRobotInstance(
   return {
     group,
     updateJoints(positions) {
-      for (const [name, position] of positions) {
-        if (!Number.isFinite(position)) continue;
+      const resolvedPositions = new Map(positions);
+      for (const joint of description.joints) {
+        if (joint.mimic) {
+          resolvedPositions.delete(joint.name);
+        } else {
+          const position = resolvedPositions.get(joint.name);
+          if (position !== undefined && Number.isFinite(position)) {
+            resolvedPositions.set(joint.name, limitPosition(joint, position));
+          }
+        }
+      }
+      for (let pass = 0; pass < description.joints.length; pass += 1) {
+        let changed = false;
+        for (const joint of description.joints) {
+          if (!joint.mimic || resolvedPositions.has(joint.name)) continue;
+          const sourcePosition = resolvedPositions.get(joint.mimic.joint);
+          if (sourcePosition === undefined || !Number.isFinite(sourcePosition)) {
+            continue;
+          }
+          resolvedPositions.set(
+            joint.name,
+            limitPosition(
+              joint,
+              sourcePosition * joint.mimic.multiplier + joint.mimic.offset,
+            ),
+          );
+          changed = true;
+        }
+        if (!changed) break;
+      }
+
+      for (const [name, rawPosition] of resolvedPositions) {
+        const position = Number.isFinite(rawPosition) ? rawPosition : undefined;
+        if (position === undefined) continue;
         const transform = jointTransforms.get(name);
         if (!transform) continue;
         const { joint, motion } = transform;
@@ -157,6 +226,11 @@ export function buildRobotInstance(
           );
         }
       }
+    },
+    setCollisionVisible(visible) {
+      collisionObjects.forEach((object) => {
+        object.visible = visible;
+      });
     },
   };
 }

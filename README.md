@@ -171,9 +171,11 @@ any of this — the app manages the environment for you.
 - The URDF preview supports box, cylinder, and sphere visuals plus
   fixed/revolute/continuous/prismatic joints. It does not expand Xacro or
   resolve mesh/package resources; mesh visuals are reported and skipped.
-  Floating/planar joints and full URDF semantics are not supported. The ROS
-  to three.js coordinate mapping is a first pass and still needs convention
-  validation.
+  Joint limits and mimic relationships are applied, and supported primitive
+  collision geometry can be toggled. Inertial properties and robot-level
+  named materials are not used in the preview. Floating/planar joints and full
+  URDF semantics are not supported. The ROS to three.js coordinate mapping is
+  a first pass and still needs convention validation.
 - The TF tab builds a live transform forest and warns about multiple roots,
   cycles, multiple parents, stale dynamic transforms, non-finite values, and
   invalid quaternions. Static `/tf_static` edges use transient-local QoS and
@@ -206,11 +208,11 @@ any of this — the app manages the environment for you.
   `~/.robotics-studio/selected-workspace.txt`; opening an unrelated folder in
   the file explorer does not change the ROS workspace.
 - Build and simulator subprocesses do not yet share a unified process manager.
-  The Build action can cancel an active streaming `colcon build` by terminating
-  its dedicated process group. Gazebo startup now waits up to 20 seconds for a
-  world-control service and cleans up if startup or bridge setup fails, but
-  generalized process status, timeouts, and application-shutdown cleanup are
-  still incomplete.
+  Build status and cancellation requests are tracked, and cancellation is only
+  reported after process exit is confirmed. Gazebo startup waits up to 20
+  seconds for a world-control service and cleans up if startup or bridge setup
+  fails, but generalized process status, timeouts, and application-shutdown
+  cleanup are still incomplete.
 - A bounded, workspace-local journal stores critical node-lifecycle and
   software safety events (up to 256 records and 4 MiB) and preserves their
   sequence numbers across service restarts. Telemetry and periodic snapshots are

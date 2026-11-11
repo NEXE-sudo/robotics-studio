@@ -2571,11 +2571,21 @@ static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Atom
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ManagedProcessStatus {
+    Created,
+    Starting,
     Running,
+    Stopping,
     Completed,
     Failed,
     Cancelled,
     TimedOut,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildFinishedEvent {
+    success: bool,
+    cancelled: bool,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
@@ -2586,6 +2596,7 @@ pub struct ManagedProcess {
     pub workspace: Option<String>,
     pub created_at: u64,
     pub started_at: Option<u64>,
+    pub completed_at: Option<u64>,
     pub status: ManagedProcessStatus,
     pub exit_code: Option<i32>,
     pub error: Option<String>,
@@ -2613,8 +2624,9 @@ impl ProcessRegistry {
             command,
             workspace,
             created_at: current_unix_seconds(),
-            started_at: Some(current_unix_seconds()),
-            status: ManagedProcessStatus::Running,
+            started_at: None,
+            completed_at: None,
+            status: ManagedProcessStatus::Created,
             exit_code: None,
             error: None,
             parent_task_id,
@@ -2624,6 +2636,40 @@ impl ProcessRegistry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(id.clone(), process.clone());
         process
+    }
+
+    fn mark_starting(&self, id: &str) -> bool {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(process) = processes.get_mut(id) else {
+            return false;
+        };
+        if process.status != ManagedProcessStatus::Created {
+            return false;
+        }
+        process.status = ManagedProcessStatus::Starting;
+        true
+    }
+
+    fn mark_running(&self, id: &str) -> bool {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(process) = processes.get_mut(id) else {
+            return false;
+        };
+        match process.status {
+            ManagedProcessStatus::Starting => {
+                process.status = ManagedProcessStatus::Running;
+            }
+            ManagedProcessStatus::Stopping => {}
+            _ => return false,
+        }
+        process.started_at = Some(current_unix_seconds());
+        true
     }
 
     #[allow(dead_code)]
@@ -2660,10 +2706,11 @@ impl ProcessRegistry {
             process.status = status;
             process.exit_code = exit_code;
             process.error = error;
+            process.completed_at = Some(current_unix_seconds());
         }
     }
 
-    fn cancel(&self, id: &str) -> bool {
+    fn request_stop(&self, id: &str) -> bool {
         let mut processes = self
             .processes
             .lock()
@@ -2671,12 +2718,28 @@ impl ProcessRegistry {
         let Some(process) = processes.get_mut(id) else {
             return false;
         };
-        if process.status != ManagedProcessStatus::Running {
+        if !matches!(
+            process.status,
+            ManagedProcessStatus::Starting | ManagedProcessStatus::Running
+        ) {
             return false;
         }
-        process.status = ManagedProcessStatus::Cancelled;
-        process.error = Some("Cancelled by user".to_string());
+        process.status = ManagedProcessStatus::Stopping;
+        process.error = Some("Cancellation requested; awaiting process exit".to_string());
         true
+    }
+
+    fn restore_running_after_stop_error(&self, id: &str) {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(process) = processes.get_mut(id) {
+            if process.status == ManagedProcessStatus::Stopping {
+                process.status = ManagedProcessStatus::Running;
+                process.error = None;
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -2778,7 +2841,7 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
         std::process::id(),
         BUILD_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let workspace = Some(get_default_workspace_dir().unwrap_or_else(|_| "".to_string()));
+    let workspace = Some(get_default_workspace_dir()?);
     managed_process_registry().register(
         build_id.clone(),
         "colcon-build".to_string(),
@@ -2793,6 +2856,7 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
         workspace,
         None,
     );
+    managed_process_registry().mark_starting(&build_id);
     *BUILD_CONTAINER
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -2817,12 +2881,28 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
 
         let mut child = match child {
             Ok(c) => c,
-            Err(_) => {
-                let _ = app.emit("build-error", docker_lost_connection_message());
-                let _ = app.emit("build-finished", false);
+            Err(error) => {
+                managed_process_registry().mark_completed(
+                    &build_id,
+                    None,
+                    ManagedProcessStatus::Failed,
+                    Some(error.to_string()),
+                );
+                let _ = app.emit(
+                    "build-error",
+                    format!("{}: {error}", docker_lost_connection_message()),
+                );
+                let _ = app.emit(
+                    "build-finished",
+                    BuildFinishedEvent {
+                        success: false,
+                        cancelled: false,
+                    },
+                );
                 return;
             }
         };
+        managed_process_registry().mark_running(&build_id);
 
         let stdout_reader = child.stdout.take().map(|stdout| {
             stream_process_output(stdout, app.clone(), "build-output", "build-error")
@@ -2839,21 +2919,42 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                 if let Some(reader) = stderr_reader {
                     let _ = reader.join();
                 }
+                let exit_code = status.code();
+                let cancellation_confirmed =
+                    managed_process_registry()
+                        .get(&build_id)
+                        .is_some_and(|process| {
+                            process.status == ManagedProcessStatus::Stopping
+                                && matches!(exit_code, Some(130 | 137 | 143))
+                        });
+                let final_status = if cancellation_confirmed {
+                    ManagedProcessStatus::Cancelled
+                } else if status.success() {
+                    ManagedProcessStatus::Completed
+                } else {
+                    ManagedProcessStatus::Failed
+                };
                 managed_process_registry().mark_completed(
                     &build_id,
-                    Some(status.code().unwrap_or(-1)),
-                    if status.success() {
-                        ManagedProcessStatus::Completed
-                    } else {
-                        ManagedProcessStatus::Failed
-                    },
+                    Some(exit_code.unwrap_or(-1)),
+                    final_status,
                     if status.success() {
                         None
                     } else {
-                        Some("colcon build exited with a non-zero status".to_string())
+                        Some(if cancellation_confirmed {
+                            "Build cancellation was confirmed by the process exit".to_string()
+                        } else {
+                            "colcon build exited with a non-zero status".to_string()
+                        })
                     },
                 );
-                let _ = app.emit("build-finished", status.success());
+                let _ = app.emit(
+                    "build-finished",
+                    BuildFinishedEvent {
+                        success: status.success(),
+                        cancelled: cancellation_confirmed,
+                    },
+                );
             }
             Err(e) => {
                 managed_process_registry().mark_completed(
@@ -2863,7 +2964,13 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                     Some(e.to_string()),
                 );
                 let _ = app.emit("build-error", e.to_string());
-                let _ = app.emit("build-finished", false);
+                let _ = app.emit(
+                    "build-finished",
+                    BuildFinishedEvent {
+                        success: false,
+                        cancelled: false,
+                    },
+                );
             }
         }
     });
@@ -2904,7 +3011,9 @@ fn cancel_colcon_build() -> Result<(), String> {
         .map_err(|_| "Build process state is unavailable".to_string())?
         .clone()
         .ok_or_else(|| "Build process state is unavailable".to_string())?;
-    managed_process_registry().cancel(&build_id);
+    if !managed_process_registry().request_stop(&build_id) {
+        return Err("The build process is no longer running".to_string());
+    }
     let output = docker_command()
         .args([
             "exec",
@@ -2918,6 +3027,7 @@ fn cancel_colcon_build() -> Result<(), String> {
         .output()
         .map_err(|error| format!("Could not request build cancellation: {error}"))?;
     if !output.status.success() {
+        managed_process_registry().restore_running_after_stop_error(&build_id);
         return Err(format!(
             "Could not request build cancellation: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -3600,7 +3710,7 @@ fn start_ros_engine_server(
             "-c",
             "source /opt/ros/jazzy/setup.bash && \
              mkdir -p /opt/robotics-studio/generated && \
-             python3 -m grpc_tools.protoc \
+             /opt/robotics-studio/venv/bin/python -m grpc_tools.protoc \
                -I /opt/robotics-studio/proto \
                --python_out=/opt/robotics-studio/generated \
                --grpc_python_out=/opt/robotics-studio/generated \
@@ -3624,7 +3734,7 @@ fn start_ros_engine_server(
             container_id,
             "bash",
             "-c",
-            "pkill -f '[p]ython3 server.py'",
+            "pkill -f '[v]env/bin/python /opt/robotics-studio/server.py'",
         ])
         .output()
         .map_err(|error| format!("Could not rotate the ROS engine session: {error}"))?;
@@ -3640,7 +3750,8 @@ fn start_ros_engine_server(
              cd /opt/robotics-studio && \
              ROBOTICS_STUDIO_AUTH_FILE=/run/robotics-studio/grpc-auth.json \
              ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated \
-             exec python3 /opt/robotics-studio/server.py > /tmp/server.log 2>&1",
+             exec /opt/robotics-studio/venv/bin/python \
+               /opt/robotics-studio/server.py > /tmp/server.log 2>&1",
         ])
         .output()
         .map_err(|error| format!("Failed to start ROS engine server: {error}"))?;
@@ -5497,7 +5608,7 @@ mod process_registry_tests {
     use super::*;
 
     #[test]
-    fn process_registry_tracks_completion_and_cancellation() {
+    fn process_registry_confirms_cancellation_only_after_process_exit() {
         let registry = ProcessRegistry::default();
         let process = registry.register(
             "test-proc".to_string(),
@@ -5510,26 +5621,75 @@ mod process_registry_tests {
             Some("/tmp/workspace".to_string()),
             None,
         );
-        assert_eq!(process.status, ManagedProcessStatus::Running);
-        assert!(registry.cancel("test-proc"));
+        assert_eq!(process.status, ManagedProcessStatus::Created);
+        assert!(process.started_at.is_none());
+        assert!(registry.mark_starting("test-proc"));
+        assert!(registry.mark_running("test-proc"));
+        assert!(registry.request_stop("test-proc"));
         assert_eq!(
             registry.get("test-proc").unwrap().status,
-            ManagedProcessStatus::Cancelled
+            ManagedProcessStatus::Stopping
         );
+        assert!(registry.get("test-proc").unwrap().completed_at.is_none());
         registry.mark_completed(
             "test-proc",
             Some(130),
             ManagedProcessStatus::Cancelled,
             Some("Cancelled by user".to_string()),
         );
-        assert_eq!(registry.get("test-proc").unwrap().exit_code, Some(130));
+        let process = registry.get("test-proc").unwrap();
+        assert_eq!(process.exit_code, Some(130));
+        assert!(process.completed_at.is_some());
+        assert_eq!(process.status, ManagedProcessStatus::Cancelled);
+    }
+
+    #[test]
+    fn process_registry_keeps_pre_spawn_cancellation_pending_until_confirmation() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "starting".to_string(),
+            "build".to_string(),
+            vec!["docker".to_string()],
+            None,
+            None,
+        );
+        assert!(registry.mark_starting("starting"));
+        assert!(registry.request_stop("starting"));
+        assert!(registry.mark_running("starting"));
+        let process = registry.get("starting").unwrap();
+        assert_eq!(process.status, ManagedProcessStatus::Stopping);
+        assert!(process.started_at.is_some());
+        assert!(process.completed_at.is_none());
+    }
+
+    #[test]
+    fn process_registry_tracks_spawn_failure_without_claiming_running() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "spawn-failure".to_string(),
+            "build".to_string(),
+            vec!["missing-command".to_string()],
+            None,
+            None,
+        );
+        assert!(registry.mark_starting("spawn-failure"));
+        registry.mark_completed(
+            "spawn-failure",
+            None,
+            ManagedProcessStatus::Failed,
+            Some("spawn failed".to_string()),
+        );
+        let process = registry.get("spawn-failure").unwrap();
+        assert_eq!(process.status, ManagedProcessStatus::Failed);
+        assert!(process.started_at.is_none());
+        assert!(process.completed_at.is_some());
     }
 
     #[test]
     fn process_registry_rejects_unknown_or_finished_process_ids() {
         let registry = ProcessRegistry::default();
         assert!(registry.get("missing").is_none());
-        assert!(!registry.cancel("missing"));
+        assert!(!registry.request_stop("missing"));
 
         let process = registry.register(
             "done".to_string(),
@@ -5538,13 +5698,15 @@ mod process_registry_tests {
             None,
             None,
         );
-        assert_eq!(process.status, ManagedProcessStatus::Running);
+        assert_eq!(process.status, ManagedProcessStatus::Created);
+        assert!(registry.mark_starting("done"));
+        assert!(registry.mark_running("done"));
         registry.mark_completed("done", Some(0), ManagedProcessStatus::Completed, None);
         assert_eq!(
             registry.get("done").unwrap().status,
             ManagedProcessStatus::Completed
         );
-        assert!(!registry.cancel("done"));
+        assert!(!registry.request_stop("done"));
     }
 }
 

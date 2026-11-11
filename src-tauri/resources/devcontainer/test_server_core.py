@@ -156,6 +156,18 @@ class WorkspacePackageDiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing or is not a directory"):
                 discover_workspace_packages(os.path.join(parent, "missing"))
 
+    def test_inaccessible_workspace_tree_is_reported_instead_of_returning_empty(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            os.makedirs(os.path.join(workspace, "src"))
+
+            def inaccessible_walk(*_args, **kwargs):
+                kwargs["onerror"](PermissionError("permission denied"))
+                return iter(())
+
+            with mock.patch("server_core.os.walk", side_effect=inaccessible_walk):
+                with self.assertRaisesRegex(PermissionError, "permission denied"):
+                    discover_workspace_packages(workspace)
+
     @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
     def test_does_not_follow_symlinked_package_directories(self):
         with tempfile.TemporaryDirectory() as parent:

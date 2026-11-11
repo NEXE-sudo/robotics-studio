@@ -1,46 +1,18 @@
-export interface RosGraphEndpoint {
-  nodeName: string;
-  nodeNamespace: string;
-  topicType: string;
-  reliability: string;
-  durability: string;
-  history: string;
-  depth: number;
-}
+import { groupRosGraphByNode, rosNodeId } from "../rosGraph";
+import type {
+  RosGraphEndpoint,
+  RosGraphNodeDetails,
+  RosGraphSnapshot,
+} from "../rosGraph";
 
-export interface RosGraphNode {
-  name: string;
-  namespace: string;
-}
-
-export interface RosGraphTopic {
-  name: string;
-  types: string[];
-  publishers: RosGraphEndpoint[];
-  subscribers: RosGraphEndpoint[];
-}
-
-export interface RosGraphService {
-  name: string;
-  types: string[];
-  serverNodes: string[];
-  clientNodes: string[];
-}
-
-export interface RosGraphAction {
-  name: string;
-  types: string[];
-  serverNodes: string[];
-  clientNodes: string[];
-}
-
-export interface RosGraphSnapshot {
-  nodes: RosGraphNode[];
-  topics: RosGraphTopic[];
-  services: RosGraphService[];
-  actions: RosGraphAction[];
-  truncated: boolean;
-}
+export type {
+  RosGraphAction,
+  RosGraphEndpoint,
+  RosGraphNode,
+  RosGraphService,
+  RosGraphSnapshot,
+  RosGraphTopic,
+} from "../rosGraph";
 
 function nodePath(nodeName: string, nodeNamespace: string) {
   return `${nodeNamespace === "/" ? "" : nodeNamespace}/${nodeName}`;
@@ -170,6 +142,43 @@ export default function RosGraphExplorer({
     </div>
   );
 
+  const nodeDetails = groupRosGraphByNode(graph);
+  const nodeTopicList = (
+    title: string,
+    endpoints: RosGraphNodeDetails["publishers"],
+  ) => (
+    <div>
+      <strong>{title} ({endpoints.length})</strong>
+      {endpoints.map((endpoint, index) => (
+        <div
+          key={`${endpoint.topicName}/${endpoint.topicType}/${index}`}
+          style={{ marginTop: 3, paddingLeft: 8, overflowWrap: "anywhere" }}
+        >
+          <div>{endpoint.topicName}</div>
+          <div style={{ opacity: 0.7 }}>
+            {endpoint.topicType} · {endpoint.reliability},{" "}
+            {endpoint.durability}, {endpoint.history}
+            {endpoint.history === "KEEP_LAST" ? ` (${endpoint.depth})` : ""}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+  const nodeOperationList = (
+    title: string,
+    operations: RosGraphNodeDetails["services"],
+  ) => (
+    <div>
+      <strong>{title} ({operations.length})</strong>
+      {operations.map((operation) => (
+        <div key={operation.name} style={{ marginTop: 3, overflowWrap: "anywhere" }}>
+          {operation.name}
+          <div style={{ opacity: 0.7 }}>{operation.types.join(", ")}</div>
+        </div>
+      ))}
+    </div>
+  );
+
   return (
     <section
       aria-label="Live ROS graph"
@@ -186,14 +195,35 @@ export default function RosGraphExplorer({
         </div>
       )}
       <GraphSection title="Nodes" count={graph.nodes.length}>
-        {graph.nodes.map((node) => (
-          <div
-            key={`${node.namespace}/${node.name}`}
-            style={{ overflowWrap: "anywhere", fontFamily: "monospace" }}
-          >
-            {nodePath(node.name, node.namespace)}
-          </div>
-        ))}
+        {graph.nodes.map((node) => {
+          const id = rosNodeId(node.name, node.namespace);
+          const details = nodeDetails.get(id)!;
+          return (
+            <details
+              key={id}
+              style={{
+                padding: "5px 7px",
+                background: "rgba(255,255,255,0.025)",
+                border: "1px solid rgba(255,255,255,0.07)",
+                borderRadius: 4,
+              }}
+            >
+              <summary style={{ cursor: "pointer", overflowWrap: "anywhere" }}>
+                {nodePath(node.name, node.namespace)} · {details.publishers.length} pub,{" "}
+                {details.subscribers.length} sub, {details.services.length} services,{" "}
+                {details.actions.length} actions
+              </summary>
+              <div style={{ padding: "6px 0 2px", display: "grid", gap: 5 }}>
+                {nodeTopicList("Publishes", details.publishers)}
+                {nodeTopicList("Subscribes", details.subscribers)}
+                {nodeOperationList("Service servers", details.services)}
+                {nodeOperationList("Service clients", details.serviceClients)}
+                {nodeOperationList("Action servers", details.actions)}
+                {nodeOperationList("Action clients", details.actionClients)}
+              </div>
+            </details>
+          );
+        })}
       </GraphSection>
       <GraphSection title="Topics" count={graph.topics.length}>
         {graph.topics.map((topic) => (
