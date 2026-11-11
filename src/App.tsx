@@ -50,6 +50,17 @@ interface RecentProject {
   last_opened: string;
 }
 
+interface RosPackageInfo {
+  name: string;
+  path: string;
+  package_type: string;
+  version: string | null;
+  dependencies: string[];
+  executables: string[];
+  launch_files: string[];
+  config_files: string[];
+}
+
 interface LogEvent {
   kind: "append" | "replace";
   text: string;
@@ -268,6 +279,9 @@ function App() {
   // --- ROS event log ---
   const [rosEvents, setRosEvents] = useState<string[]>([]);
   const [rosConnected, setRosConnected] = useState(false);
+  const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
+  const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
+  const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
   const [initializing, setInitializing] = useState(false);
   const [safetyState, setSafetyState] = useState<
     "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
@@ -543,6 +557,29 @@ function App() {
   };
 
   // ---------- ROS workspace selection ----------
+  const refreshRosPackages = useCallback(async () => {
+    if (!rosWorkspacePath) {
+      setRosPackages([]);
+      setRosPackagesError(null);
+      return;
+    }
+    setRosPackagesLoading(true);
+    setRosPackagesError(null);
+    try {
+      const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
+      setRosPackages(packages);
+    } catch (error) {
+      setRosPackages([]);
+      setRosPackagesError(String(error));
+    } finally {
+      setRosPackagesLoading(false);
+    }
+  }, [rosWorkspacePath]);
+
+  useEffect(() => {
+    void refreshRosPackages();
+  }, [refreshRosPackages]);
+
   const pickRosWorkspace = async () => {
     try {
       const selected = await invoke<string | null>("pick_directory");
@@ -1384,10 +1421,91 @@ function App() {
                       {rosWorkspacePath ? "set" : "not set"}
                     </span>
                   </div>
-                  <div style={{ opacity: 0.5, fontSize: 11 }}>
-                    Live node/topic graph coming soon — inspect activity in the
-                    ROS Log panel below.
-                  </div>
+
+                  {rosPackagesLoading && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.7 }}>
+                      <LoaderCircle size={14} className="spin" />
+                      Loading packages...
+                    </div>
+                  )}
+
+                  {!rosPackagesLoading && rosPackagesError && (
+                    <div style={{ color: "#f0a3a3", whiteSpace: "pre-wrap" }}>
+                      {rosPackagesError}
+                    </div>
+                  )}
+
+                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length === 0 && (
+                    <div style={{ opacity: 0.6 }}>
+                      No ROS packages discovered in the active environment.
+                    </div>
+                  )}
+
+                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length > 0 && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {rosPackages.map((pkg) => (
+                        <div
+                          key={pkg.name}
+                          style={{
+                            background: "rgba(255,255,255,0.02)",
+                            border: "1px solid rgba(255,255,255,0.08)",
+                            borderRadius: 6,
+                            padding: 8,
+                          }}
+                        >
+                          <div style={{ fontWeight: 600, color: "#e8e8e8", marginBottom: 4 }}>
+                            {pkg.name}
+                          </div>
+                          <div style={{ opacity: 0.7, wordBreak: "break-word", marginBottom: 4 }}>
+                            {pkg.path}
+                          </div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                            {pkg.package_type && (
+                              <span style={{ background: "rgba(79,195,247,0.12)", borderRadius: 999, padding: "2px 6px" }}>
+                                {pkg.package_type}
+                              </span>
+                            )}
+                            {pkg.version && (
+                              <span style={{ background: "rgba(124,217,146,0.12)", borderRadius: 999, padding: "2px 6px" }}>
+                                v{pkg.version}
+                              </span>
+                            )}
+                          </div>
+                          {pkg.dependencies.length > 0 && (
+                            <div style={{ marginTop: 6 }}>
+                              <div style={{ opacity: 0.6, marginBottom: 2 }}>Dependencies</div>
+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                                {pkg.dependencies.slice(0, 8).map((dep) => (
+                                  <span key={`${pkg.name}-${dep}`} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 999, padding: "2px 6px" }}>
+                                    {dep}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                          {(pkg.executables.length > 0 || pkg.launch_files.length > 0 || pkg.config_files.length > 0) && (
+                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
+                              {pkg.executables.length > 0 && (
+                                <div style={{ opacity: 0.6 }}>
+                                  Executables: {pkg.executables.join(", ")}
+                                </div>
+                              )}
+                              {pkg.launch_files.length > 0 && (
+                                <div style={{ opacity: 0.6 }}>
+                                  Launch: {pkg.launch_files.join(", ")}
+                                </div>
+                              )}
+                              {pkg.config_files.length > 0 && (
+                                <div style={{ opacity: 0.6 }}>
+                                  Config: {pkg.config_files.join(", ")}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

@@ -1111,6 +1111,8 @@ pub fn run() {
             run_colcon_build,
             run_colcon_build_streaming,
             cancel_colcon_build,
+            list_managed_processes,
+            list_ros_packages,
             start_gazebo_sim,
             stop_gazebo_sim,
             reset_gazebo_sim,
@@ -1953,9 +1955,22 @@ fn get_default_workspace_dir() -> Result<String, String> {
     let home = std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
-    Ok(std::path::PathBuf::from(home)
+    let fallback = std::path::PathBuf::from(home)
         .join(".robotics-studio")
-        .join("ros2-workspace")
+        .join("ros2-workspace");
+    if fallback.exists() {
+        let canonical = fallback
+            .canonicalize()
+            .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?;
+        if canonical.is_dir() {
+            return Ok(canonical.to_string_lossy().into_owned());
+        }
+    }
+    fs::create_dir_all(&fallback)
+        .map_err(|error| format!("Could not create default ROS workspace: {error}"))?;
+    Ok(fallback
+        .canonicalize()
+        .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?
         .to_string_lossy()
         .into_owned())
 }
@@ -2066,6 +2081,113 @@ fn stop_workspace_container(workspace: &Path) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+struct RosPackageInfo {
+    name: String,
+    path: String,
+    package_type: String,
+    version: Option<String>,
+    dependencies: Vec<String>,
+    executables: Vec<String>,
+    launch_files: Vec<String>,
+    config_files: Vec<String>,
+}
+
+#[tauri::command]
+fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
+    let container_name = find_dev_container()?;
+    let workspace = get_default_workspace_dir()?;
+    let script = format!(
+        r#"source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || exit 1
+export ROBOTICS_STUDIO_WORKSPACE="{}"
+if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash >/dev/null 2>&1 || true; fi
+python3 - <<'PY'
+import json
+import os
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+try:
+    from ament_index_python.packages import get_packages
+except Exception as exc:  # pragma: no cover - depends on ROS installation
+    print(json.dumps([]))
+    raise SystemExit(0)
+
+packages = get_packages()
+results = []
+for name in sorted(packages):
+    pkg_path = Path(packages[name])
+    package_xml = pkg_path / 'package.xml'
+    version = None
+    package_type = 'ros_package'
+    dependencies = []
+    executables = []
+    launch_files = []
+    config_files = []
+
+    if package_xml.exists():
+        try:
+            root = ET.parse(package_xml).getroot()
+            version = root.attrib.get('version')
+            package_type = root.findtext('export/build_type') or root.tag.rsplit('}}', 1)[-1] or 'ros_package'
+            for tag_name in ['depend', 'build_depend', 'buildtool_depend', 'exec_depend', 'test_depend', 'build_export_depend']:
+                for element in root.findall(tag_name):
+                    value = (element.text or '').strip()
+                    if value:
+                        dependencies.append(value)
+            dependencies = sorted(dict.fromkeys(dependencies))
+        except Exception:
+            pass
+
+    for candidate in sorted(pkg_path.iterdir()):
+        if candidate.name.endswith('.py') and os.access(candidate, os.X_OK):
+            executables.append(candidate.name)
+        if candidate.suffix in {{'.launch', '.xml'}} and candidate.name.endswith('.launch'):
+            launch_files.append(candidate.name)
+        if candidate.suffix in {{'.yaml', '.yml', '.json', '.config', '.ini'}}:
+            config_files.append(candidate.name)
+
+    if not version and package_xml.exists():
+        try:
+            for elem in ET.parse(package_xml).getroot():
+                if elem.tag.endswith('version'):
+                    version = (elem.text or '').strip()
+                    break
+        except Exception:
+            pass
+
+    results.append({{
+        'name': name,
+        'path': str(pkg_path),
+        'package_type': package_type,
+        'version': version,
+        'dependencies': dependencies,
+        'executables': executables,
+        'launch_files': launch_files,
+        'config_files': config_files,
+    }})
+
+print(json.dumps(results))
+PY
+"#,
+        workspace
+    );
+    let output = docker_command()
+        .args(["exec", &container_name, "bash", "-lc", &script])
+        .output()
+        .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not inspect ROS packages: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
+        .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
+    Ok(parsed)
 }
 
 #[tauri::command]
@@ -2309,6 +2431,139 @@ static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
 static BUILD_CONTAINER: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum ManagedProcessStatus {
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct ManagedProcess {
+    pub id: String,
+    pub process_type: String,
+    pub command: Vec<String>,
+    pub workspace: Option<String>,
+    pub created_at: u64,
+    pub started_at: Option<u64>,
+    pub status: ManagedProcessStatus,
+    pub exit_code: Option<i32>,
+    pub error: Option<String>,
+    pub parent_task_id: Option<String>,
+}
+
+#[derive(Default)]
+struct ProcessRegistry {
+    processes: Mutex<HashMap<String, ManagedProcess>>,
+}
+
+impl ProcessRegistry {
+    #[allow(dead_code)]
+    fn register(
+        &self,
+        id: String,
+        process_type: String,
+        command: Vec<String>,
+        workspace: Option<String>,
+        parent_task_id: Option<String>,
+    ) -> ManagedProcess {
+        let process = ManagedProcess {
+            id: id.clone(),
+            process_type,
+            command,
+            workspace,
+            created_at: current_unix_seconds(),
+            started_at: Some(current_unix_seconds()),
+            status: ManagedProcessStatus::Running,
+            exit_code: None,
+            error: None,
+            parent_task_id,
+        };
+        self.processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), process.clone());
+        process
+    }
+
+    #[allow(dead_code)]
+    fn get(&self, id: &str) -> Option<ManagedProcess> {
+        self.processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .cloned()
+    }
+
+    fn list(&self) -> Vec<ManagedProcess> {
+        let processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries: Vec<_> = processes.values().cloned().collect();
+        entries.sort_by_key(|entry| entry.created_at);
+        entries
+    }
+
+    fn mark_completed(
+        &self,
+        id: &str,
+        exit_code: Option<i32>,
+        status: ManagedProcessStatus,
+        error: Option<String>,
+    ) {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(process) = processes.get_mut(id) {
+            process.status = status;
+            process.exit_code = exit_code;
+            process.error = error;
+        }
+    }
+
+    fn cancel(&self, id: &str) -> bool {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(process) = processes.get_mut(id) else {
+            return false;
+        };
+        if process.status != ManagedProcessStatus::Running {
+            return false;
+        }
+        process.status = ManagedProcessStatus::Cancelled;
+        process.error = Some("Cancelled by user".to_string());
+        true
+    }
+
+    #[allow(dead_code)]
+    fn remove_finished(&self, id: &str) -> Option<ManagedProcess> {
+        let mut processes = self
+            .processes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        processes.remove(id)
+    }
+}
+
+static MANAGED_PROCESSES: OnceLock<ProcessRegistry> = OnceLock::new();
+
+fn managed_process_registry() -> &'static ProcessRegistry {
+    MANAGED_PROCESSES.get_or_init(ProcessRegistry::default)
+}
+
+fn current_unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
 const COLCON_BUILD_SCRIPT: &str = r#"
 source /opt/ros/jazzy/setup.bash || exit $?
 cd /workspace || exit $?
@@ -2385,6 +2640,14 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
         std::process::id(),
         BUILD_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
+    let workspace = Some(get_default_workspace_dir().unwrap_or_else(|_| "".to_string()));
+    managed_process_registry().register(
+        build_id.clone(),
+        "colcon-build".to_string(),
+        vec!["docker".to_string(), "exec".to_string(), container_name.clone(), "bash".to_string(), "-lc".to_string(), "colcon build".to_string()],
+        workspace,
+        None,
+    );
     *BUILD_CONTAINER
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -2431,9 +2694,29 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                 if let Some(reader) = stderr_reader {
                     let _ = reader.join();
                 }
+                managed_process_registry().mark_completed(
+                    &build_id,
+                    Some(status.code().unwrap_or(-1)),
+                    if status.success() {
+                        ManagedProcessStatus::Completed
+                    } else {
+                        ManagedProcessStatus::Failed
+                    },
+                    if status.success() {
+                        None
+                    } else {
+                        Some("colcon build exited with a non-zero status".to_string())
+                    },
+                );
                 let _ = app.emit("build-finished", status.success());
             }
             Err(e) => {
+                managed_process_registry().mark_completed(
+                    &build_id,
+                    None,
+                    ManagedProcessStatus::Failed,
+                    Some(e.to_string()),
+                );
                 let _ = app.emit("build-error", e.to_string());
                 let _ = app.emit("build-finished", false);
             }
@@ -2476,6 +2759,7 @@ fn cancel_colcon_build() -> Result<(), String> {
         .map_err(|_| "Build process state is unavailable".to_string())?
         .clone()
         .ok_or_else(|| "Build process state is unavailable".to_string())?;
+    managed_process_registry().cancel(&build_id);
     let output = docker_command()
         .args([
             "exec",
@@ -2495,6 +2779,11 @@ fn cancel_colcon_build() -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+#[tauri::command]
+fn list_managed_processes() -> Result<Vec<ManagedProcess>, String> {
+    Ok(managed_process_registry().list())
 }
 
 fn parse_gazebo_world_control_service(output: &str) -> Result<Option<String>, String> {
@@ -4997,6 +5286,57 @@ mod filesystem_security_tests {
                 .is_err()
         );
         assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod process_registry_tests {
+    use super::*;
+
+    #[test]
+    fn process_registry_tracks_completion_and_cancellation() {
+        let registry = ProcessRegistry::default();
+        let process = registry.register(
+            "test-proc".to_string(),
+            "build".to_string(),
+            vec!["bash".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+            Some("/tmp/workspace".to_string()),
+            None,
+        );
+        assert_eq!(process.status, ManagedProcessStatus::Running);
+        assert!(registry.cancel("test-proc"));
+        assert_eq!(registry.get("test-proc").unwrap().status, ManagedProcessStatus::Cancelled);
+        registry.mark_completed(
+            "test-proc",
+            Some(130),
+            ManagedProcessStatus::Cancelled,
+            Some("Cancelled by user".to_string()),
+        );
+        assert_eq!(registry.get("test-proc").unwrap().exit_code, Some(130));
+    }
+
+    #[test]
+    fn process_registry_rejects_unknown_or_finished_process_ids() {
+        let registry = ProcessRegistry::default();
+        assert!(registry.get("missing").is_none());
+        assert!(!registry.cancel("missing"));
+
+        let process = registry.register(
+            "done".to_string(),
+            "sim".to_string(),
+            vec!["true".to_string()],
+            None,
+            None,
+        );
+        assert_eq!(process.status, ManagedProcessStatus::Running);
+        registry.mark_completed(
+            "done",
+            Some(0),
+            ManagedProcessStatus::Completed,
+            None,
+        );
+        assert_eq!(registry.get("done").unwrap().status, ManagedProcessStatus::Completed);
+        assert!(!registry.cancel("done"));
     }
 }
 
