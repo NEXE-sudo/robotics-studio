@@ -31,6 +31,7 @@ jobs:
             build-essential \
             curl \
             file \
+            protobuf-compiler \
             libayatana-appindicator3-dev \
             libxdo-dev \
             libssl-dev \
