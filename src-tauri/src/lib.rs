@@ -3,6 +3,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+mod urdf;
+
 const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_WORLD_SIZE: u64 = 10 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 10_000;
@@ -980,6 +982,11 @@ fn validate_sdf_file(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn parse_robot_description(content: String) -> Result<urdf::RobotDescription, String> {
+    urdf::parse_robot_description(&content)
+}
+
 fn import_world_contents(
     access: &FsAccess,
     workspace: &Path,
@@ -1104,6 +1111,7 @@ pub fn run() {
             list_dir,
             pick_directory,
             set_ros_workspace,
+            parse_robot_description,
             pick_save_path,
             pick_keybindings_file,
             import_world,
@@ -1367,6 +1375,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                                     qy: tf.qy,
                                     qz: tf.qz,
                                     qw: tf.qw,
+                                    topic_name: tf.topic_name.clone(),
                                 },
                             );
                         }
@@ -1374,6 +1383,25 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                             &evt.event
                         {
                             let _ = app.emit("node-snapshot", snap.node_names.clone());
+                        }
+                        if let Some(rosengine::workspace_event::Event::RosGraphSnapshot(snapshot)) =
+                            &evt.event
+                        {
+                            let _ = app
+                                .emit("ros-graph-snapshot", ros_graph_snapshot_response(snapshot));
+                        }
+                        if let Some(rosengine::workspace_event::Event::JointStateUpdate(update)) =
+                            &evt.event
+                        {
+                            let _ = app.emit(
+                                "joint-state-update",
+                                JointStateUpdateResponse {
+                                    topic_name: update.topic_name.clone(),
+                                    names: update.names.clone(),
+                                    positions: update.positions.clone(),
+                                    truncated: update.truncated,
+                                },
+                            );
                         }
                         if let Some(rosengine::workspace_event::Event::SafetyState(state)) =
                             &evt.event
@@ -1621,6 +1649,139 @@ struct EventRecoveryResponse {
     latest_sequence: u64,
     snapshot_included: bool,
     retained_critical_events: u32,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphNodeResponse {
+    name: String,
+    namespace: String,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphEndpointResponse {
+    node_name: String,
+    node_namespace: String,
+    topic_type: String,
+    reliability: String,
+    durability: String,
+    history: String,
+    depth: u32,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphTopicResponse {
+    name: String,
+    types: Vec<String>,
+    publishers: Vec<RosGraphEndpointResponse>,
+    subscribers: Vec<RosGraphEndpointResponse>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphServiceResponse {
+    name: String,
+    types: Vec<String>,
+    server_nodes: Vec<String>,
+    client_nodes: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphActionResponse {
+    name: String,
+    types: Vec<String>,
+    server_nodes: Vec<String>,
+    client_nodes: Vec<String>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct RosGraphSnapshotResponse {
+    nodes: Vec<RosGraphNodeResponse>,
+    topics: Vec<RosGraphTopicResponse>,
+    services: Vec<RosGraphServiceResponse>,
+    actions: Vec<RosGraphActionResponse>,
+    truncated: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct JointStateUpdateResponse {
+    topic_name: String,
+    names: Vec<String>,
+    positions: Vec<f64>,
+    truncated: bool,
+}
+
+fn ros_graph_snapshot_response(snapshot: &rosengine::RosGraphSnapshot) -> RosGraphSnapshotResponse {
+    RosGraphSnapshotResponse {
+        nodes: snapshot
+            .nodes
+            .iter()
+            .map(|node| RosGraphNodeResponse {
+                name: node.name.clone(),
+                namespace: node.namespace.clone(),
+            })
+            .collect(),
+        topics: snapshot
+            .topics
+            .iter()
+            .map(|topic| RosGraphTopicResponse {
+                name: topic.name.clone(),
+                types: topic.types.clone(),
+                publishers: topic
+                    .publishers
+                    .iter()
+                    .map(|endpoint| RosGraphEndpointResponse {
+                        node_name: endpoint.node_name.clone(),
+                        node_namespace: endpoint.node_namespace.clone(),
+                        topic_type: endpoint.topic_type.clone(),
+                        reliability: endpoint.reliability.clone(),
+                        durability: endpoint.durability.clone(),
+                        history: endpoint.history.clone(),
+                        depth: endpoint.depth,
+                    })
+                    .collect(),
+                subscribers: topic
+                    .subscribers
+                    .iter()
+                    .map(|endpoint| RosGraphEndpointResponse {
+                        node_name: endpoint.node_name.clone(),
+                        node_namespace: endpoint.node_namespace.clone(),
+                        topic_type: endpoint.topic_type.clone(),
+                        reliability: endpoint.reliability.clone(),
+                        durability: endpoint.durability.clone(),
+                        history: endpoint.history.clone(),
+                        depth: endpoint.depth,
+                    })
+                    .collect(),
+            })
+            .collect(),
+        services: snapshot
+            .services
+            .iter()
+            .map(|service| RosGraphServiceResponse {
+                name: service.name.clone(),
+                types: service.types.clone(),
+                server_nodes: service.server_nodes.clone(),
+                client_nodes: service.client_nodes.clone(),
+            })
+            .collect(),
+        actions: snapshot
+            .actions
+            .iter()
+            .map(|action| RosGraphActionResponse {
+                name: action.name.clone(),
+                types: action.types.clone(),
+                server_nodes: action.server_nodes.clone(),
+                client_nodes: action.client_nodes.clone(),
+            })
+            .collect(),
+        truncated: snapshot.truncated,
+    }
 }
 
 fn safety_state_response(state: &rosengine::SafetyState) -> SafetyStateResponse {
@@ -2089,93 +2250,65 @@ struct RosPackageInfo {
     path: String,
     package_type: String,
     version: Option<String>,
+    description: Option<String>,
     dependencies: Vec<String>,
     executables: Vec<String>,
     launch_files: Vec<String>,
     config_files: Vec<String>,
+    metadata_error: Option<String>,
+}
+
+fn resolve_workspace_package_path(
+    workspace: &Path,
+    package_name: &str,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let relative_path = Path::new(relative_path);
+    if relative_path.is_absolute()
+        || relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "ROS package {package_name} returned a path outside the selected workspace"
+        ));
+    }
+
+    let canonical_workspace = workspace
+        .canonicalize()
+        .map_err(|error| format!("Could not validate selected ROS workspace: {error}"))?;
+    let canonical_package_path = canonical_workspace
+        .join(relative_path)
+        .canonicalize()
+        .map_err(|error| {
+            format!("Could not validate path for ROS package {package_name}: {error}")
+        })?;
+    if !canonical_package_path.starts_with(&canonical_workspace) || !canonical_package_path.is_dir()
+    {
+        return Err(format!(
+            "ROS package {package_name} resolved outside the selected workspace"
+        ));
+    }
+    Ok(canonical_package_path)
 }
 
 #[tauri::command]
 fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
     let container_name = find_dev_container()?;
-    let workspace = get_default_workspace_dir()?;
-    let script = format!(
-        r#"source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || exit 1
-export ROBOTICS_STUDIO_WORKSPACE="{}"
-if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash >/dev/null 2>&1 || true; fi
-python3 - <<'PY'
-import json
-import os
-import xml.etree.ElementTree as ET
-from pathlib import Path
-
-try:
-    from ament_index_python.packages import get_packages
-except Exception as exc:  # pragma: no cover - depends on ROS installation
-    print(json.dumps([]))
-    raise SystemExit(0)
-
-packages = get_packages()
-results = []
-for name in sorted(packages):
-    pkg_path = Path(packages[name])
-    package_xml = pkg_path / 'package.xml'
-    version = None
-    package_type = 'ros_package'
-    dependencies = []
-    executables = []
-    launch_files = []
-    config_files = []
-
-    if package_xml.exists():
-        try:
-            root = ET.parse(package_xml).getroot()
-            version = root.attrib.get('version')
-            package_type = root.findtext('export/build_type') or root.tag.rsplit('}}', 1)[-1] or 'ros_package'
-            for tag_name in ['depend', 'build_depend', 'buildtool_depend', 'exec_depend', 'test_depend', 'build_export_depend']:
-                for element in root.findall(tag_name):
-                    value = (element.text or '').strip()
-                    if value:
-                        dependencies.append(value)
-            dependencies = sorted(dict.fromkeys(dependencies))
-        except Exception:
-            pass
-
-    for candidate in sorted(pkg_path.iterdir()):
-        if candidate.name.endswith('.py') and os.access(candidate, os.X_OK):
-            executables.append(candidate.name)
-        if candidate.suffix in {{'.launch', '.xml'}} and candidate.name.endswith('.launch'):
-            launch_files.append(candidate.name)
-        if candidate.suffix in {{'.yaml', '.yml', '.json', '.config', '.ini'}}:
-            config_files.append(candidate.name)
-
-    if not version and package_xml.exists():
-        try:
-            for elem in ET.parse(package_xml).getroot():
-                if elem.tag.endswith('version'):
-                    version = (elem.text or '').strip()
-                    break
-        except Exception:
-            pass
-
-    results.append({{
-        'name': name,
-        'path': str(pkg_path),
-        'package_type': package_type,
-        'version': version,
-        'dependencies': dependencies,
-        'executables': executables,
-        'launch_files': launch_files,
-        'config_files': config_files,
-    }})
-
-print(json.dumps(results))
-PY
-"#,
-        workspace
-    );
+    let workspace = PathBuf::from(get_default_workspace_dir()?);
     let output = docker_command()
-        .args(["exec", &container_name, "bash", "-lc", &script])
+        .args([
+            "exec",
+            &container_name,
+            "bash",
+            "-lc",
+            "cd /opt/robotics-studio && python3 -c \"import json; from server_core import discover_workspace_packages; print(json.dumps(discover_workspace_packages('/workspace')))\"",
+        ])
         .output()
         .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
     if !output.status.success() {
@@ -2185,8 +2318,13 @@ PY
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
+    let mut parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
         .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
+    for package in &mut parsed {
+        package.path = resolve_workspace_package_path(&workspace, &package.name, &package.path)?
+            .to_string_lossy()
+            .into_owned();
+    }
     Ok(parsed)
 }
 
@@ -2838,6 +2976,30 @@ fn gazebo_world_control_service(container_name: &str) -> Result<Option<String>, 
     parse_gazebo_world_control_service(&String::from_utf8_lossy(&output.stdout))
 }
 
+fn validate_sdf_with_gazebo(container_name: &str, world_path: &str) -> Result<(), String> {
+    let output = docker_command()
+        .args([
+            "exec",
+            container_name,
+            "bash",
+            "-lc",
+            "source /opt/ros/jazzy/setup.bash && gz sdf --check \"$1\"",
+            "robotics-studio-sdf-check",
+            world_path,
+        ])
+        .output()
+        .map_err(|error| format!("Could not run SDFormat validation: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "Gazebo rejected the SDF world".to_string()
+        } else {
+            format!("Gazebo rejected the SDF world: {detail}")
+        });
+    }
+    Ok(())
+}
+
 fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
     let output = docker_command()
         .args([
@@ -2945,6 +3107,8 @@ fn start_gazebo_sim(
             ("/workspace/diff_drive.sdf".to_string(), content)
         }
     };
+
+    validate_sdf_with_gazebo(&container_name, &container_world_path)?;
 
     let models = detect_models_in_sdf(&sdf_content);
     let robot_models: Vec<&String> = models
@@ -4182,6 +4346,7 @@ struct TfUpdate {
     qy: f64,
     qz: f64,
     qw: f64,
+    topic_name: String,
 }
 
 #[derive(Deserialize)]
@@ -4814,6 +4979,37 @@ mod filesystem_security_tests {
     impl Drop for TempDirectory {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn ros_package_paths_are_confined_to_selected_workspace() {
+        let workspace = TempDirectory::new();
+        let outside = TempDirectory::new();
+        let package = workspace.0.join("src/robot");
+        fs::create_dir_all(&package).unwrap();
+        fs::create_dir_all(outside.0.join("robot")).unwrap();
+
+        assert_eq!(
+            resolve_workspace_package_path(&workspace.0, "robot", "src/robot").unwrap(),
+            package.canonicalize().unwrap()
+        );
+        assert!(
+            resolve_workspace_package_path(&workspace.0, "robot", "../robot")
+                .unwrap_err()
+                .contains("outside the selected workspace")
+        );
+        assert!(resolve_workspace_package_path(
+            &workspace.0,
+            "robot",
+            outside.0.to_string_lossy().as_ref()
+        )
+        .is_err());
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside.0, workspace.0.join("linked")).unwrap();
+            assert!(resolve_workspace_package_path(&workspace.0, "robot", "linked/robot").is_err());
         }
     }
 

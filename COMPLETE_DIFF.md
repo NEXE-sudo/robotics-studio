@@ -1,6561 +1,4714 @@
 # Complete Git Diff
 
-Base: `83e88f6` on `main`; generated from the current worktree.
-Includes tracked changes and the architecture, integration-script, and release-readiness files. Excludes this file and the read-only `COMPLETE_GIT_DIFF.md` snapshot.
+Base: `b907550` on `main`; generated from the current worktree.
+Includes tracked changes and untracked files. Excludes this file and the read-only pasted attachment.
 
-Validation summary: Rust fmt/check/tests/strict Clippy passed (32 tests, 1 ignored); Python 36 tests passed; frontend build and npm audit passed; cargo audit found 0 vulnerabilities and 13 allowed warnings; Docker ROS/Gazebo integration and temporary-directory cleanup passed (shell syntax valid, integration exit code 0, no temporary directory or container left behind).
+Validation summary: npm build and 7 frontend tests passed; Rust fmt, 40-test suite (39 passed, 1 ignored), and strict Clippy passed; Python service-core suite passed (42 tests); shell syntax and protocol-copy checks passed. The full Docker ROS 2 Jazzy/Gazebo Harmonic integration passed, including live graph, TF, joint-state, SDFormat, TLS/auth, stop/reset, event replay/restart, and Gazebo checks. Cleanup exited 0 and left no integration container or temporary directory. Vite reports the existing ~828 kB chunk warning. No commit, push, tag, or release was created.
 
 ## Full diff
 
 ````diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 3363c0f..d6fe722 100644
+index d6fe722..6afb8b5 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -31,6 +31,7 @@ jobs:
-             build-essential \
-             curl \
-             file \
-+            protobuf-compiler \
-             libayatana-appindicator3-dev \
-             libxdo-dev \
-             libssl-dev \
-@@ -40,10 +41,14 @@ jobs:
-       - uses: dtolnay/rust-toolchain@stable
-         with:
-           components: clippy
-+      - run: cargo install cargo-audit --version 0.23.0 --locked
-+      - run: cargo audit --file src-tauri/Cargo.lock
-       - run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-       - run: cargo check --manifest-path src-tauri/Cargo.toml --locked
-       - run: cargo test --manifest-path src-tauri/Cargo.toml --locked
-       - run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
-+      - name: Docker ROS 2 and Gazebo integration
-+        run: ./scripts/docker-integration.sh
- 
-   python:
-     name: Python service-core tests
-@@ -54,4 +59,4 @@ jobs:
-         with:
-           python-version: "3.12"
-       - run: python -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
--      - run: python -m py_compile src-tauri/resources/devcontainer/server.py src-tauri/resources/devcontainer/server_core.py
-+      - run: python -m py_compile src-tauri/resources/devcontainer/server.py src-tauri/resources/devcontainer/server_core.py src-tauri/resources/devcontainer/test_server_core.py
+@@ -18,6 +18,7 @@ jobs:
+       - run: npm ci
+       - run: npm audit --audit-level=moderate
+       - run: npm run build
++      - run: npm run test:frontend
+
+   rust:
+     name: Rust tests and lint
 diff --git a/README.md b/README.md
-index c5c7fca..029ab36 100644
+index 029ab36..bbd01a4 100644
 --- a/README.md
 +++ b/README.md
-@@ -15,9 +15,9 @@ upfront about that than pretend otherwise.
- - **One-click ROS 2 + Gazebo environment** — the app builds, starts, and
+@@ -16,11 +16,17 @@ upfront about that than pretend otherwise.
    connects to a Docker-based ROS 2 environment automatically on launch. No
    manual Docker/Dev Container setup required.
--- **Live ROS introspection** — a real-time node/topic feed streamed over
--  gRPC while your system runs, plus a live **TF tree** view of your robot's
--  transform frames.
-+- **Live ROS status** — node/topic snapshots and TF updates are streamed over
-+  authenticated gRPC while the system runs. The current UI does not yet
-+  provide full package, service, or action exploration.
- - **3D visualization** — robot state rendered live in a three.js viewport,
-   with in-app controls to publish `cmd_vel` commands directly (no manual
-   container terminal needed for basic teleop).
-@@ -46,24 +46,34 @@ upfront about that than pretend otherwise.
-   directories selected in a native picker; file operations reject traversal,
-   symlink escapes, and oversized text files.
- - **Authenticated ROS gRPC** — application-generated session credentials,
--  expiry checks, and authenticated event/control requests. Existing containers
--  with non-loopback gRPC bindings are refused rather than treated as secure.
-+  expiry checks, and authenticated event/control requests over TLS. The client
-+  pins a container-generated CA certificate delivered through Docker's control
-+  channel; existing containers with non-loopback gRPC bindings are refused.
- - **Safer world import** — validates SDF input and stores it in a dedicated,
-   uniquely named workspace `worlds/` directory rather than overwriting files
-   in the workspace root. Imports are XML-parsed, require an SDF root and world
-   element, accept supported SDF versions 1.4–1.10, and reject DTDs.
--- **Prioritized ROS events** — critical discovery state is retained separately
--  from coalesced telemetry; reconnecting clients receive the latest discovery
--  snapshots.
--- **Bounded robot commands** — linear velocity magnitude is limited to
--  0.5 m/s, angular velocity magnitude to 1 rad/s, and commands expire after
--  0.5 seconds. These limits are fixed conservative defaults, not robot-specific
--  tuning or a safety-rated emergency stop.
-+- **Recoverable ROS events** — selected critical node-lifecycle and safety
-+  events are persisted and replayed after reconnect or service restart.
-+  Coalesced telemetry and periodic discovery snapshots are best-effort, not
-+  journaled. If retained history has a gap, the stream reports it and includes
-+  the latest state snapshots where available.
-+- **Per-robot command limits** — configure bounded linear/angular velocity,
-+  acceleration, planar/full-Twist mode, and command lease/timeout per command
-+  topic. Defaults remain conservative (0.5 m/s linear, 1 rad/s angular,
-+  0.5-second lease); hard ceilings prevent loosening the built-in bounds.
-+- **Software emergency stop** — the 3D View controls can latch motion commands
-+  off, publish zero velocity on discovered `/cmd_vel` topics, and require an
-+  explicit reset. Stop state and a bounded activation/reset history persist
-+  across service restarts.
- 
- ---
- 
- ## Architecture, briefly
- 
-+The trust boundaries and subsystem behavior are described in
-+[docs/architecture.md](./docs/architecture.md).
-+
- This app has two halves that run in different places and talk to each other:
- 
- - **The Tauri app** (Rust + React) — runs natively on your machine.
-@@ -118,8 +128,11 @@ any of this — the app manages the environment for you.
-   output (updates in place, doesn't flood the log with duplicate lines).
- - **Start Sim / Stop Sim / Reset Sim** — launches a Gazebo demo world (or
-   your own custom world), visualized live in the **3D View** tab.
-+- **3D View safety controls** — select a robot command topic to edit its
-+  bounded limits, latch the software emergency stop, or explicitly reset it.
-+  The backend remains authoritative and rejects commands while stopped.
+ - **Live ROS status** — node/topic snapshots and TF updates are streamed over
+-  authenticated gRPC while the system runs. The current UI does not yet
+-  provide full package, service, or action exploration.
+-- **3D visualization** — robot state rendered live in a three.js viewport,
+-  with in-app controls to publish `cmd_vel` commands directly (no manual
+-  container terminal needed for basic teleop).
++  authenticated gRPC while the system runs. The ROS sidebar also discovers
++  source packages in the selected workspace, shows package metadata and
++  resources, and lets you inspect package files. The live graph shows topic
++  publisher/subscriber QoS, service endpoints, and discovered action servers
++  and clients. Service invocation and action goal monitoring are not yet
++  available.
++- **3D visualization** — preview primitive URDF visuals and articulated
++  joints in the three.js viewport when a `.urdf` file is active; streamed
++  `/joint_states` update supported joints. Without an active URDF, the view
++  keeps its placeholder robot. In-app controls publish bounded `cmd_vel`
++  commands directly (no manual container terminal needed for basic teleop).
+ - **Custom Gazebo world support** — load your own world file instead of
+   being limited to the bundled demo.
+ - **AI assistant with real context** — ask questions about your open file,
+@@ -132,6 +138,11 @@ any of this — the app manages the environment for you.
+   bounded limits, latch the software emergency stop, or explicitly reset it.
+   The backend remains authoritative and rejects commands while stopped.
  - **ROS Log tab** — live feed of ROS 2 node/topic activity.
--- **TF Tree tab** — live transform tree, with an **Explain** action per
-+- **TF tab** — live transform updates, with an **Explain** action per
++- **ROS Explorer sidebar** — filter packages from the selected workspace,
++  inspect build type, version, description, dependencies, installed
++  executables, launch/configuration files, and browse package files. Refresh
++  after builds to update the workspace package inventory. The live graph also
++  shows nodes, topic endpoints/QoS, services, and action endpoint metadata.
+ - **TF tab** — live transform updates, with an **Explain** action per
    frame for an AI-generated plain-language breakdown.
  - **AI Assistant (right panel)** — ask questions about your open file,
-   recent ROS activity, or build output. Configure your provider/API key in
-@@ -136,7 +149,7 @@ any of this — the app manages the environment for you.
- 4. Click **Start Sim**, switch to the **3D View** tab.
- 5. Use the in-app teleop controls to publish a `cmd_vel` command and watch
-    the robot move.
--6. Open the **TF Tree** tab and click **Explain** on a frame.
-+6. Open the **TF** tab and click **Explain** on a frame.
- 7. Ask the AI assistant: *"what ROS topics are currently active?"* — it
-    should answer from live data, not a guess.
- 
-@@ -146,6 +159,18 @@ any of this — the app manages the environment for you.
- 
- - 3D view uses accurately-dimensioned placeholder geometry, not full URDF
-   mesh loading yet — visually approximate, not a rendered CAD model.
-+- The TF tab currently lists/group-displays received transform edges; it does
-+  not yet provide a fully validated hierarchy, stale-frame expiry, or cycle
-+  detection.
-+- ROS package discovery, detailed node endpoint inspection, and service/action
-+  exploration are not implemented. The live ROS view is not a complete graph
-+  explorer.
-+- URDF editing and AI generation are available, but URDF parsing, Xacro
-+  processing, package-resource resolution, and description-based model
-+  rendering are not implemented. The 3D view uses placeholder geometry.
-+- SDF imports are checked for XML structure, a supported declared version,
-+  and a world element; this is not SDFormat schema or resource-reference
-+  validation.
- - ROS↔three.js coordinate mapping is a first-pass approximation — rotation
-   direction hasn't been rigorously verified against every convention.
+@@ -157,22 +168,25 @@ any of this — the app manages the environment for you.
+
+ ## Known limitations (please break things and tell me what you find)
+
+-- 3D view uses accurately-dimensioned placeholder geometry, not full URDF
+-  mesh loading yet — visually approximate, not a rendered CAD model.
+-- The TF tab currently lists/group-displays received transform edges; it does
+-  not yet provide a fully validated hierarchy, stale-frame expiry, or cycle
+-  detection.
+-- ROS package discovery, detailed node endpoint inspection, and service/action
+-  exploration are not implemented. The live ROS view is not a complete graph
+-  explorer.
+-- URDF editing and AI generation are available, but URDF parsing, Xacro
+-  processing, package-resource resolution, and description-based model
+-  rendering are not implemented. The 3D view uses placeholder geometry.
+-- SDF imports are checked for XML structure, a supported declared version,
+-  and a world element; this is not SDFormat schema or resource-reference
++- The URDF preview supports box, cylinder, and sphere visuals plus
++  fixed/revolute/continuous/prismatic joints. It does not expand Xacro or
++  resolve mesh/package resources; mesh visuals are reported and skipped.
++  Floating/planar joints and full URDF semantics are not supported. The ROS
++  to three.js coordinate mapping is a first pass and still needs convention
+   validation.
+-- ROS↔three.js coordinate mapping is a first-pass approximation — rotation
+-  direction hasn't been rigorously verified against every convention.
++- The TF tab builds a live transform forest and warns about multiple roots,
++  cycles, multiple parents, stale dynamic transforms, non-finite values, and
++  invalid quaternions. Static `/tf_static` edges use transient-local QoS and
++  are not marked stale. This is diagnostic validation, not a substitute for
++  `tf2` authority or full ROS graph validation.
++- ROS graph snapshots are bounded and read-only. Service invocation and
++  action goal submission/monitoring are not implemented because arbitrary
++  operations could bypass the motion safety path. Package discovery reads
++  source package manifests and workspace install outputs, but does not show
++  every underlay package.
++- SDF imports are structurally checked, and the world is validated against
++  the installed SDFormat schema before Gazebo starts. This does not resolve or
++  validate every external model/mesh resource.
  - Only one bundled project template (`basic_publisher`) so far.
-@@ -160,11 +185,27 @@ any of this — the app manages the environment for you.
-   update is installed. Existing containers with insecure gRPC port bindings
-   are detected and blocked, but must be recreated manually with their workspace
-   bind-mounted to preserve files.
--- Robot-control limits are not configurable per robot. There is no latched
--  software emergency stop, physical-robot confirmation flow, or safety-rated
--  control guarantee.
--- Workspace selection is still not wired through every backend operation;
--  build and simulation lifecycle currently use the managed default workspace.
-+- The software emergency stop is latched and backend-enforced, but there is no
-+  physical-robot confirmation flow or safety-rated control guarantee.
-+- The ROS workspace picker selects the active workspace for container
-+  initialization, builds, simulation, and world imports. It is persisted under
-+  `~/.robotics-studio/selected-workspace.txt`; opening an unrelated folder in
-+  the file explorer does not change the ROS workspace.
-+- Build and simulator subprocesses do not yet share a unified process manager.
-+  The Build action can cancel an active streaming `colcon build` by terminating
-+  its dedicated process group. Gazebo startup now waits up to 20 seconds for a
-+  world-control service and cleans up if startup or bridge setup fails, but
-+  generalized process status, timeouts, and application-shutdown cleanup are
-+  still incomplete.
-+- A bounded, workspace-local journal stores critical node-lifecycle and
-+  software safety events (up to 256 records and 4 MiB) and preserves their
-+  sequence numbers across service restarts. Telemetry and periodic snapshots are
-+  coalesced/best-effort and are not journaled; they do not consume durable
-+  sequence numbers. Replaying a range returns retained events, not an
-+  exactly-once acknowledgment from the UI. Older-than-retained requests report
-+  a gap and include the latest in-memory snapshots when available. Journal
-+  write failures are surfaced in event health; failure while recording a
-+  safety transition fail-closes the safety controller.
- - AI provider credentials are stored through the operating-system credential
-   store. Linux requires an available Secret Service; the app reports an error
-   if secure storage is unavailable.
-@@ -172,11 +213,22 @@ any of this — the app manages the environment for you.
- ## Security notes
- 
- - Native file and directory pickers register approved roots in the Rust
--  backend. Reads, writes, listings, project creation, and `.aiignore` checks
--  are constrained to those roots; text reads/writes are limited to 8 MiB.
--- New ROS containers bind gRPC to `127.0.0.1:50051`. Both gRPC methods require
--  a random 256-bit token with a 24-hour expiry. The token is transferred via a
--  protected file and is never returned to frontend JavaScript.
-+  backend. File reads, writes, listings, and `.aiignore` reads are constrained
-+  to those roots; text reads/writes are limited to 8 MiB. Template and
-+  devcontainer copying still needs descriptor-rooted destination operations.
-+- The selected ROS workspace is revalidated by the backend on use. Switching
-+  workspaces stops the running managed container for the previous workspace
-+  before the new environment is initialized; stopped containers are preserved.
-+- New ROS containers publish gRPC only on host loopback and use TLS with a
-+  per-container CA and server certificate. The app retrieves the public CA
-+  certificate through Docker's control channel and pins it before sending
-+  credentials. All gRPC methods also require a random 256-bit token with a
-+  24-hour expiry. The token is transferred via a protected file and is never
-+  returned to frontend JavaScript.
-+- The running ROS service scripts and protocol are copied from the application
-+  bundle into `/opt/robotics-studio` inside the container, outside the writable
-+  workspace mount. Legacy workspace copies are compared byte-for-byte against
-+  bundled files before migration; a source-code marker alone is not trusted.
- - When a stream reports an expired or rejected token, the app performs one
-   guarded environment reinitialization: it generates a new token, replaces
-   the container credential file, restarts the ROS service, and reconnects.
-@@ -186,9 +238,10 @@ any of this — the app manages the environment for you.
- - An existing container with a missing or non-loopback gRPC binding is
-   rejected. The app does not automatically replace that container; preserve
-   its host workspace and recreate it with a loopback-only mapping.
--- Robot velocity and freshness checks run in both Rust and Python. Commands
--  are checked against combined linear and angular vector magnitudes and are
--  stopped by the server watchdog after 0.5 seconds, but this is not a
-+- Robot velocity and freshness checks run in Rust and Python. The ROS service
-+  enforces per-topic velocity, acceleration, mode, lease, and timeout settings
-+  within hard ceilings; defaults include a 0.5-second command lease. The
-+  software emergency stop publishes zero Twist commands but is not a
-   replacement for a physical emergency-stop circuit.
- - Imported SDF is checked for XML well-formedness, an SDF root, a world
-   element, and a supported declared SDF version. DTDs are rejected. This is
-@@ -199,21 +252,30 @@ any of this — the app manages the environment for you.
-   metadata is stored in the application settings JSON. Existing plaintext
-   credentials are moved to secure storage on first settings load, and the old
-   JSON entry is removed only after the secure-store write succeeds.
--- Path validation checks canonical containment and rejects traversal and
--  symlink escapes. It is not a kernel-level descriptor-based sandbox against a
--  local process racing filesystem changes.
--
--These controls have not been independently security-audited and are not a
--claim of security certification.
-+- On Unix, approved-root file reads, writes, listings, and world imports use
-+  pinned directory descriptors and no-follow `openat` operations; replacing
-+  an approved root is rejected. Windows currently uses canonical-path checks
-+  and atomic temporary-file replacement, and does not provide equivalent
-+  protection against a local process racing parent-directory changes.
-+- Not every operation has been migrated to descriptor-rooted access yet;
-+  selected-world source reads and template/project creation remain areas for
-+  further platform-specific race hardening.
-+
-+An independent source review found and this development pass fixed the
-+workspace service-marker trust issue and plaintext gRPC credential transport.
-+This review and the integration checks are not a claim of security
-+certification.
- 
- ## Migration notes for existing v0.2.0 installations
- 
- - The managed ROS workspace remains in `~/.robotics-studio/ros2-workspace`;
-   project files and workspace data are not removed by these changes.
--- On the next environment initialization, the app backs up existing
--  `server.py`, `server_core.py`, and `proto/ros_engine.proto` files under the
--  application config directory, then installs the authenticated server
--  protocol.
-+- On the next environment initialization, the app compares existing
-+  `server.py`, `server_core.py`, and `proto/ros_engine.proto` files byte-for-byte
-+  with trusted bundled copies, backs up modified copies under the application
-+  config directory, and installs the bundled versions. The running service is
-+  launched from an application-provisioned directory inside the container,
-+  not from the workspace mount.
- - Containers whose host gRPC port is bound to an external interface are
-   refused. Stop the old container and recreate it with
-   `-p 127.0.0.1:50051:50051` and the existing workspace mounted at
-@@ -221,14 +283,22 @@ claim of security certification.
- - On first AI settings load, an existing plaintext API key is migrated to the
-   operating-system credential store. If that store is unavailable, migration
-   fails explicitly and the original settings file is retained for recovery.
-+- The emergency stop is **software-only**: it cannot guarantee physical
-+  stopping, stop controllers that ignore `/cmd_vel`, or replace a hardware
-+  safety circuit. Validate stop behavior on the actual robot and maintain
-+  independent hardware safeguards.
- 
- ## Development checks
- 
--Run the frontend build/type check, Rust formatting/check/tests/lint, and
--isolated Python service-core tests from the repository root:
-+Run the frontend build/type check and audit, Rust formatting/check/tests/lint
-+and dependency audit, and isolated Python service-core tests from the repository
-+root. Install `cargo-audit` 0.23.0 if it is not already available.
- 
- ```sh
-+cargo install cargo-audit --version 0.23.0 --locked
- npm run build
-+npm audit --audit-level=moderate
-+cargo audit --file src-tauri/Cargo.lock
- cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
- cargo check --manifest-path src-tauri/Cargo.toml --locked
+ - Local/offline model *running* isn't implemented — Settings will suggest
+   appropriately-sized models for your hardware, but you'll still need to
+@@ -304,6 +318,7 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
  cargo test --manifest-path src-tauri/Cargo.toml --locked
-@@ -236,6 +306,27 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -
+ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
  python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
++npm run test:frontend
  ```
- 
-+For the live container integration (Docker Desktop or Docker Engine must be
-+running), execute:
-+
-+```sh
-+./scripts/docker-integration.sh
-+```
-+
-+The script builds the supported ROS 2 Jazzy/Gazebo Harmonic image, mounts a
-+temporary workspace, verifies the pinned-TLS Rust client, gRPC authentication,
-+emergency-stop gating, event replay after service restart, Gazebo world/model
-+readiness, reset, and ROS-Gazebo topic bridging. It performs no robot movement
-+and removes its temporary container and workspace on exit. CI runs the same
-+script on its Linux runner.
-+
-+These are unit/build checks, not Docker/ROS 2/Gazebo integration tests. They
-+require Docker Desktop running for a live environment; if it is unavailable,
-+simulation and gRPC integration behavior remains unverified. The current
-+supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in the
-+bundled container. macOS is tested most often; Linux/Windows builds and
-+runtime behavior need additional platform CI coverage.
-+
+
+ For the live container integration (Docker Desktop or Docker Engine must be
+@@ -314,18 +329,19 @@ running), execute:
+ ```
+
+ The script builds the supported ROS 2 Jazzy/Gazebo Harmonic image, mounts a
+-temporary workspace, verifies the pinned-TLS Rust client, gRPC authentication,
+-emergency-stop gating, event replay after service restart, Gazebo world/model
++temporary workspace, verifies selected-workspace package discovery, the
++pinned-TLS Rust client, gRPC authentication, emergency-stop gating, event
++replay after service restart, live `/tf_static` delivery, Gazebo world/model
+ readiness, reset, and ROS-Gazebo topic bridging. It performs no robot movement
+ and removes its temporary container and workspace on exit. CI runs the same
+ script on its Linux runner.
+
+-These are unit/build checks, not Docker/ROS 2/Gazebo integration tests. They
+-require Docker Desktop running for a live environment; if it is unavailable,
+-simulation and gRPC integration behavior remains unverified. The current
+-supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in the
+-bundled container. macOS is tested most often; Linux/Windows builds and
+-runtime behavior need additional platform CI coverage.
++Unit/build checks are not a substitute for live Docker/ROS 2/Gazebo checks.
++They require Docker Desktop running for an integration environment; if it is
++unavailable, simulation and gRPC integration behavior remains unverified. The
++current supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in
++the bundled container. macOS is tested most often; Linux/Windows runtime
++behavior and packaged desktop lifecycle still need platform-specific testing.
+
  ---
- 
- ## If something breaks
+
 diff --git a/RELEASE_READINESS.md b/RELEASE_READINESS.md
-new file mode 100644
-index 0000000..feee44c
---- /dev/null
+index feee44c..7788803 100644
+--- a/RELEASE_READINESS.md
 +++ b/RELEASE_READINESS.md
-@@ -0,0 +1,111 @@
-+# Robotics Studio v0.3.0 Release Readiness
+@@ -2,110 +2,97 @@
+
+ ## Decision
+
+-**Not ready for release.** The current worktree has meaningful security,
+-recovery, and simulator-integration improvements, and the local validation
+-listed below passes. The product still lacks several core workflows named in
+-the v0.3.0 scope, and cross-platform desktop/CI validation is incomplete.
++**Not ready for release.** The checkout starts at `b907550` on `main`; the
++worktree now contains uncommitted ROS package, TF, graph, SDF-validation, and
++initial URDF-preview improvements.
++The hosted CI run for `b907550` passed all three jobs, but it does not include
++the current uncommitted changes. Several major v0.3.0 acceptance criteria
++remain incomplete. No commit, push, tag, or release was created.
+
+-The checkout is on `main` at `83e88f6` with uncommitted changes. No commit,
+-push, tag, or release was created.
+-
+-## Scope checklist
++## Acceptance checklist
+
+ | # | Area | Status | Evidence and remaining work |
+ |---|---|---|---|
+-| 1 | gRPC authentication and transport | Pass (local) | Bearer-token requests use TLS with a client-pinned CA; the Docker integration rejects unauthenticated calls and accepts authenticated calls. |
+-| 2 | Trusted ROS service installation | Pass (local) | The runtime service and generated protobufs are installed outside the writable workspace mount. Workspace migration compares complete file bytes and uses approved-root operations. |
+-| 3 | Workspace filesystem boundaries | Partial | Unix descriptor-rooted reads, writes, imports, and template copies reject symlink escapes. Windows does not yet have equivalent resistance to parent-directory races. |
+-| 4 | Dependency security | Partial | `cargo audit` and `npm audit` report zero vulnerabilities. RustSec still reports 13 allowed unmaintained/unsound dependency warnings; see below. |
+-| 5 | Critical ROS event recovery | Partial | Critical lifecycle and safety records survive service restart and replay with sequence/gap metadata. Telemetry is best-effort, and the UI does not acknowledge delivery; end-to-end exactly-once delivery is not provided. |
+-| 6 | Motion bounds and emergency stop | Partial | The backend enforces conservative per-topic motion limits and a software stop latch. This is not a physical or safety-rated emergency-stop system. |
+-| 7 | Workspace selection and isolation | Partial | The backend persists and revalidates the selected workspace. Workspace propagation and cross-platform isolation have not been verified across every operation. |
+-| 8 | Build process control | Partial | `colcon build` has a dedicated cancellation path. There is no centralized process registry, general timeout policy, or unified status model. |
+-| 9 | Container and desktop lifecycle | Partial | A manual ROS 2 Jazzy/Gazebo Harmonic container integration passes. The packaged desktop app's full startup, shutdown, and supported-platform lifecycle has not been verified. |
+-| 10 | ROS node discovery | Partial | Node snapshots are available; a complete graph explorer and detailed endpoint state are not implemented. |
+-| 11 | ROS topic discovery | Partial | Topic snapshots and tested ROS-Gazebo bridges are available; detailed publisher/subscriber endpoint and QoS exploration is incomplete. |
+-| 12 | ROS service exploration | Not implemented | The UI does not enumerate or inspect ROS services. |
+-| 13 | ROS action exploration | Not implemented | The UI does not enumerate or inspect ROS actions. |
+-| 14 | TF hierarchy validation | Partial | TF edges are displayed, but a complete validated hierarchy is not maintained. |
+-| 15 | TF stale-frame and cycle handling | Not implemented | Stale-frame expiry and cycle detection are absent. |
+-| 16 | Robot visualization fidelity | Partial | The 3D view uses placeholder geometry rather than a model derived from the robot description. |
+-| 17 | URDF parsing | Not implemented | Robot descriptions are not parsed for visualization. |
+-| 18 | Xacro processing | Not implemented | Xacro expansion is not implemented. |
+-| 19 | SDF document validation | Partial | XML structure, SDF root/world presence, supported declared versions, and DTD rejection are checked; full SDFormat schema validation is absent. |
+-| 20 | Model and mesh resource resolution | Not implemented | External model/mesh references are not comprehensively resolved or validated. |
+-| 21 | Frontend and desktop UX test coverage | Not ready | The frontend type-check/build passes, but automated frontend/UI behavior tests and accessibility review were not run. |
+-| 22 | Cross-platform release and CI verification | Not ready | The local Docker integration passes, but the hosted workflow, Windows/Linux desktop runtime, and packaged release artifacts have not been validated. |
+-
+-## Security review and remediation
+-
+-Three security issues were addressed during this work:
+-
+-1. **High — workspace marker spoofing.** A marker substring in a workspace
+-   service file was previously accepted as evidence that the file was trusted.
+-   Migration now compares the complete contents against bundled files; the
+-   service actually runs from the application-installed container directory.
+-2. **High — bearer token over plaintext gRPC.** A local process could
+-   impersonate the service and capture the token. The client now establishes
+-   TLS and validates the server against the CA certificate obtained through
+-   Docker's control channel before sending authenticated requests.
+-3. **Medium (local filesystem boundary) — symlinked destination during resource
+-   copy.** Recursive copies could follow a workspace directory symlink and
+-   write outside the approved root. Copies and service migration now use
+-   approved-root operations; regression tests cover symlinked directories.
+-
+-The review did not establish additional exploitable issues in the event
+-journal, motion validation, or the descriptor-rooted Unix file operations.
+-That is not a substitute for platform-specific testing. Docker control and
+-code running with container privileges remain inside the trusted boundary.
+-
+-## Dependency audit residuals
+-
+-`cargo audit` found **zero vulnerabilities** and 13 allowed warnings:
+-
+-| Warning group | Advisory IDs | Notes |
+-|---|---|---|
+-| `proc-macro-error 1.0.4` | `RUSTSEC-2024-0370` | Unmaintained; no fixed upgrade available. |
+-| `unic-* 0.9.0` family | `RUSTSEC-2025-0075`, `-0080`, `-0081`, `-0098`, `-0100` | Unmaintained transitive URL-pattern dependencies; no fixed upgrade available. |
+-| `zbus_names`, `zvariant`, `zvariant_derive` | `RUSTSEC-2026-0370`, `-0371`, `-0372` | Unmaintained transitive crates. Some older lockfile entries are not on an active dependency path; newer entries remain in the Tauri dependency tree. |
+-| `glib 0.18.5` | `RUSTSEC-2024-0429` | Unsoundness advisory; the suggested GLib 0.20+ upgrade is blocked by the current GTK/Tauri dependency chain. |
+-
+-The advisories above did not provide CVSS scores in the audit output. These
+-warnings are disclosed rather than suppressed.
+-
+-## Validation performed
+-
+-All commands below were run against the current worktree:
++| 1 | gRPC authentication and TLS | PARTIAL | Local Docker integration confirms the pinned-TLS authenticated client and rejects unauthenticated calls. Cross-platform and packaged-app transport testing remains. |
++| 2 | Trusted ROS service installation | PARTIAL | Service code and protocol are installed outside the writable workspace mount and exercised in Docker. Upgrade/migration paths need broader platform testing. |
++| 3 | Workspace filesystem boundaries | PARTIAL | Unix descriptor-rooted file operations and package-path containment have regression tests. Windows race resistance and several other operations remain incomplete. |
++| 4 | Dependency security | PARTIAL | Current local `npm audit` reports no vulnerabilities and `cargo audit` reports no vulnerability findings, with 13 allowed warnings for unmaintained/unsound transitive dependencies. Hosted CI has not run on this worktree. |
++| 5 | Critical ROS event recovery | PARTIAL | Journal/replay, gap handling, and service-restart recovery are tested. The UI does not acknowledge event application and telemetry is best-effort. |
++| 6 | Motion bounds and emergency stop | PARTIAL | Rust/Python limits, stop latch, persistence, and restart behavior have tests and integration checks. This is software-only and not safety-rated. |
++| 7 | Workspace selection and isolation | PARTIAL | Selected workspace is persisted and passed to container lookup/build/simulation. Package discovery now filters to source/install trees inside that mounted workspace; full operation/platform matrix remains unverified. |
++| 8 | ROS package explorer | PARTIAL | Selected-workspace package metadata, build type, dependencies, executable outputs, launch/config files, filtering, refresh, and file browsing are implemented and tested. Underlay packages, dependency resolution, and full package content workflows remain out of scope. |
++| 9 | ROS node explorer | PARTIAL | Bounded node names/namespaces and per-topic endpoint node identities are streamed and shown. Full node-specific endpoint grouping and lifecycle details remain. |
++| 10 | ROS topic explorer | PARTIAL | Bounded publisher/subscriber identities and QoS policies are streamed and shown. Safe live-message inspection and subscription controls are not implemented. |
++| 11 | ROS service explorer | PARTIAL | Bounded service names/types and discovered server/client nodes are shown read-only. Structured invocation, validation, timeout, and cancellation remain absent to avoid bypassing safety controls. |
++| 12 | ROS action explorer | PARTIAL | Action names/types and discovered server/client nodes are shown read-only. Goal submission, feedback/results, and cancellation are not implemented. |
++| 13 | Consistent ROS graph refresh | PARTIAL | Nodes, topics, services, and actions are snapshotted from one service timer and bounded. Automatic client subscriptions and full graph transactionality remain absent. |
++| 14 | TF hierarchy and transform inspection | PARTIAL | A UI forest, translation/quaternion/RPY inspector, multiple-root/multiple-parent/cycle checks, and pure unit tests are implemented. It is not authoritative `tf2` validation. |
++| 15 | TF stale and static-frame behavior | PARTIAL | Dynamic edges become stale after five seconds; `/tf_static` uses reliable transient-local QoS and is exempt. A live Docker integration publishes and verifies a static TF edge. Missing authorities cannot be inferred from edge data. |
++| 16 | URDF parsing and validation | PARTIAL | A bounded parser rejects malformed/unsafe XML, validates link/joint-tree structure and primitive dimensions, and reports unsupported mesh visuals. Full URDF semantics, Xacro, and resource validation remain. |
++| 17 | Xacro expansion | NOT STARTED | No controlled ROS Xacro expansion workflow exists. |
++| 18 | Mesh/resource resolution | NOT STARTED | `package://`, relative model paths, and mesh formats are not resolved for rendering. |
++| 19 | Robot model and joint-state rendering | PARTIAL | Active `.urdf` files render box/cylinder/sphere visuals and supported joint transforms; bounded `/joint_states` updates are covered by live Docker integration. No mesh/Xacro, coordinate-convention verification, or visual desktop test yet. |
++| 20 | Process lifecycle manager | PARTIAL | Builds and process-registry data have dedicated support, but build, Docker, Gazebo, bridge, and ROS service processes do not share reliable lifecycle, timeout, cancellation, and shutdown handling. |
++| 21 | Gazebo and SDF | PARTIAL | Jazzy/Harmonic startup, reset, bridge, and pre-launch `gz sdf --check` schema validation are integration-tested. Comprehensive external resource resolution and validation remain absent. |
++| 22 | Frontend workflow tests/accessibility | PARTIAL | Dependency-free TF graph and robot-rendering tests plus production type-check/build pass. React workflow tests, accessibility review, and coverage of workspace/ROS/safety UI remain. |
++| 23 | Cross-platform runtime and release artifacts | BLOCKED | CI has Linux checks and a release workflow matrix for macOS/Linux/Windows, but no current packaged artifacts or runtime verification on every platform were produced. Signing/notarization and upgrade verification remain. |
 +
-+## Decision
++## Security and safety notes
 +
-+**Not ready for release.** The current worktree has meaningful security,
-+recovery, and simulator-integration improvements, and the local validation
-+listed below passes. The product still lacks several core workflows named in
-+the v0.3.0 scope, and cross-platform desktop/CI validation is incomplete.
++- Package discovery now runs from the application-installed `server_core.py`
++  in the selected container. It scans only that container's `/workspace/src`
++  and `/workspace/install`, bounds package/file counts and manifest sizes,
++  rejects DTD/entity declarations, reports malformed manifests, and skips
++  symlinked package directories. Rust canonicalizes returned relative paths
++  and checks that they remain under the selected host workspace before
++  exposing them to the approved-root file browser.
++- The package command no longer interpolates a host-controlled path into a
++  shell script. The active container is selected from the validated workspace
++  label and uses its fixed `/workspace` mount.
++- TF validation is diagnostic. It does not replace ROS `tf2`, identify
++  transform authorities, or make motion-safety guarantees.
++- Existing TLS/authentication, emergency-stop, and filesystem controls were
++  not intentionally weakened. No new independent security audit was performed
++  for this implementation pass.
++- The software emergency stop cannot guarantee physical braking or replace a
++  safety-rated controller or physical emergency-stop circuit.
 +
-+The checkout is on `main` at `83e88f6` with uncommitted changes. No commit,
-+push, tag, or release was created.
-+
-+## Scope checklist
-+
-+| # | Area | Status | Evidence and remaining work |
-+|---|---|---|---|
-+| 1 | gRPC authentication and transport | Pass (local) | Bearer-token requests use TLS with a client-pinned CA; the Docker integration rejects unauthenticated calls and accepts authenticated calls. |
-+| 2 | Trusted ROS service installation | Pass (local) | The runtime service and generated protobufs are installed outside the writable workspace mount. Workspace migration compares complete file bytes and uses approved-root operations. |
-+| 3 | Workspace filesystem boundaries | Partial | Unix descriptor-rooted reads, writes, imports, and template copies reject symlink escapes. Windows does not yet have equivalent resistance to parent-directory races. |
-+| 4 | Dependency security | Partial | `cargo audit` and `npm audit` report zero vulnerabilities. RustSec still reports 13 allowed unmaintained/unsound dependency warnings; see below. |
-+| 5 | Critical ROS event recovery | Partial | Critical lifecycle and safety records survive service restart and replay with sequence/gap metadata. Telemetry is best-effort, and the UI does not acknowledge delivery; end-to-end exactly-once delivery is not provided. |
-+| 6 | Motion bounds and emergency stop | Partial | The backend enforces conservative per-topic motion limits and a software stop latch. This is not a physical or safety-rated emergency-stop system. |
-+| 7 | Workspace selection and isolation | Partial | The backend persists and revalidates the selected workspace. Workspace propagation and cross-platform isolation have not been verified across every operation. |
-+| 8 | Build process control | Partial | `colcon build` has a dedicated cancellation path. There is no centralized process registry, general timeout policy, or unified status model. |
-+| 9 | Container and desktop lifecycle | Partial | A manual ROS 2 Jazzy/Gazebo Harmonic container integration passes. The packaged desktop app's full startup, shutdown, and supported-platform lifecycle has not been verified. |
-+| 10 | ROS node discovery | Partial | Node snapshots are available; a complete graph explorer and detailed endpoint state are not implemented. |
-+| 11 | ROS topic discovery | Partial | Topic snapshots and tested ROS-Gazebo bridges are available; detailed publisher/subscriber endpoint and QoS exploration is incomplete. |
-+| 12 | ROS service exploration | Not implemented | The UI does not enumerate or inspect ROS services. |
-+| 13 | ROS action exploration | Not implemented | The UI does not enumerate or inspect ROS actions. |
-+| 14 | TF hierarchy validation | Partial | TF edges are displayed, but a complete validated hierarchy is not maintained. |
-+| 15 | TF stale-frame and cycle handling | Not implemented | Stale-frame expiry and cycle detection are absent. |
-+| 16 | Robot visualization fidelity | Partial | The 3D view uses placeholder geometry rather than a model derived from the robot description. |
-+| 17 | URDF parsing | Not implemented | Robot descriptions are not parsed for visualization. |
-+| 18 | Xacro processing | Not implemented | Xacro expansion is not implemented. |
-+| 19 | SDF document validation | Partial | XML structure, SDF root/world presence, supported declared versions, and DTD rejection are checked; full SDFormat schema validation is absent. |
-+| 20 | Model and mesh resource resolution | Not implemented | External model/mesh references are not comprehensively resolved or validated. |
-+| 21 | Frontend and desktop UX test coverage | Not ready | The frontend type-check/build passes, but automated frontend/UI behavior tests and accessibility review were not run. |
-+| 22 | Cross-platform release and CI verification | Not ready | The local Docker integration passes, but the hosted workflow, Windows/Linux desktop runtime, and packaged release artifacts have not been validated. |
-+
-+## Security review and remediation
-+
-+Three security issues were addressed during this work:
-+
-+1. **High — workspace marker spoofing.** A marker substring in a workspace
-+   service file was previously accepted as evidence that the file was trusted.
-+   Migration now compares the complete contents against bundled files; the
-+   service actually runs from the application-installed container directory.
-+2. **High — bearer token over plaintext gRPC.** A local process could
-+   impersonate the service and capture the token. The client now establishes
-+   TLS and validates the server against the CA certificate obtained through
-+   Docker's control channel before sending authenticated requests.
-+3. **Medium (local filesystem boundary) — symlinked destination during resource
-+   copy.** Recursive copies could follow a workspace directory symlink and
-+   write outside the approved root. Copies and service migration now use
-+   approved-root operations; regression tests cover symlinked directories.
-+
-+The review did not establish additional exploitable issues in the event
-+journal, motion validation, or the descriptor-rooted Unix file operations.
-+That is not a substitute for platform-specific testing. Docker control and
-+code running with container privileges remain inside the trusted boundary.
-+
-+## Dependency audit residuals
-+
-+`cargo audit` found **zero vulnerabilities** and 13 allowed warnings:
-+
-+| Warning group | Advisory IDs | Notes |
-+|---|---|---|
-+| `proc-macro-error 1.0.4` | `RUSTSEC-2024-0370` | Unmaintained; no fixed upgrade available. |
-+| `unic-* 0.9.0` family | `RUSTSEC-2025-0075`, `-0080`, `-0081`, `-0098`, `-0100` | Unmaintained transitive URL-pattern dependencies; no fixed upgrade available. |
-+| `zbus_names`, `zvariant`, `zvariant_derive` | `RUSTSEC-2026-0370`, `-0371`, `-0372` | Unmaintained transitive crates. Some older lockfile entries are not on an active dependency path; newer entries remain in the Tauri dependency tree. |
-+| `glib 0.18.5` | `RUSTSEC-2024-0429` | Unsoundness advisory; the suggested GLib 0.20+ upgrade is blocked by the current GTK/Tauri dependency chain. |
-+
-+The advisories above did not provide CVSS scores in the audit output. These
-+warnings are disclosed rather than suppressed.
-+
-+## Validation performed
-+
-+All commands below were run against the current worktree:
-+
-+| Check | Result |
-+|---|---|
-+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass |
-+| `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass |
-+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 32 passed, 1 ignored (the ignored test requires the live service). |
-+| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings` | Pass |
-+| `python3 -B -m unittest test_server_core` from `src-tauri/resources/devcontainer` | Pass: 36 tests. |
-+| `npm run build` | Pass; Vite reports the existing ~811 kB JavaScript chunk-size warning. |
-+| `npm audit --audit-level=moderate` | Pass: 0 vulnerabilities. |
-+| `cargo audit` from `src-tauri` | Pass: 0 vulnerabilities, 13 allowed warnings. |
-+| `scripts/docker-integration.sh` | Pass: pinned TLS/auth, safety latch/reset, event replay after restart, Gazebo world readiness/reset, and ROS-Gazebo topic bridge. No robot motion was commanded. |
-+| `git diff --check`, protocol-copy comparison, script syntax check | Pass. |
-+
-+The Docker integration is a manually run container harness, not a desktop UI
-+test or hosted CI run. Its successful result does not establish support for all
-+target operating systems or physical robot safety.
-+
-+## Release blockers
-+
-+- Implement or explicitly defer full ROS package, service, and action
-+  exploration.
-+- Add a centralized process lifecycle/status/timeout model and verify shutdown
-+  and cancellation in the managed desktop runtime.
-+- Complete TF hierarchy validation and stale/cycle handling.
-+- Implement description-based robot rendering, including a declared URDF,
-+  Xacro, and mesh-resource support boundary.
-+- Decide whether SDF import requires full schema and external-resource
-+  validation; implement it or clearly constrain supported input.
-+- Complete Windows/Linux runtime and filesystem testing, frontend behavior
-+  tests, and hosted CI validation.
-+- Reassess the disclosed RustSec warnings when compatible upstream dependency
-+  upgrades are available.
++## Validation performed on the current worktree
+
+ | Check | Result |
+ |---|---|
+-| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass |
+-| `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass |
+-| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 32 passed, 1 ignored (the ignored test requires the live service). |
+-| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings` | Pass |
+-| `python3 -B -m unittest test_server_core` from `src-tauri/resources/devcontainer` | Pass: 36 tests. |
+-| `npm run build` | Pass; Vite reports the existing ~811 kB JavaScript chunk-size warning. |
++| `npm run build` | Pass; Vite reports an existing large JavaScript chunk warning (~820 kB). |
++| `npm run test:frontend` | Pass: 7 TF graph and robot-description tests (Node 26.5.0). |
++| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass. |
++| `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass. |
++| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 39 passed, 1 ignored (live-service test). |
++| `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | Pass. |
++| `python3 -B -m unittest -v test_server_core` from `src-tauri/resources/devcontainer` | Pass: 42 tests, including package discovery/isolation and action endpoint parsing. |
++| Python `py_compile` for service and tests | Pass. |
++| `bash -n scripts/docker-integration.sh` | Pass. |
++| `scripts/docker-integration.sh` | Pass: selected-workspace package discovery, live graph node/topic/service/action endpoints, `/tf_static` and `/joint_states` delivery, valid/invalid SDFormat checks, pinned TLS/auth, stop/reset enforcement, replay and safety history after restart, Gazebo readiness/reset and topic bridge. Cleanup exited 0 and left no integration container or temporary workspace. |
++| Protocol-copy comparison | Pass: Rust and container protobuf definitions match. |
++| `cargo audit --file src-tauri/Cargo.lock` | Pass with 13 allowed warnings: no vulnerability findings; remaining advisories are unmaintained/unsound transitive dependencies disclosed in the previous readiness review. Patched Rustix advisory was fixed by updating to 1.1.6. |
+ | `npm audit --audit-level=moderate` | Pass: 0 vulnerabilities. |
+-| `cargo audit` from `src-tauri` | Pass: 0 vulnerabilities, 13 allowed warnings. |
+-| `scripts/docker-integration.sh` | Pass: pinned TLS/auth, safety latch/reset, event replay after restart, Gazebo world readiness/reset, and ROS-Gazebo topic bridge. No robot motion was commanded. |
+-| `git diff --check`, protocol-copy comparison, script syntax check | Pass. |
+-
+-The Docker integration is a manually run container harness, not a desktop UI
+-test or hosted CI run. Its successful result does not establish support for all
+-target operating systems or physical robot safety.
++| Hosted GitHub Actions | Pass for baseline commit `b907550` in run `43087023826` (frontend, Rust/integration, and Python jobs); not run against this worktree's changes. |
+
+ ## Release blockers
+
+-- Implement or explicitly defer full ROS package, service, and action
+-  exploration.
+-- Add a centralized process lifecycle/status/timeout model and verify shutdown
+-  and cancellation in the managed desktop runtime.
+-- Complete TF hierarchy validation and stale/cycle handling.
+-- Implement description-based robot rendering, including a declared URDF,
+-  Xacro, and mesh-resource support boundary.
+-- Decide whether SDF import requires full schema and external-resource
+-  validation; implement it or clearly constrain supported input.
+-- Complete Windows/Linux runtime and filesystem testing, frontend behavior
+-  tests, and hosted CI validation.
+-- Reassess the disclosed RustSec warnings when compatible upstream dependency
+-  upgrades are available.
++- Complete live ROS node/topic endpoint details and implement service/action
++  safe structured invocation/goal monitoring without bypassing the motion
++  safety controls. Bounded read-only graph discovery is implemented.
++- Validate TF reconnect/disappearance behavior against a live ROS publisher;
++  static `/tf_static` delivery is covered by the Docker integration test.
++- Complete URDF semantics and coordinate validation; implement Xacro expansion
++  and safe package/model resource resolution. The current bounded parser,
++  primitive preview, and live joint-state updates are partial support only.
++- Unify application-managed process state, failure reporting, timeouts,
++  cancellation confirmation, and shutdown cleanup across supported platforms.
++- Complete filesystem race hardening for remaining operations and Windows.
++- Add frontend workflow tests and conduct accessibility review.
++- Run hosted CI on the modified worktree; verify Linux, Windows, macOS Intel,
++  and Apple Silicon packaging/runtime paths and test upgrades from v0.2.0.
++- Complete external SDF model/mesh resource resolution and validation.
++- Re-run current dependency audits and reassess disclosed RustSec advisories.
++- Prepare and verify unsigned/signed release artifacts as applicable; do not
++  publish a tag or release until explicitly approved.
 diff --git a/docs/architecture.md b/docs/architecture.md
-new file mode 100644
-index 0000000..b1dbb22
---- /dev/null
+index b1dbb22..d7a8dc2 100644
+--- a/docs/architecture.md
 +++ b/docs/architecture.md
-@@ -0,0 +1,107 @@
-+# Architecture and trust boundaries
+@@ -85,23 +85,45 @@ coverage remain incomplete.
+
+ ## Supported ROS surface
+
+-The current service streams node and topic snapshots, transform and odometry
+-updates, safety state, and event-recovery metadata. It is not a full ROS graph
+-explorer: detailed publisher/subscriber endpoints, services, and actions are
+-not exposed. TF updates are visualized as received edges but are not yet
+-validated as a complete hierarchy with stale-frame expiry and cycle detection.
+-The 3D view uses placeholder geometry; URDF parsing, Xacro processing, mesh
+-resource resolution, and description-based robot rendering are not implemented.
++The current service streams bounded node, topic endpoint/QoS, service, and
++action snapshots alongside transform and odometry updates, safety state, and
++event-recovery metadata. The package explorer scans package manifests in the
++selected workspace's source and install trees rather than treating ROS
++underlay packages as workspace packages. It reports bounded metadata,
++installed executables, launch/configuration files, and allows the frontend to
++browse package files through approved-root file commands. The graph explorer
++is read-only: it does not invoke arbitrary ROS services or submit action goals,
++which could otherwise bypass the application's motion safety path.
 +
-+## Components
++TF updates include their source topic. `/tf_static` uses transient-local
++reliable QoS so late subscribers receive latched static transforms. The
++frontend constructs a transform forest, warns on multiple roots, cycles,
++multiple parents, stale dynamic transforms, non-finite values, and invalid
++quaternions, and provides translation/quaternion/RPY inspection. It cannot
++infer missing transform authorities from edge data alone, and is diagnostic
++validation rather than a replacement for `tf2`.
 +
-+Robotics Studio is a Tauri desktop application. The React frontend invokes
-+commands in the native Rust backend; it does not connect directly to Docker or
-+ROS. The backend manages a ROS 2 Jazzy container based on the bundled
-+`osrf/ros:jazzy-desktop` image, which installs Gazebo Harmonic and
-+`ros_gz_bridge`.
-+
-+The selected ROS workspace is bind-mounted at `/workspace`. It is distinct
-+from the folder currently open in the editor. Switching the selected workspace
-+stops that workspace's running managed container before persisting the new
-+selection.
-+
-+The ROS service source and generated protobuf modules run from
-+`/opt/robotics-studio` inside the container, outside the writable workspace
-+mount. The service persists its event journal, safety state, robot limits, and
-+workspace data under `/workspace/.robotics-studio`.
-+
-+## gRPC trust model
-+
-+The container publishes gRPC on host loopback only. At initialization, the
-+backend provisions a per-container certificate authority and a server
-+certificate with a loopback subject alternative name. It retrieves only the
-+public CA certificate through Docker's control channel and configures the Rust
-+gRPC client to trust that certificate. The client sends its random, expiring
-+bearer token only after establishing TLS. The token is stored in protected
-+files and is not exposed to frontend JavaScript.
-+
-+This protects against an unrelated local process impersonating the service on
-+the loopback port. A user with Docker control, or code running with the
-+container's privileges, remains inside the trusted computing boundary.
-+
-+## Motion and safety
-+
-+Motion requests are checked in both the Rust command path and the Python ROS
-+service. The service enforces topic-specific velocity, acceleration, mode,
-+freshness, lease, and timeout limits. A server-side safety controller serializes
-+motion publication with emergency-stop transitions. A latched stop blocks
-+motion until an explicit reset; restored latches are reasserted on startup.
-+
-+The software stop publishes zero velocity messages to discovered command
-+topics. It cannot stop arbitrary controllers, guarantee physical braking, or
-+replace a safety-rated controller or physical emergency-stop circuit.
-+
-+## Events and recovery
-+
-+The event hub prioritizes critical events over coalesced telemetry. Selected
-+node lifecycle and safety events are durably journaled, with a bound of 256
-+records and 4 MiB. Sequence numbers are durable for journaled critical events;
-+telemetry and periodic snapshots are best-effort and do not consume those
-+sequence numbers. Replay subscribes to live delivery atomically with its
-+snapshot to avoid a replay/live handoff gap.
-+
-+Replay is cursor-based and reports when history has expired. The client
-+resynchronizes from available snapshots after a gap. The UI does not
-+acknowledge event application, so the end-to-end frontend delivery contract is
-+not exactly-once and must not be described as such.
-+
-+## Workspace and files
-+
-+Native file operations are scoped to roots selected through native pickers.
-+On Unix, the principal read, write, listing, and import paths pin directory
-+descriptors and reject symlink traversal. Windows uses canonical-path checks
-+and atomic replacement but does not yet have equivalent protection from a
-+local process racing parent-directory changes. Some template and project
-+operations are not yet descriptor-rooted on every platform.
-+
-+An editor folder does not implicitly become the ROS workspace. ROS
-+initialization, build, simulation, and world import use the selected workspace;
-+other general file editing uses the separately approved editor folder.
-+
-+## Process and simulation lifecycle
-+
-+The `colcon build` operation has a dedicated process group and a cancellation
-+path. Gazebo startup waits for a world control service before launching the
-+bridge, and failed startup attempts trigger cleanup. Reset targets the active
-+world's discovered control service rather than assuming a `default` world.
-+
-+Build, container, Gazebo, and bridge processes do not yet share a centralized
-+process registry. General execution timeouts, unified status reporting,
-+graceful application-shutdown cleanup, and platform-specific lifecycle
-+coverage remain incomplete.
-+
-+## Supported ROS surface
-+
-+The current service streams node and topic snapshots, transform and odometry
-+updates, safety state, and event-recovery metadata. It is not a full ROS graph
-+explorer: detailed publisher/subscriber endpoints, services, and actions are
-+not exposed. TF updates are visualized as received edges but are not yet
-+validated as a complete hierarchy with stale-frame expiry and cycle detection.
-+The 3D view uses placeholder geometry; URDF parsing, Xacro processing, mesh
-+resource resolution, and description-based robot rendering are not implemented.
-+
-+SDF import checks XML well-formedness, an SDF root, a world element, supported
-+declared versions, and rejects DTDs. It does not perform full SDFormat schema
-+validation or resolve and validate all external model and mesh resources.
-+
-+## Validation boundary
-+
-+Run unit/build checks with the commands in the README. The live integration
-+script `scripts/docker-integration.sh` builds the container image and exercises
-+the real ROS service, pinned TLS, event replay after restart, Gazebo world
-+readiness/reset, and ROS-Gazebo topic bridging. This does not substitute for
-+testing the desktop UI on every target operating system or testing a physical
-+robot.
++When an active editor file is a `.urdf`, the native backend parses a bounded
++URDF subset and the frontend renders box, cylinder, and sphere visuals with a
++connected link tree. Fixed, revolute, continuous, and prismatic joint states
++are updated from bounded `/joint_states` telemetry. Mesh visuals are surfaced
++as warnings and skipped. Xacro expansion, mesh/package resource resolution,
++floating/planar joints, and full URDF semantics are not implemented. The
++ROS-to-three.js coordinate mapping still needs broader convention validation.
+
+ SDF import checks XML well-formedness, an SDF root, a world element, supported
+-declared versions, and rejects DTDs. It does not perform full SDFormat schema
+-validation or resolve and validate all external model and mesh resources.
++declared versions, and rejects DTDs. Before launching Gazebo, the container's
++`gz sdf --check` validates the selected world against the installed SDFormat
++schema. External model and mesh resources are not comprehensively resolved or
++validated.
+
+ ## Validation boundary
+
+ Run unit/build checks with the commands in the README. The live integration
+ script `scripts/docker-integration.sh` builds the container image and exercises
+-the real ROS service, pinned TLS, event replay after restart, Gazebo world
+-readiness/reset, and ROS-Gazebo topic bridging. This does not substitute for
+-testing the desktop UI on every target operating system or testing a physical
+-robot.
++the real ROS service, selected-workspace package discovery, pinned TLS, event
++replay after restart, live `/tf_static` and `/joint_states` delivery, Gazebo
++world readiness/reset, and ROS-Gazebo topic bridging. Unit tests cover TF graph
++validation, URDF parsing, primitive/joint rendering, and package metadata
++discovery. This does not substitute for visual desktop validation on every
++target operating system or testing a physical robot.
+diff --git a/package.json b/package.json
+index 4c6b264..8167567 100644
+--- a/package.json
++++ b/package.json
+@@ -7,7 +7,8 @@
+     "dev": "vite",
+     "build": "tsc && vite build",
+     "preview": "vite preview",
+-    "tauri": "tauri"
++    "tauri": "tauri",
++    "test:frontend": "node --experimental-strip-types --test tests/*.test.mjs"
+   },
+   "dependencies": {
+     "@monaco-editor/react": "^4.7.0",
 diff --git a/scripts/docker-integration.sh b/scripts/docker-integration.sh
-new file mode 100755
-index 0000000..43c78e0
---- /dev/null
+index 43c78e0..05852ff 100755
+--- a/scripts/docker-integration.sh
 +++ b/scripts/docker-integration.sh
-@@ -0,0 +1,283 @@
-+#!/usr/bin/env bash
-+set -euo pipefail
-+
-+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-+workspace="$(mktemp -d /tmp/robotics-studio-integration.XXXXXX)"
-+container="robotics-studio-integration-$$"
-+image="robotics-studio-ros2:integration"
-+container_may_exist=0
-+
-+cleanup() {
-+    local exit_code=$?
-+    local container_removed=1
-+    local workspace_removed=0
-+    trap - EXIT
-+
-+    if [[ "$container_may_exist" == 1 ]]; then
-+        if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-+            container_removed=0
-+            echo "WARNING: Docker is unavailable; cannot confirm integration container removal: $container" >&2
-+        elif ! docker rm -f "$container" >/dev/null 2>&1 &&
-+            docker inspect "$container" >/dev/null 2>&1; then
-+            container_removed=0
-+            echo "WARNING: Could not stop and remove integration container: $container" >&2
-+        fi
-+    fi
-+
-+    if [[ "$container_removed" == 1 && -d "$workspace" ]]; then
-+        # The integration image runs as root and may create root-owned files
-+        # in the bind-mounted workspace. Remove those only after its container
-+        # has been stopped and removed.
-+        if command -v docker >/dev/null 2>&1 &&
-+            docker image inspect "$image" >/dev/null 2>&1 &&
-+            docker run --rm --user 0:0 \
-+                --mount "type=bind,source=$workspace,target=/cleanup" \
-+                --entrypoint /bin/bash "$image" -c \
-+                'find /cleanup -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
-+                >/dev/null 2>&1 &&
-+            rm -rf -- "$workspace" 2>/dev/null; then
-+            workspace_removed=1
-+        fi
-+
-+        if [[ "$workspace_removed" == 0 ]] && rm -rf -- "$workspace" 2>/dev/null; then
-+            workspace_removed=1
-+        fi
-+
-+        if [[ "$workspace_removed" == 0 ]] &&
-+            command -v sudo >/dev/null 2>&1 &&
-+            sudo -n true >/dev/null 2>&1 &&
-+            sudo -n rm -rf -- "$workspace" 2>/dev/null; then
-+            workspace_removed=1
-+        fi
-+
-+        if [[ -e "$workspace" ]]; then
-+            echo "WARNING: Could not completely remove temporary directory: $workspace" >&2
-+        fi
-+    elif [[ "$container_removed" == 0 ]]; then
-+        echo "WARNING: Leaving bind-mounted temporary directory in place because the container may still exist: $workspace" >&2
-+    fi
-+
-+    exit "$exit_code"
-+}
-+
-+trap cleanup EXIT
-+
-+docker info >/dev/null
-+docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
-+
-+cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
-+printf 'workspace-mount-ok\n' > "$workspace/mount-check"
-+container_may_exist=1
-+docker run -d \
-+  --name "$container" \
-+  -p 127.0.0.1:50051:50051 \
-+  -v "$workspace:/workspace" \
-+  "$image" tail -f /dev/null >/dev/null
-+
-+docker exec "$container" mkdir -p \
-+  /opt/robotics-studio/proto \
-+  /opt/robotics-studio/generated \
-+  /run/robotics-studio
-+docker cp "$repo_root/src-tauri/resources/devcontainer/server.py" \
-+  "$container:/opt/robotics-studio/server.py" >/dev/null
-+docker cp "$repo_root/src-tauri/resources/devcontainer/server_core.py" \
-+  "$container:/opt/robotics-studio/server_core.py" >/dev/null
-+docker cp "$repo_root/src-tauri/resources/devcontainer/proto/ros_engine.proto" \
-+  "$container:/opt/robotics-studio/proto/ros_engine.proto" >/dev/null
-+
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
-+
-+docker exec "$container" bash -lc '
-+  set -eu
-+  chmod 700 /run/robotics-studio
-+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-+    -keyout /run/robotics-studio/grpc-ca.key \
-+    -out /run/robotics-studio/grpc-ca.crt \
-+    -subj "/CN=Robotics Studio local gRPC CA" \
-+    -addext "basicConstraints=critical,CA:TRUE" \
-+    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
-+  openssl req -new -newkey rsa:2048 -nodes \
-+    -keyout /run/robotics-studio/grpc-server.key \
-+    -out /run/robotics-studio/grpc-server.csr \
-+    -subj "/CN=127.0.0.1" >/dev/null 2>&1
-+  printf "%s\n" \
-+    "basicConstraints=critical,CA:FALSE" \
-+    "keyUsage=critical,digitalSignature,keyEncipherment" \
-+    "extendedKeyUsage=serverAuth" \
-+    "subjectAltName=IP:127.0.0.1,DNS:localhost" \
-+    > /run/robotics-studio/grpc-server.ext
-+  openssl x509 -req -in /run/robotics-studio/grpc-server.csr \
-+    -CA /run/robotics-studio/grpc-ca.crt \
-+    -CAkey /run/robotics-studio/grpc-ca.key -CAcreateserial \
-+    -out /run/robotics-studio/grpc-server.crt -days 3650 -sha256 \
-+    -extfile /run/robotics-studio/grpc-server.ext >/dev/null 2>&1
-+  chmod 600 /run/robotics-studio/grpc-ca.key /run/robotics-studio/grpc-server.key
-+  chmod 644 /run/robotics-studio/grpc-ca.crt /run/robotics-studio/grpc-server.crt
-+'
-+docker exec "$container" cat /run/robotics-studio/grpc-ca.crt > "$workspace/grpc-ca.crt"
-+
-+token="$(openssl rand -hex 32)"
-+expires_at="$(python3 -c 'import time; print(int(time.time()) + 86400)')"
-+printf '{"token":"%s","expires_at":%s}' "$token" "$expires_at" |
-+  docker exec -i "$container" bash -c \
-+    'cat > /run/robotics-studio/grpc-auth.json && chmod 600 /run/robotics-studio/grpc-auth.json'
-+
-+start_ros_server() {
-+  docker exec -d "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated exec python3 /opt/robotics-studio/server.py >/tmp/server.log 2>&1'
-+  for attempt in $(seq 1 30); do
-+    if docker exec "$container" bash -lc \
-+      'grep -q "running on port 50051" /tmp/server.log' 2>/dev/null; then
-+      return
-+    fi
-+    sleep 1
-+  done
-+  docker exec "$container" cat /tmp/server.log
-+  return 1
-+}
-+
-+test "$(docker exec "$container" cat /workspace/mount-check)" = workspace-mount-ok
-+start_ros_server
-+
-+ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
-+ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
-+  cargo test --manifest-path "$repo_root/src-tauri/Cargo.toml" --locked -- \
-+    --ignored --exact \
-+    ros_docker_integration_tests::pinned_tls_client_authenticates_to_docker_ros_service
-+
+@@ -67,6 +67,30 @@ docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
+
+ cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
+ printf 'workspace-mount-ok\n' > "$workspace/mount-check"
++mkdir -p "$workspace/worlds"
++printf '<sdf version="1.9"><world name="invalid"><model name="bad"><link name="bad"><visual name="bad"><geometry><box><size>1</size></box></geometry></visual></link></model></world></sdf>\n' \
++  > "$workspace/worlds/invalid-schema.sdf"
++package_dir="$workspace/src/robotics_studio_integration_fixture"
++mkdir -p "$package_dir/launch" "$package_dir/config"
++cat > "$package_dir/package.xml" <<'XML'
++<package format="3">
++  <name>robotics_studio_integration_fixture</name>
++  <version>1.0.0</version>
++  <description>Temporary package discovery integration fixture</description>
++  <buildtool_depend>ament_cmake</buildtool_depend>
++  <depend>rclpy</depend>
++</package>
++XML
++printf '<launch/>\n' > "$package_dir/launch/start.launch.xml"
++printf 'enabled: true\n' > "$package_dir/config/settings.yaml"
++mkdir -p "$workspace/install/lib/robotics_studio_integration_fixture"
++printf '#!/bin/sh\n' > "$workspace/install/lib/robotics_studio_integration_fixture/fixture_node"
++chmod +x "$workspace/install/lib/robotics_studio_integration_fixture/fixture_node"
++mkdir -p "$workspace/other_workspace/src/not_selected"
++printf '<package><name>not_selected</name></package>\n' \
++  > "$workspace/other_workspace/src/not_selected/package.xml"
++mkdir -p "$workspace/src/malformed_fixture"
++printf '<package>\n' > "$workspace/src/malformed_fixture/package.xml"
+ container_may_exist=1
+ docker run -d \
+   --name "$container" \
+@@ -85,6 +109,32 @@ docker cp "$repo_root/src-tauri/resources/devcontainer/server_core.py" \
+ docker cp "$repo_root/src-tauri/resources/devcontainer/proto/ros_engine.proto" \
+   "$container:/opt/robotics-studio/proto/ros_engine.proto" >/dev/null
+
 +docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
-+import json
++import sys
++
++sys.path.insert(0, "/opt/robotics-studio")
++from server_core import discover_workspace_packages
++
++packages = {
++    package["name"]: package
++    for package in discover_workspace_packages("/workspace")
++}
++assert set(packages) == {
++    "malformed_fixture",
++    "robotics_studio_integration_fixture",
++}, sorted(packages)
++fixture = packages["robotics_studio_integration_fixture"]
++assert fixture["package_type"] == "ament_cmake"
++assert fixture["version"] == "1.0.0"
++assert fixture["description"] == "Temporary package discovery integration fixture"
++assert fixture["dependencies"] == ["ament_cmake", "rclpy"]
++assert fixture["executables"] == ["fixture_node"]
++assert fixture["launch_files"] == ["launch/start.launch.xml"]
++assert fixture["config_files"] == ["config/settings.yaml"]
++assert packages["malformed_fixture"]["metadata_error"]
++print("Selected-workspace ROS package discovery passed")
++PY
++
+ docker exec "$container" bash -lc \
+   'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
+
+@@ -138,8 +188,162 @@ start_ros_server() {
+ }
+
+ test "$(docker exec "$container" cat /workspace/mount-check)" = workspace-mount-ok
++docker exec "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && gz sdf --check /workspace/diff_drive.sdf'
++if docker exec "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && gz sdf --check /workspace/worlds/invalid-schema.sdf' \
++  >/dev/null 2>&1; then
++  echo "Gazebo accepted an invalid SDF world" >&2
++  exit 1
++fi
++echo "SDFormat schema validation accepted the valid world and rejected invalid geometry"
+ start_ros_server
+
++docker exec -i "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && python3 -' <<'PY'
 +import sys
 +import time
 +
 +sys.path.insert(0, "/opt/robotics-studio/generated")
 +import grpc
++import rclpy
 +import ros_engine_pb2 as pb
 +import ros_engine_pb2_grpc as rpc
++from action_tutorials_interfaces.action import Fibonacci
++from geometry_msgs.msg import TransformStamped
++from rclpy.action import ActionClient, ActionServer
++from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
++from sensor_msgs.msg import JointState
++from std_srvs.srv import Trigger
++from tf2_msgs.msg import TFMessage
 +
 +certificate = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
-+token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
++token = open("/run/robotics-studio/grpc-auth.json", encoding="utf-8").read()
++import json
++
++metadata = (("x-robotics-studio-token", json.loads(token)["token"]),)
 +stub = rpc.RosEngineStub(
 +    grpc.secure_channel(
 +        "127.0.0.1:50051",
 +        grpc.ssl_channel_credentials(root_certificates=certificate),
 +    )
 +)
-+metadata = (("x-robotics-studio-token", token),)
-+try:
-+    stub.GetSafetyState(pb.Empty(), timeout=3)
-+    raise AssertionError("unauthenticated request was accepted")
-+except grpc.RpcError as error:
-+    assert error.code() == grpc.StatusCode.UNAUTHENTICATED, error
-+
-+assert stub.GetSafetyState(pb.Empty(), metadata=metadata, timeout=3).state == pb.SafetyState.READY
-+activated = stub.SetEmergencyStop(
-+    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.ACTIVATE),
-+    metadata=metadata,
-+    timeout=3,
-+)
-+assert activated.state == pb.SafetyState.ACTIVE
-+try:
-+    stub.PublishTwist(
-+        pb.TwistCommand(
-+            topic_name="/audit/cmd_vel",
-+            linear_x=0.1,
-+            timestamp_ns=time.time_ns(),
-+        ),
-+        metadata=metadata,
-+        timeout=3,
-+    )
-+    raise AssertionError("motion command was accepted while latched")
-+except grpc.RpcError as error:
-+    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT, error
-+assert stub.SetEmergencyStop(
-+    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.RESET),
-+    metadata=metadata,
-+    timeout=3,
-+).state == pb.SafetyState.READY
-+
 +events = stub.ReplayEvents(
 +    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
 +    metadata=metadata,
-+    timeout=5,
++    timeout=10,
 +)
-+assert next(events).WhichOneof("event") == "event_recovery"
-+assert next(events).WhichOneof("event") == "safety_state"
-+events.cancel()
-+print("Authenticated TLS, stop/reset enforcement and event replay passed")
-+PY
 +
-+docker exec "$container" bash -lc \
-+  "pkill -TERM -f '[p]ython3 /opt/robotics-studio/server.py' || true"
-+start_ros_server
-+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
-+import json
-+import sys
++rclpy.init()
++node = rclpy.create_node("robotics_studio_tf_integration")
++service = node.create_service(
++    Trigger,
++    "/integration/echo",
++    lambda request, response: response,
++)
++service_client = node.create_client(Trigger, "/integration/echo")
++action_server = ActionServer(
++    node,
++    Fibonacci,
++    "/integration/fibonacci",
++    lambda goal_handle: Fibonacci.Result(),
++)
++action_client = ActionClient(node, Fibonacci, "/integration/fibonacci")
++publisher = node.create_publisher(
++    TFMessage,
++    "/tf_static",
++    QoSProfile(
++        depth=10,
++        reliability=ReliabilityPolicy.RELIABLE,
++        durability=DurabilityPolicy.TRANSIENT_LOCAL,
++    ),
++)
++joint_state_publisher = node.create_publisher(JointState, "/joint_states", 10)
++deadline = time.monotonic() + 8
++while (
++    publisher.get_subscription_count() == 0
++    or joint_state_publisher.get_subscription_count() == 0
++) and time.monotonic() < deadline:
++    rclpy.spin_once(node, timeout_sec=0.1)
++assert publisher.get_subscription_count() > 0, "ROS service did not subscribe to /tf_static"
++assert (
++    joint_state_publisher.get_subscription_count() > 0
++), "ROS service did not subscribe to /joint_states"
 +
-+sys.path.insert(0, "/opt/robotics-studio/generated")
-+import grpc
-+import ros_engine_pb2 as pb
-+import ros_engine_pb2_grpc as rpc
++transform = TransformStamped()
++transform.header.frame_id = "map"
++transform.child_frame_id = "integration_base"
++transform.transform.translation.x = 0.25
++transform.transform.rotation.w = 1.0
++publisher.publish(TFMessage(transforms=[transform]))
++joint_state = JointState()
++joint_state.name = ["integration_joint"]
++joint_state.position = [0.5]
++joint_state_publisher.publish(joint_state)
 +
-+root = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
-+token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
-+stub = rpc.RosEngineStub(
-+    grpc.secure_channel(
-+        "127.0.0.1:50051",
-+        grpc.ssl_channel_credentials(root_certificates=root),
++tf_verified = False
++graph_verified = False
++joint_state_verified = False
++for event in events:
++    event_type = event.WhichOneof("event")
++    if event_type == "tf_update":
++        assert event.tf_update.parent_frame == "map"
++        assert event.tf_update.child_frame == "integration_base"
++        assert event.tf_update.topic_name == "/tf_static"
++        assert abs(event.tf_update.x - 0.25) < 1e-9
++        tf_verified = True
++    elif event_type == "joint_state_update":
++        joint_state_verified = (
++            event.joint_state_update.topic_name == "/joint_states"
++            and event.joint_state_update.names == ["integration_joint"]
++            and list(event.joint_state_update.positions) == [0.5]
++        )
++    elif event_type == "ros_graph_snapshot":
++        graph = event.ros_graph_snapshot
++        tf_topic = next(
++            (topic for topic in graph.topics if topic.name == "/tf_static"),
++            None,
++        )
++        service_info = next(
++            (service for service in graph.services if service.name == "/integration/echo"),
++            None,
++        )
++        action_info = next(
++            (action for action in graph.actions if action.name == "/integration/fibonacci"),
++            None,
++        )
++        if tf_topic and service_info and action_info:
++            graph_verified = (
++                any(
++                endpoint.node_name == "robotics_studio_tf_integration"
++                and endpoint.reliability == "RELIABLE"
++                and endpoint.durability == "TRANSIENT_LOCAL"
++                for endpoint in tf_topic.publishers
++                )
++                and "/robotics_studio_tf_integration" in service_info.server_nodes
++                and "/robotics_studio_tf_integration" in service_info.client_nodes
++                and action_info.types
++                == ["action_tutorials_interfaces/action/Fibonacci"]
++                and "/robotics_studio_tf_integration" in action_info.server_nodes
++                and "/robotics_studio_tf_integration" in action_info.client_nodes
++            )
++    if tf_verified and graph_verified and joint_state_verified:
++        break
++else:
++    raise AssertionError(
++        "ROS service did not stream TF, joint-state, and graph details"
 +    )
-+)
-+events = stub.ReplayEvents(
-+    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
-+    metadata=(("x-robotics-studio-token", token),),
-+    timeout=5,
-+)
-+assert next(events).WhichOneof("event") == "event_recovery"
-+event = next(events)
-+assert event.WhichOneof("event") == "safety_state" and event.sequence > 0
++if not graph_verified:
++    raise AssertionError("ROS graph snapshot omitted the /tf_static publisher endpoint")
++if not joint_state_verified:
++    raise AssertionError("ROS service did not stream the joint-state update")
++
 +events.cancel()
-+print("Critical safety history survived a ROS service restart")
++node.destroy_node()
++rclpy.shutdown()
++print("Live ROS TF, joint-state, and graph endpoint discovery passed")
 +PY
 +
-+docker exec -d "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering /workspace/diff_drive.sdf >/tmp/gz.log 2>&1'
-+world_services=""
-+for attempt in $(seq 1 30); do
-+  if world_services="$(docker exec "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && gz service -l' 2>/dev/null)" &&
-+    printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
-+    break
-+  fi
-+  sleep 1
-+done
-+if ! printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
-+  docker exec "$container" cat /tmp/gz.log
-+  echo "Gazebo did not advertise /world/diff_drive/control" >&2
-+  exit 1
-+fi
-+world_control='/world/diff_drive/control'
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && gz topic -l' |
-+  grep -F '/model/vehicle_blue' >/dev/null
-+docker exec "$container" bash -c \
-+  'source /opt/ros/jazzy/setup.bash && gz service -s "$1" --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean --timeout 2000 --req "reset: {all: true}"' \
-+  robotics-studio-integration "$world_control"
-+
-+docker exec -d "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge /model/vehicle_blue/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist /model/vehicle_blue/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry /model/vehicle_blue/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V >/tmp/bridge.log 2>&1'
-+for attempt in $(seq 1 20); do
-+  if topics="$(docker exec "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && ros2 topic list' 2>/dev/null)" &&
-+    printf '%s\n' "$topics" | grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null; then
-+    break
-+  fi
-+  sleep 1
-+done
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && ros2 topic list' |
-+  grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null
-+docker exec "$container" bash -lc \
-+  "pkill -TERM -f '[g]z sim -s' || true; pkill -TERM -f '[p]arameter_bridge' || true"
-+
-+echo "Docker ROS 2 Jazzy and Gazebo Harmonic integration checks passed"
+ ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
+ ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
+   cargo test --manifest-path "$repo_root/src-tauri/Cargo.toml" --locked -- \
 diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
-index 2ff9ed2..0dbebe6 100644
+index 0dbebe6..6ceb3ad 100644
 --- a/src-tauri/Cargo.lock
 +++ b/src-tauri/Cargo.lock
-@@ -84,9 +84,9 @@ dependencies = [
- 
- [[package]]
- name = "async-executor"
--version = "1.14.0"
-+version = "1.14.1"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
-+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
- dependencies = [
-  "async-task",
-  "concurrent-queue",
-@@ -226,9 +226,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
- 
- [[package]]
- name = "aws-lc-rs"
--version = "1.17.3"
-+version = "1.19.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "00bdb5da18dac48ca2cc7cd4a98e533e8635a58e2361d13a1a4ee3888e0d72f1"
-+checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
- dependencies = [
-  "aws-lc-sys",
-  "zeroize",
-@@ -236,9 +236,9 @@ dependencies = [
- 
- [[package]]
- name = "aws-lc-sys"
--version = "0.43.0"
-+version = "0.47.0"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "43103168cc76fe62678a375e722fc9cb3a0146159ac5828bc4f0dfd755c2224c"
-+checksum = "8bfbe32ac36b3c428696ce315464181bc4029d689fd58e3f2a4e58c252242f52"
- dependencies = [
-  "cc",
-  "cmake",
-@@ -558,9 +558,9 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
- 
- [[package]]
- name = "chacha20"
--version = "0.10.1"
-+version = "0.10.2"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "d524456ba66e72eb8b115ff89e01e497f8e6d11d78b70b1aa13c0fbd97540a81"
-+checksum = "65c35e4b699c7e15ccbe7ee35c005e4fc0a278d22238a2857e6ce2dadeda1b06"
- dependencies = [
-  "cfg-if",
-  "cpufeatures 0.3.0",
-@@ -1091,16 +1091,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -1091,7 +1091,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
  dependencies = [
   "libc",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
- name = "event-listener"
--version = "5.4.1"
-+version = "5.4.2"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
-+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
- dependencies = [
-- "concurrent-queue",
-  "parking",
-  "pin-project-lite",
- ]
-@@ -1604,9 +1603,9 @@ dependencies = [
- 
- [[package]]
- name = "h2"
--version = "0.4.15"
-+version = "0.4.16"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "6cb093c84e8bd9b188d4c4a8cb6579fc016968d14c99882163cd3ff402a4f155"
-+checksum = "a9f37a958b41b3b19ee2707c06439c0e9e547e847223eb791ecb0cb821c65e27"
- dependencies = [
-  "atomic-waker",
-  "bytes",
-@@ -3149,9 +3148,9 @@ dependencies = [
- 
- [[package]]
- name = "pulldown-cmark"
--version = "0.13.4"
-+version = "0.13.6"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
- dependencies = [
-  "bitflags 2.13.1",
-  "memchr",
-@@ -3198,9 +3197,9 @@ dependencies = [
- 
- [[package]]
- name = "quinn-proto"
--version = "0.11.16"
-+version = "0.11.18"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
-+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
- dependencies = [
-  "aws-lc-rs",
-  "bytes",
-@@ -3230,7 +3229,7 @@ dependencies = [
+@@ -3229,7 +3229,7 @@ dependencies = [
   "once_cell",
   "socket2",
   "tracing",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
-@@ -3475,6 +3474,7 @@ dependencies = [
-  "prost",
-  "quick-xml",
-  "reqwest",
-+ "rustix",
-  "serde",
-  "serde_json",
-  "tauri",
-@@ -3513,17 +3513,19 @@ dependencies = [
+@@ -3505,15 +3505,15 @@ dependencies = [
+
+ [[package]]
+ name = "rustix"
+-version = "1.1.4"
++version = "1.1.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "b6fe4565b9518b83ef4f91bb47ce29620ca828bd32cb7e408f0062e9930ba190"
++checksum = "e5e76742e5294153d4dde1207dbec5bdd81eef6fabdc0d2118babadabfd858aa"
+ dependencies = [
+  "bitflags 2.13.1",
   "errno",
   "libc",
   "linux-raw-sys",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
- name = "rustls"
--version = "0.23.42"
-+version = "0.23.46"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
-+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
- dependencies = [
-  "aws-lc-rs",
-+ "log",
-  "once_cell",
-+ "ring",
-  "rustls-pki-types",
-  "rustls-webpki",
-  "subtle",
-@@ -3570,7 +3572,7 @@ dependencies = [
+@@ -3572,7 +3572,7 @@ dependencies = [
   "security-framework 3.7.0",
   "security-framework-sys",
   "webpki-root-certs",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
-@@ -3581,9 +3583,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
- 
- [[package]]
- name = "rustls-webpki"
--version = "0.103.13"
-+version = "0.103.16"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
-+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
- dependencies = [
-  "aws-lc-rs",
-  "ring",
-@@ -4552,10 +4554,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+@@ -4554,10 +4554,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
  dependencies = [
   "fastrand",
-- "getrandom 0.4.3",
-+ "getrandom 0.3.4",
+- "getrandom 0.3.4",
++ "getrandom 0.4.3",
   "once_cell",
   "rustix",
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
-@@ -4664,9 +4666,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
- 
- [[package]]
- name = "tokio"
--version = "1.53.1"
-+version = "1.53.3"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
-+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
- dependencies = [
-  "bytes",
-  "libc",
-@@ -4867,6 +4869,7 @@ dependencies = [
-  "socket2",
-  "sync_wrapper",
-  "tokio",
-+ "tokio-rustls",
-  "tokio-stream",
-  "tower",
-  "tower-layer",
-@@ -5364,9 +5367,9 @@ dependencies = [
- 
- [[package]]
- name = "webpki-root-certs"
--version = "1.0.9"
-+version = "1.0.10"
- source = "registry+https://github.com/rust-lang/crates.io-index"
--checksum = "b96554aa2acc8ccdb7e1c9a58a7a68dd5d13bccc69cd124cb09406db612a1c9b"
-+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
- dependencies = [
-  "rustls-pki-types",
- ]
-@@ -5429,7 +5432,7 @@ version = "0.1.11"
+@@ -5432,7 +5432,7 @@ version = "0.1.11"
  source = "registry+https://github.com/rust-lang/crates.io-index"
  checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
  dependencies = [
-- "windows-sys 0.61.2",
-+ "windows-sys 0.52.0",
+- "windows-sys 0.52.0",
++ "windows-sys 0.61.2",
  ]
- 
+
  [[package]]
 diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
-index 35640f5..e7ec03d 100644
+index e7ec03d..1e9b7db 100644
 --- a/src-tauri/Cargo.toml
 +++ b/src-tauri/Cargo.toml
-@@ -25,7 +25,7 @@ tauri-plugin-opener = "2"
- serde = { version = "1", features = ["derive"] }
- serde_json = "1"
- tauri-plugin-dialog = "2.7.2"
--tonic = "0.14.6"
-+tonic = { version = "0.14.6", features = ["tls-ring"] }
- prost = "0.14.4"
- quick-xml = "0.41.0"
- tokio = { version = "1.53.1", features = ["full"] }
-@@ -33,3 +33,6 @@ tonic-prost = "0.14.6"
- reqwest = { version = "0.13.4", features = ["json"] }
- getrandom = "0.3.4"
+@@ -35,4 +35,4 @@ getrandom = "0.3.4"
  keyring = { version = "3.6.3", default-features = false, features = ["apple-native", "windows-native", "linux-native-sync-persistent", "crypto-rust"] }
-+
-+[target.'cfg(unix)'.dependencies]
-+rustix = { version = "1.1.4", features = ["fs"] }
+
+ [target.'cfg(unix)'.dependencies]
+-rustix = { version = "1.1.4", features = ["fs"] }
++rustix = { version = "1.1.6", features = ["fs"] }
 diff --git a/src-tauri/proto/ros_engine.proto b/src-tauri/proto/ros_engine.proto
-index 38f6c35..02ad148 100644
+index 02ad148..b92cfca 100644
 --- a/src-tauri/proto/ros_engine.proto
 +++ b/src-tauri/proto/ros_engine.proto
-@@ -5,7 +5,13 @@ package rosengine;
- 
- service RosEngine {
-   rpc StreamEvents(Empty) returns (stream WorkspaceEvent);
-+  rpc ReplayEvents(ReplayEventsRequest) returns (stream WorkspaceEvent);
-   rpc PublishTwist(TwistCommand) returns (Empty);
-+  rpc SetEmergencyStop(EmergencyStopRequest) returns (SafetyState);
-+  rpc GetSafetyState(Empty) returns (SafetyState);
-+  rpc GetRobotConfig(RobotConfigRequest) returns (RobotConfig);
-+  rpc SetRobotConfig(RobotConfig) returns (RobotConfig);
-+  rpc GetEventHealth(Empty) returns (EventHealth);
- }
- 
- message TwistCommand {
-@@ -21,6 +27,62 @@ message TwistCommand {
- 
- message Empty {}
- 
-+message ReplayEventsRequest {
-+  bool has_after_sequence = 1;
-+  uint64 after_sequence = 2;
-+}
-+
-+message EmergencyStopRequest {
-+  enum Action {
-+    ACTION_UNSPECIFIED = 0;
-+    ACTIVATE = 1;
-+    RESET = 2;
-+  }
-+  Action action = 1;
-+}
-+
-+message SafetyState {
-+  enum State {
-+    READY = 0;
-+    ACTIVE = 1;
-+    RESET_PENDING = 2;
-+    FAULT = 3;
-+    DISCONNECTED = 4;
-+  }
-+  State state = 1;
-+  string detail = 2;
-+  int64 updated_at_ns = 3;
-+}
-+
-+message RobotConfigRequest {
-+  string topic_name = 1;
-+}
-+
-+message RobotConfig {
-+  string topic_name = 1;
-+  double max_linear_velocity = 2;
-+  double max_angular_velocity = 3;
-+  double max_linear_acceleration = 4;
-+  double max_angular_acceleration = 5;
-+  uint32 command_lease_ms = 6;
-+  uint32 command_timeout_ms = 7;
-+  repeated string permitted_motion_modes = 8;
-+  bool reset_to_defaults = 9;
-+}
-+
-+message EventHealth {
-+  uint32 queue_capacity = 1;
-+  uint32 subscriber_count = 2;
-+  uint64 last_sequence = 3;
-+  uint64 dropped_telemetry = 4;
-+  uint64 critical_overflows = 5;
-+  uint32 max_backlog = 6;
-+  bool persistence_healthy = 7;
-+  string persistence_error = 8;
-+  uint64 oldest_available_sequence = 9;
-+  uint32 retained_critical_events = 10;
-+}
-+
- message WorkspaceEvent {
-   oneof event {
-     NodeStarted node_started = 1;
-@@ -29,8 +91,20 @@ message WorkspaceEvent {
-     OdometryUpdate odometry_update = 4;
-     TFUpdate tf_update = 5;
-     NodeSnapshot node_snapshot = 6;
-+    SafetyState safety_state = 7;
-+    EventHealth event_health = 8;
-+    EventRecovery event_recovery = 9;
+@@ -94,11 +94,64 @@ message WorkspaceEvent {
+     SafetyState safety_state = 7;
+     EventHealth event_health = 8;
+     EventRecovery event_recovery = 9;
++    RosGraphSnapshot ros_graph_snapshot = 12;
++    JointStateUpdate joint_state_update = 13;
    }
    int64 timestamp_ns = 10;
-+  uint64 sequence = 11;
+   uint64 sequence = 11;
+ }
+
++message JointStateUpdate {
++  string topic_name = 1;
++  repeated string names = 2;
++  repeated double positions = 3;
++  bool truncated = 4;
 +}
 +
-+message EventRecovery {
-+  bool gap_detected = 1;
-+  uint64 oldest_available_sequence = 2;
-+  uint64 latest_sequence = 3;
-+  bool snapshot_included = 4;
-+  uint32 retained_critical_events = 5;
++message RosGraphSnapshot {
++  repeated GraphNode nodes = 1;
++  repeated GraphTopic topics = 2;
++  repeated GraphService services = 3;
++  repeated GraphAction actions = 4;
++  bool truncated = 5;
++}
++
++message GraphNode {
++  string name = 1;
++  string namespace = 2;
++}
++
++message GraphEndpoint {
++  string node_name = 1;
++  string node_namespace = 2;
++  string topic_type = 3;
++  string reliability = 4;
++  string durability = 5;
++  string history = 6;
++  uint32 depth = 7;
++}
++
++message GraphTopic {
++  string name = 1;
++  repeated string types = 2;
++  repeated GraphEndpoint publishers = 3;
++  repeated GraphEndpoint subscribers = 4;
++}
++
++message GraphService {
++  string name = 1;
++  repeated string types = 2;
++  repeated string server_nodes = 3;
++  repeated string client_nodes = 4;
++}
++
++message GraphAction {
++  string name = 1;
++  repeated string types = 2;
++  repeated string server_nodes = 3;
++  repeated string client_nodes = 4;
++}
++
+ message EventRecovery {
+   bool gap_detected = 1;
+   uint64 oldest_available_sequence = 2;
+@@ -121,6 +174,7 @@ message TFUpdate {
+   double qy = 7;
+   double qz = 8;
+   double qw = 9;
++  string topic_name = 10;
  }
- 
- message NodeSnapshot {
+
+ message NodeStarted {
 diff --git a/src-tauri/resources/devcontainer/proto/ros_engine.proto b/src-tauri/resources/devcontainer/proto/ros_engine.proto
-index 38f6c35..02ad148 100644
+index 02ad148..b92cfca 100644
 --- a/src-tauri/resources/devcontainer/proto/ros_engine.proto
 +++ b/src-tauri/resources/devcontainer/proto/ros_engine.proto
-@@ -5,7 +5,13 @@ package rosengine;
- 
- service RosEngine {
-   rpc StreamEvents(Empty) returns (stream WorkspaceEvent);
-+  rpc ReplayEvents(ReplayEventsRequest) returns (stream WorkspaceEvent);
-   rpc PublishTwist(TwistCommand) returns (Empty);
-+  rpc SetEmergencyStop(EmergencyStopRequest) returns (SafetyState);
-+  rpc GetSafetyState(Empty) returns (SafetyState);
-+  rpc GetRobotConfig(RobotConfigRequest) returns (RobotConfig);
-+  rpc SetRobotConfig(RobotConfig) returns (RobotConfig);
-+  rpc GetEventHealth(Empty) returns (EventHealth);
- }
- 
- message TwistCommand {
-@@ -21,6 +27,62 @@ message TwistCommand {
- 
- message Empty {}
- 
-+message ReplayEventsRequest {
-+  bool has_after_sequence = 1;
-+  uint64 after_sequence = 2;
-+}
-+
-+message EmergencyStopRequest {
-+  enum Action {
-+    ACTION_UNSPECIFIED = 0;
-+    ACTIVATE = 1;
-+    RESET = 2;
-+  }
-+  Action action = 1;
-+}
-+
-+message SafetyState {
-+  enum State {
-+    READY = 0;
-+    ACTIVE = 1;
-+    RESET_PENDING = 2;
-+    FAULT = 3;
-+    DISCONNECTED = 4;
-+  }
-+  State state = 1;
-+  string detail = 2;
-+  int64 updated_at_ns = 3;
-+}
-+
-+message RobotConfigRequest {
-+  string topic_name = 1;
-+}
-+
-+message RobotConfig {
-+  string topic_name = 1;
-+  double max_linear_velocity = 2;
-+  double max_angular_velocity = 3;
-+  double max_linear_acceleration = 4;
-+  double max_angular_acceleration = 5;
-+  uint32 command_lease_ms = 6;
-+  uint32 command_timeout_ms = 7;
-+  repeated string permitted_motion_modes = 8;
-+  bool reset_to_defaults = 9;
-+}
-+
-+message EventHealth {
-+  uint32 queue_capacity = 1;
-+  uint32 subscriber_count = 2;
-+  uint64 last_sequence = 3;
-+  uint64 dropped_telemetry = 4;
-+  uint64 critical_overflows = 5;
-+  uint32 max_backlog = 6;
-+  bool persistence_healthy = 7;
-+  string persistence_error = 8;
-+  uint64 oldest_available_sequence = 9;
-+  uint32 retained_critical_events = 10;
-+}
-+
- message WorkspaceEvent {
-   oneof event {
-     NodeStarted node_started = 1;
-@@ -29,8 +91,20 @@ message WorkspaceEvent {
-     OdometryUpdate odometry_update = 4;
-     TFUpdate tf_update = 5;
-     NodeSnapshot node_snapshot = 6;
-+    SafetyState safety_state = 7;
-+    EventHealth event_health = 8;
-+    EventRecovery event_recovery = 9;
+@@ -94,11 +94,64 @@ message WorkspaceEvent {
+     SafetyState safety_state = 7;
+     EventHealth event_health = 8;
+     EventRecovery event_recovery = 9;
++    RosGraphSnapshot ros_graph_snapshot = 12;
++    JointStateUpdate joint_state_update = 13;
    }
    int64 timestamp_ns = 10;
-+  uint64 sequence = 11;
+   uint64 sequence = 11;
+ }
+
++message JointStateUpdate {
++  string topic_name = 1;
++  repeated string names = 2;
++  repeated double positions = 3;
++  bool truncated = 4;
 +}
 +
-+message EventRecovery {
-+  bool gap_detected = 1;
-+  uint64 oldest_available_sequence = 2;
-+  uint64 latest_sequence = 3;
-+  bool snapshot_included = 4;
-+  uint32 retained_critical_events = 5;
++message RosGraphSnapshot {
++  repeated GraphNode nodes = 1;
++  repeated GraphTopic topics = 2;
++  repeated GraphService services = 3;
++  repeated GraphAction actions = 4;
++  bool truncated = 5;
++}
++
++message GraphNode {
++  string name = 1;
++  string namespace = 2;
++}
++
++message GraphEndpoint {
++  string node_name = 1;
++  string node_namespace = 2;
++  string topic_type = 3;
++  string reliability = 4;
++  string durability = 5;
++  string history = 6;
++  uint32 depth = 7;
++}
++
++message GraphTopic {
++  string name = 1;
++  repeated string types = 2;
++  repeated GraphEndpoint publishers = 3;
++  repeated GraphEndpoint subscribers = 4;
++}
++
++message GraphService {
++  string name = 1;
++  repeated string types = 2;
++  repeated string server_nodes = 3;
++  repeated string client_nodes = 4;
++}
++
++message GraphAction {
++  string name = 1;
++  repeated string types = 2;
++  repeated string server_nodes = 3;
++  repeated string client_nodes = 4;
++}
++
+ message EventRecovery {
+   bool gap_detected = 1;
+   uint64 oldest_available_sequence = 2;
+@@ -121,6 +174,7 @@ message TFUpdate {
+   double qy = 7;
+   double qz = 8;
+   double qw = 9;
++  string topic_name = 10;
  }
- 
- message NodeSnapshot {
+
+ message NodeStarted {
 diff --git a/src-tauri/resources/devcontainer/server.py b/src-tauri/resources/devcontainer/server.py
-index 85abdf0..68cbdbb 100644
+index 68cbdbb..44521b7 100644
 --- a/src-tauri/resources/devcontainer/server.py
 +++ b/src-tauri/resources/devcontainer/server.py
-@@ -13,7 +13,13 @@ from rclpy.node import Node
+@@ -9,6 +9,7 @@ from concurrent import futures
+
+ import rclpy
+ from rclpy.node import Node
++from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+
  AUTH_PROTOCOL_VERSION = 1
- 
- import sys
--sys.path.append('generated')
-+sys.path.insert(
-+    0,
-+    os.environ.get(
-+        "ROBOTICS_STUDIO_GENERATED_PATH",
-+        "/opt/robotics-studio/generated",
-+    ),
-+)
- import ros_engine_pb2
- import ros_engine_pb2_grpc
- from tf2_msgs.msg import TFMessage
-@@ -22,7 +28,12 @@ from nav_msgs.msg import Odometry
+
+@@ -26,6 +27,7 @@ from tf2_msgs.msg import TFMessage
+
+ from nav_msgs.msg import Odometry
  from geometry_msgs.msg import Twist
++from sensor_msgs.msg import JointState
  from server_core import (
      CommandLeaseManager,
-+    EventPersistenceError,
-+    EventOverflow,
-     EventHub,
-+    RobotConfigRegistry,
-+    RobotMotionConfig,
-+    SafetyController,
+     EventPersistenceError,
+@@ -36,10 +38,22 @@ from server_core import (
+     SafetyController,
      is_valid_auth_token,
      load_auth_credentials,
++    action_from_send_goal_service,
      validate_twist_request,
-@@ -38,12 +49,59 @@ class RosIntrospector(Node):
-         self.odom_subscribers = {}
-         self.timer = self.create_timer(2.0, self.tick)
-         self.twist_publishers = {}
-+        self._command_lock = threading.RLock()
-         self.command_leases = CommandLeaseManager()
-+        self.robot_configs = RobotConfigRegistry(
-+            os.environ.get(
-+                "ROBOTICS_STUDIO_ROBOT_CONFIG",
-+                "/workspace/.robotics-studio/robot-config.json",
-+            )
-+        )
-+        self.safety = SafetyController(
-+            self._publish_stop_to_all,
-+            os.environ.get(
-+                "ROBOTICS_STUDIO_SAFETY_STATE",
-+                "/workspace/.robotics-studio/safety-state.json",
-+            ),
-+        )
-+        self._startup_stop_pending = self.safety.snapshot()[0] != "READY"
-         self.command_timeout_timer = self.create_timer(
+ )
+
+ LOGGER = logging.getLogger("ros_engine")
++MAX_GRAPH_NODES = 256
++MAX_GRAPH_TOPICS = 512
++MAX_GRAPH_SERVICES = 512
++MAX_GRAPH_ACTIONS = 128
++MAX_GRAPH_ENDPOINTS = 2048
++MAX_JOINT_STATE_ENTRIES = 512
++
++
++def _qos_policy_name(value):
++    return getattr(value, "name", str(value).rsplit(".", 1)[-1])
++
+
+ class RosIntrospector(Node):
+     def __init__(self, event_hub: EventHub):
+@@ -69,6 +83,7 @@ class RosIntrospector(Node):
              0.1, self.stop_expired_commands
          )
          self.tf_subscribers = {}
- 
-+    def _publish_stop_to_all(self):
-+        with self._command_lock:
-+            stop_topics = set(self.twist_publishers)
-+            failures = []
-+            try:
-+                stop_topics.update(
-+                    topic_name
-+                    for topic_name, types in self.get_topic_names_and_types()
-+                    if topic_name.endswith("/cmd_vel")
-+                    and "geometry_msgs/msg/Twist" in types
-+                )
-+            except Exception:
-+                LOGGER.exception("Could not discover every cmd_vel topic during stop")
-+                failures.append("topic discovery")
-+            for topic_name in stop_topics:
-+                try:
-+                    publisher = self.twist_publishers.get(topic_name)
-+                    if publisher is None:
-+                        publisher = self.create_publisher(Twist, topic_name, 10)
-+                        self.twist_publishers[topic_name] = publisher
-+                    publisher.publish(Twist())
-+                    self.robot_configs.reset_command(topic_name)
-+                except Exception:
-+                    LOGGER.exception("Failed to publish stop command on %s", topic_name)
-+                    failures.append(topic_name)
-+            self.command_leases.clear_all()
-+            self.robot_configs.reset_all_commands()
-+            if failures:
-+                raise RuntimeError(
-+                    f"Could not publish stop commands on {len(failures)} topic(s)"
-+                )
-+
-     def odom_callback(self, msg, topic_name):
-         evt = ros_engine_pb2.WorkspaceEvent(
-             odometry_update=ros_engine_pb2.OdometryUpdate(
-@@ -89,6 +147,22 @@ class RosIntrospector(Node):
-     def tick(self):
-         try:
-             self._tick_impl()
-+        except EventPersistenceError:
-+            LOGGER.exception("Could not persist a critical ROS event")
-+            health = self.event_hub.health()
-+            health_event = ros_engine_pb2.WorkspaceEvent(
-+                event_health=ros_engine_pb2.EventHealth(**health),
-+                timestamp_ns=time.time_ns(),
-+            )
-+            try:
-+                self.event_hub.publish(
-+                    health_event,
-+                    priority="telemetry",
-+                    key="event_health",
-+                    snapshot=True,
-+                )
-+            except Exception:
-+                LOGGER.exception("Could not publish event persistence health")
-         except Exception as e:
-             self.get_logger().error(f"tick() failed, skipping this cycle: {e}")
- 
-@@ -114,6 +188,10 @@ class RosIntrospector(Node):
-         self.known_nodes = nodes
- 
-         topics = self.get_topic_names_and_types()
-+        if self._startup_stop_pending:
-+            if self.safety.snapshot()[0] != "READY":
-+                self.safety.enforce_latched_stop()
-+            self._startup_stop_pending = False
- 
-         # Clean up subscription tracking for topics that no longer exist,
-         # so they can be freshly re-subscribed if they reappear later
-@@ -168,25 +246,55 @@ class RosIntrospector(Node):
-             key="node_snapshot",
-             snapshot=True,
-         )
-+        health = self.event_hub.health()
-+        health_event = ros_engine_pb2.WorkspaceEvent(
-+            event_health=ros_engine_pb2.EventHealth(**health),
-+            timestamp_ns=time.time_ns(),
-+        )
-+        self.event_hub.publish(
-+            health_event,
-+            priority="telemetry",
-+            key="event_health",
-+            snapshot=True,
-+        )
- 
--    def publish_twist(self, topic_name, linear_x, linear_y=0.0, linear_z=0.0, angular_x=0.0, angular_y=0.0, angular_z=0.0):
--        if topic_name not in self.twist_publishers:
--            self.twist_publishers[topic_name] = self.create_publisher(Twist, topic_name, 10)
--        msg = Twist()
--        msg.linear.x = linear_x
--        msg.linear.y = linear_y
--        msg.linear.z = linear_z
--        msg.angular.x = angular_x
--        msg.angular.y = angular_y
--        msg.angular.z = angular_z
--        self.twist_publishers[topic_name].publish(msg)
--        self.command_leases.refresh(topic_name)
-+    def publish_twist(self, request):
-+        def publish():
-+            config = validate_twist_request(
-+                request,
-+                config_registry=self.robot_configs,
-+                record=False,
-+            )
-+            with self._command_lock:
-+                if request.topic_name not in self.twist_publishers:
-+                    self.twist_publishers[request.topic_name] = self.create_publisher(
-+                        Twist, request.topic_name, 10
-+                    )
-+                publisher = self.twist_publishers[request.topic_name]
-+                msg = Twist()
-+                msg.linear.x = request.linear_x
-+                msg.linear.y = request.linear_y
-+                msg.linear.z = request.linear_z
-+                msg.angular.x = request.angular_x
-+                msg.angular.y = request.angular_y
-+                msg.angular.z = request.angular_z
-+                publisher.publish(msg)
-+                self.robot_configs.record_command(request)
-+            return config
-+
-+        config = self.safety.run_if_motion_permitted(publish)
-+        self.command_leases.refresh(
-+            request.topic_name,
-+            timeout_seconds=config.command_lease_ms / 1000.0,
-+        )
- 
-     def stop_expired_commands(self):
--        for topic_name in self.command_leases.take_expired():
--            publisher = self.twist_publishers.get(topic_name)
--            if publisher is not None:
--                publisher.publish(Twist())
-+        with self._command_lock:
-+            for topic_name in self.command_leases.take_expired():
-+                publisher = self.twist_publishers.get(topic_name)
-+                if publisher is not None:
-+                    publisher.publish(Twist())
-+                    self.robot_configs.reset_command(topic_name)
- 
- class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-     def __init__(self, event_hub: EventHub, ros_node, auth_token, auth_expires_at):
-@@ -209,16 +317,7 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-     def PublishTwist(self, request, context):
-         self._require_authentication(context)
-         try:
--            validate_twist_request(request)
--            self.ros_node.publish_twist(
--                request.topic_name,
--                request.linear_x,
--                request.linear_y,
--                request.linear_z,
--                request.angular_x,
--                request.angular_y,
--                request.angular_z,
--            )
-+            self.ros_node.publish_twist(request)
-         except ValueError as error:
-             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-         except Exception as error:
-@@ -226,12 +325,144 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-             context.abort(grpc.StatusCode.INTERNAL, "Failed to publish Twist command")
-         return ros_engine_pb2.Empty()
- 
-+    def _safety_state_message(self):
-+        state, detail, updated_at_ns = self.ros_node.safety.snapshot()
-+        state_value = getattr(ros_engine_pb2.SafetyState, state)
-+        return ros_engine_pb2.SafetyState(
-+            state=state_value,
-+            detail=detail,
-+            updated_at_ns=updated_at_ns,
-+        )
-+
-+    def _publish_safety_state(self):
++        self.joint_state_subscribers = {}
+
+     def _publish_stop_to_all(self):
+         with self._command_lock:
+@@ -135,6 +150,7 @@ class RosIntrospector(Node):
+                     qy=transform.transform.rotation.y,
+                     qz=transform.transform.rotation.z,
+                     qw=transform.transform.rotation.w,
++                    topic_name=topic_name,
+                 ),
+                 timestamp_ns=time.time_ns()
+             )
+@@ -144,6 +160,27 @@ class RosIntrospector(Node):
+                 key=("tf", transform.child_frame_id),
+             )
+
++    def joint_state_callback(self, msg, topic_name):
++        names = list(msg.name[:MAX_JOINT_STATE_ENTRIES])
++        positions = list(msg.position[:MAX_JOINT_STATE_ENTRIES])
 +        event = ros_engine_pb2.WorkspaceEvent(
-+            safety_state=self._safety_state_message(),
++            joint_state_update=ros_engine_pb2.JointStateUpdate(
++                topic_name=topic_name,
++                names=names,
++                positions=positions,
++                truncated=(
++                    len(msg.name) > MAX_JOINT_STATE_ENTRIES
++                    or len(msg.position) > MAX_JOINT_STATE_ENTRIES
++                ),
++            ),
 +            timestamp_ns=time.time_ns(),
 +        )
 +        self.event_hub.publish(
 +            event,
-+            key="safety_state",
-+            snapshot=True,
-+            durable=True,
-+        )
-+        return event.safety_state
-+
-+    def SetEmergencyStop(self, request, context):
-+        self._require_authentication(context)
-+        try:
-+            if request.action == ros_engine_pb2.EmergencyStopRequest.ACTIVATE:
-+                self.ros_node.safety.activate()
-+            elif request.action == ros_engine_pb2.EmergencyStopRequest.RESET:
-+                self.ros_node.safety.reset()
-+            else:
-+                context.abort(
-+                    grpc.StatusCode.INVALID_ARGUMENT,
-+                    "Emergency-stop action must be ACTIVATE or RESET",
-+                )
-+            return self._publish_safety_state()
-+        except EventPersistenceError as error:
-+            LOGGER.error("Emergency-stop transition could not be durably reported: %s", error)
-+            try:
-+                self.ros_node.safety.latch_fault(
-+                    "Emergency-stop state could not be written to durable event history"
-+                )
-+            except Exception:
-+                LOGGER.exception("Could not persist fail-closed emergency-stop state")
-+            context.abort(
-+                grpc.StatusCode.INTERNAL,
-+                "Emergency-stop event history failed; motion has been fault-latched",
-+            )
-+        except ValueError as error:
-+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
-+        except Exception:
-+            LOGGER.exception("Emergency-stop transition failed")
-+            try:
-+                self._publish_safety_state()
-+            except EventPersistenceError:
-+                LOGGER.exception("Emergency-stop state could not be durably reported")
-+                try:
-+                    self.ros_node.safety.latch_fault(
-+                        "Emergency-stop state could not be written to durable event history"
-+                    )
-+                except Exception:
-+                    LOGGER.exception("Could not persist fail-closed emergency-stop state")
-+            context.abort(
-+                grpc.StatusCode.INTERNAL,
-+                "Emergency-stop transition failed; inspect safety state",
-+            )
-+
-+    def GetSafetyState(self, request, context):
-+        self._require_authentication(context)
-+        return self._safety_state_message()
-+
-+    def GetEventHealth(self, request, context):
-+        self._require_authentication(context)
-+        return ros_engine_pb2.EventHealth(**self.event_hub.health())
-+
-+    @staticmethod
-+    def _config_message(config):
-+        return ros_engine_pb2.RobotConfig(
-+            topic_name=config.topic_name,
-+            max_linear_velocity=config.max_linear_velocity,
-+            max_angular_velocity=config.max_angular_velocity,
-+            max_linear_acceleration=config.max_linear_acceleration,
-+            max_angular_acceleration=config.max_angular_acceleration,
-+            command_lease_ms=config.command_lease_ms,
-+            command_timeout_ms=config.command_timeout_ms,
-+            permitted_motion_modes=list(config.permitted_motion_modes),
++            priority="telemetry",
++            key=("joint_state", topic_name),
 +        )
 +
-+    def GetRobotConfig(self, request, context):
-+        self._require_authentication(context)
-+        try:
-+            config = self.ros_node.robot_configs.get(request.topic_name)
-+            return self._config_message(config)
-+        except ValueError as error:
-+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-+
-+    def SetRobotConfig(self, request, context):
-+        self._require_authentication(context)
-+        try:
-+            if request.reset_to_defaults:
-+                config = self.ros_node.robot_configs.reset(request.topic_name)
-+            else:
-+                config = RobotMotionConfig(
-+                    topic_name=request.topic_name,
-+                    max_linear_velocity=request.max_linear_velocity,
-+                    max_angular_velocity=request.max_angular_velocity,
-+                    max_linear_acceleration=request.max_linear_acceleration,
-+                    max_angular_acceleration=request.max_angular_acceleration,
-+                    command_lease_ms=request.command_lease_ms,
-+                    command_timeout_ms=request.command_timeout_ms,
-+                    permitted_motion_modes=tuple(request.permitted_motion_modes),
-+                )
-+                self.ros_node.robot_configs.set(config)
-+            return self._config_message(config)
-+        except ValueError as error:
-+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
-+
-     def StreamEvents(self, request, context):
-         provided = self._require_authentication(context)
-         subscriber = self.event_hub.subscribe()
--        LOGGER.info("ROS event stream opened")
+     def tick(self):
          try:
--            while context.is_active():
-+            yield from self._stream_subscriber(subscriber, provided, context)
-+        finally:
-+            self.event_hub.unsubscribe(subscriber)
-+
-+    def ReplayEvents(self, request, context):
-+        provided = self._require_authentication(context)
-+        after_sequence = request.after_sequence if request.has_after_sequence else None
-+        subscriber, recovery, initial_events = self.event_hub.subscribe_with_replay(
-+            after_sequence
+             self._tick_impl()
+@@ -204,6 +241,12 @@ class RosIntrospector(Node):
+         for name in stale_tf:
+             del self.tf_subscribers[name]
+
++        stale_joint_state = (
++            set(self.joint_state_subscribers.keys()) - current_topic_names
 +        )
-+        try:
-+            yield ros_engine_pb2.WorkspaceEvent(
-+                event_recovery=ros_engine_pb2.EventRecovery(**recovery),
-+                timestamp_ns=time.time_ns(),
-+            )
-+            for event in initial_events:
-+                if not context.is_active():
-+                    return
-                 if not is_valid_auth_token(
-                     provided,
-                     self.auth_token,
-@@ -241,13 +472,33 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
-                         grpc.StatusCode.UNAUTHENTICATED,
-                         "The Robotics Studio session token has expired",
-                     )
--                try:
--                    yield subscriber.get(timeout=1.0)
--                except queue.Empty:
--                    continue
-+                yield event
-+            yield from self._stream_subscriber(subscriber, provided, context)
-         finally:
-             self.event_hub.unsubscribe(subscriber)
--            LOGGER.info("ROS event stream closed")
++        for name in stale_joint_state:
++            del self.joint_state_subscribers[name]
 +
-+    def _stream_subscriber(self, subscriber, provided, context):
-+        LOGGER.info("ROS event stream opened")
-+        while context.is_active():
-+            if not is_valid_auth_token(
-+                provided,
-+                self.auth_token,
-+                self.auth_expires_at,
+         for name, types in topics:
+             if 'nav_msgs/msg/Odometry' in types and name not in self.odom_subscribers:
+                 sub = self.create_subscription(
+@@ -216,14 +259,37 @@ class RosIntrospector(Node):
+
+         for name, types in topics:
+             if 'tf2_msgs/msg/TFMessage' in types and name not in self.tf_subscribers:
++                qos = (
++                    QoSProfile(
++                        depth=100,
++                        reliability=ReliabilityPolicy.RELIABLE,
++                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
++                    )
++                    if name.endswith("/tf_static")
++                    else 10
++                )
+                 sub = self.create_subscription(
+                     TFMessage, name,
+                     lambda msg, n=name: self.tf_callback(msg, n),
+-                    10
++                    qos
+                 )
+                 self.tf_subscribers[name] = sub
+                 self.get_logger().info(f'Subscribed to TF topic: {name}')
+
++        for name, types in topics:
++            if (
++                "sensor_msgs/msg/JointState" in types
++                and name not in self.joint_state_subscribers
 +            ):
-+                context.abort(
-+                    grpc.StatusCode.UNAUTHENTICATED,
-+                    "The Robotics Studio session token has expired",
++                subscription = self.create_subscription(
++                    JointState,
++                    name,
++                    lambda msg, topic=name: self.joint_state_callback(msg, topic),
++                    10,
 +                )
-+            try:
-+                yield subscriber.get(timeout=1.0)
-+            except EventOverflow:
-+                context.abort(
-+                    grpc.StatusCode.RESOURCE_EXHAUSTED,
-+                    "Critical events overflowed; reconnect to resynchronize from snapshots",
-+                )
-+            except queue.Empty:
-+                continue
-+        LOGGER.info("ROS event stream closed")
- 
- 
- def ros_spin_thread(node):
-@@ -265,17 +516,58 @@ def main():
-     )
-     auth_token, auth_expires_at = load_auth_credentials(credential_path)
-     rclpy.init()
--    event_hub = EventHub()
-+    queue_capacity = int(os.environ.get("ROBOTICS_STUDIO_EVENT_QUEUE_CAPACITY", "256"))
-+    if not 16 <= queue_capacity <= 100_000:
-+        raise ValueError("ROBOTICS_STUDIO_EVENT_QUEUE_CAPACITY must be between 16 and 100000")
-+    history_path = os.environ.get(
-+        "ROBOTICS_STUDIO_EVENT_HISTORY",
-+        "/workspace/.robotics-studio/event-history.json",
-+    )
-+    event_hub = EventHub(
-+        max_queue_size=queue_capacity,
-+        history_path=history_path,
-+        event_encoder=lambda event: event.SerializeToString(),
-+        event_decoder=ros_engine_pb2.WorkspaceEvent.FromString,
-+    )
-     node = RosIntrospector(event_hub)
- 
-     spin_thread = threading.Thread(target=ros_spin_thread, args=(node,), daemon=True)
-     spin_thread.start()
--
--    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
-+    try:
-+        node.safety.enforce_latched_stop()
-+    except RuntimeError:
-+        LOGGER.exception("Emergency stop could not be reasserted during startup")
++                self.joint_state_subscribers[name] = subscription
++                self.get_logger().info(f"Subscribed to joint state topic: {name}")
 +
-+    grpc_workers = int(os.environ.get("ROBOTICS_STUDIO_GRPC_WORKERS", "16"))
-+    if not 4 <= grpc_workers <= 128:
-+        raise ValueError("ROBOTICS_STUDIO_GRPC_WORKERS must be between 4 and 128")
-+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=grpc_workers))
-+    servicer = RosEngineServicer(
-+        event_hub, node, auth_token, auth_expires_at
-+    )
-+    servicer._publish_safety_state()
-     ros_engine_pb2_grpc.add_RosEngineServicer_to_server(
--        RosEngineServicer(event_hub, node, auth_token, auth_expires_at), server
-+        servicer, server
-     )
--    server.add_insecure_port('[::]:50051')
-+    with open(
-+        os.environ.get(
-+            "ROBOTICS_STUDIO_TLS_CERTIFICATE",
-+            "/run/robotics-studio/grpc-server.crt",
-+        ),
-+        "rb",
-+    ) as certificate_file:
-+        certificate = certificate_file.read()
-+    with open(
-+        os.environ.get(
-+            "ROBOTICS_STUDIO_TLS_PRIVATE_KEY",
-+            "/run/robotics-studio/grpc-server.key",
-+        ),
-+        "rb",
-+    ) as key_file:
-+        private_key = key_file.read()
-+    credentials = grpc.ssl_server_credentials(((private_key, certificate),))
-+    if server.add_secure_port("[::]:50051", credentials) != 50051:
-+        raise RuntimeError("Could not bind the authenticated TLS gRPC server")
-     server.start()
-     LOGGER.info("RosEngine gRPC server running on port 50051")
- 
+         topic_msgs = [
+             ros_engine_pb2.Topic(name=n, types=list(t)) for n, t in topics
+         ]
+@@ -257,6 +323,139 @@ class RosIntrospector(Node):
+             key="event_health",
+             snapshot=True,
+         )
++        self.publish_graph_snapshot(topics)
++
++    def publish_graph_snapshot(self, topics):
++        graph = ros_engine_pb2.RosGraphSnapshot()
++        truncated = False
++
++        node_entries = sorted(self.get_node_names_and_namespaces())
++        if len(node_entries) > MAX_GRAPH_NODES:
++            truncated = True
++        node_entries = node_entries[:MAX_GRAPH_NODES]
++        graph.nodes.extend(
++            ros_engine_pb2.GraphNode(name=name, namespace=namespace)
++            for name, namespace in node_entries
++        )
++
++        service_roles = {}
++        for node_name, node_namespace in node_entries:
++            node_id = f"{node_namespace.rstrip('/')}/{node_name}"
++            for service_name, _ in self.get_service_names_and_types_by_node(
++                node_name, node_namespace
++            ):
++                service_roles.setdefault(service_name, {"servers": [], "clients": []})[
++                    "servers"
++                ].append(node_id)
++            for service_name, _ in self.get_client_names_and_types_by_node(
++                node_name, node_namespace
++            ):
++                service_roles.setdefault(service_name, {"servers": [], "clients": []})[
++                    "clients"
++                ].append(node_id)
++
++        endpoint_count = 0
++        topic_entries = sorted(topics)
++        if len(topic_entries) > MAX_GRAPH_TOPICS:
++            truncated = True
++        for topic_name, types in topic_entries[:MAX_GRAPH_TOPICS]:
++            topic = ros_engine_pb2.GraphTopic(name=topic_name, types=sorted(types))
++            for field, query in (
++                ("publishers", self.get_publishers_info_by_topic),
++                ("subscribers", self.get_subscriptions_info_by_topic),
++            ):
++                remaining = MAX_GRAPH_ENDPOINTS - endpoint_count
++                if remaining <= 0:
++                    truncated = True
++                    break
++                endpoints = sorted(
++                    query(topic_name),
++                    key=lambda endpoint: (
++                        endpoint.node_namespace,
++                        endpoint.node_name,
++                        endpoint.topic_type,
++                    ),
++                )
++                if len(endpoints) > remaining:
++                    truncated = True
++                selected = endpoints[:remaining]
++                endpoint_count += len(selected)
++                getattr(topic, field).extend(
++                    ros_engine_pb2.GraphEndpoint(
++                        node_name=endpoint.node_name,
++                        node_namespace=endpoint.node_namespace,
++                        topic_type=endpoint.topic_type,
++                        reliability=_qos_policy_name(
++                            endpoint.qos_profile.reliability
++                        ),
++                        durability=_qos_policy_name(
++                            endpoint.qos_profile.durability
++                        ),
++                        history=_qos_policy_name(endpoint.qos_profile.history),
++                        depth=endpoint.qos_profile.depth,
++                    )
++                    for endpoint in selected
++                )
++            graph.topics.append(topic)
++
++        service_entries = sorted(self.get_service_names_and_types())
++        if len(service_entries) > MAX_GRAPH_SERVICES:
++            truncated = True
++        action_services = {}
++        for service_name, types in service_entries:
++            role = service_roles.get(service_name, {"servers": [], "clients": []})
++            action_info = None
++            for service_type in types:
++                action_info = action_from_send_goal_service(
++                    service_name, service_type
++                )
++                if action_info:
++                    break
++            if action_info:
++                action_name, action_type = action_info
++                action = action_services.setdefault(
++                    action_name,
++                    {"types": set(), "servers": set(), "clients": set()},
++                )
++                action["types"].add(action_type)
++                action["servers"].update(role["servers"])
++                action["clients"].update(role["clients"])
++                continue
++            if "/_action/" in service_name:
++                continue
++            graph.services.append(
++                ros_engine_pb2.GraphService(
++                    name=service_name,
++                    types=sorted(types),
++                    server_nodes=sorted(set(role["servers"])),
++                    client_nodes=sorted(set(role["clients"])),
++                )
++            )
++
++        if len(action_services) > MAX_GRAPH_ACTIONS:
++            truncated = True
++        for action_name, action in sorted(action_services.items())[
++            :MAX_GRAPH_ACTIONS
++        ]:
++            graph.actions.append(
++                ros_engine_pb2.GraphAction(
++                    name=action_name,
++                    types=sorted(action["types"]),
++                    server_nodes=sorted(action["servers"]),
++                    client_nodes=sorted(action["clients"]),
++                )
++            )
++
++        graph.truncated = truncated
++        self.event_hub.publish(
++            ros_engine_pb2.WorkspaceEvent(
++                ros_graph_snapshot=graph,
++                timestamp_ns=time.time_ns(),
++            ),
++            priority="telemetry",
++            key="ros_graph_snapshot",
++            snapshot=True,
++        )
+
+     def publish_twist(self, request):
+         def publish():
 diff --git a/src-tauri/resources/devcontainer/server_core.py b/src-tauri/resources/devcontainer/server_core.py
-index dab37cb..745edbb 100644
+index 745edbb..a291f2b 100644
 --- a/src-tauri/resources/devcontainer/server_core.py
 +++ b/src-tauri/resources/devcontainer/server_core.py
-@@ -1,54 +1,754 @@
- from collections import OrderedDict, deque
-+from dataclasses import dataclass
-+import base64
- import hmac
-+import json
- import math
-+import os
- import queue
- import re
-+import stat
-+import tempfile
+@@ -12,6 +12,7 @@ import tempfile
  import threading
  import time
-+from pathlib import Path
- 
+ from pathlib import Path
++import xml.etree.ElementTree as ET
+
  AUTH_PROTOCOL_VERSION = 1
  MAX_EVENT_QUEUE_SIZE = 256
-+MAX_EVENT_HISTORY_EVENTS = 256
-+MAX_EVENT_HISTORY_BYTES = 4 * 1024 * 1024
- MAX_LINEAR_VELOCITY = 0.5
- MAX_ANGULAR_VELOCITY = 1.0
- MAX_COMMAND_AGE_SECONDS = 1.0
- COMMAND_TIMEOUT_SECONDS = 0.5
- ROS_TOPIC_PATTERN = re.compile(r"/[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*")
-+MAX_CONFIG_LINEAR_VELOCITY = 0.5
-+MAX_CONFIG_ANGULAR_VELOCITY = 1.0
-+MAX_CONFIG_LINEAR_ACCELERATION = 2.0
-+MAX_CONFIG_ANGULAR_ACCELERATION = 4.0
-+ALLOWED_MOTION_MODES = frozenset(("planar", "full_twist"))
+@@ -27,6 +28,284 @@ MAX_CONFIG_ANGULAR_VELOCITY = 1.0
+ MAX_CONFIG_LINEAR_ACCELERATION = 2.0
+ MAX_CONFIG_ANGULAR_ACCELERATION = 4.0
+ ALLOWED_MOTION_MODES = frozenset(("planar", "full_twist"))
++MAX_WORKSPACE_PACKAGES = 1000
++MAX_PACKAGE_SCAN_FILES = 5000
++MAX_PACKAGE_DISCOVERY_FILES = 250
++ACTION_SEND_GOAL_SUFFIX = "/_action/send_goal"
++PACKAGE_METADATA_LIMIT = 1024 * 1024
++_PACKAGE_PRUNED_DIRECTORIES = frozenset(
++    (".git", ".robotics-studio", "__pycache__", "build", "install", "log", "node_modules")
++)
 +
 +
-+class EventOverflow(Exception):
-+    pass
++def _package_directory_is_within(root, path):
++    try:
++        path.resolve(strict=True).relative_to(root)
++        return True
++    except (OSError, ValueError):
++        return False
 +
 +
-+class EventPersistenceError(Exception):
-+    pass
++def _workspace_package_directories(workspace):
++    root = Path(workspace)
++    if root.is_symlink() or not root.is_dir():
++        raise ValueError("Selected ROS workspace is missing or is not a directory")
++    root = root.resolve(strict=True)
++    found = []
 +
++    root_manifest = root / "package.xml"
++    if root_manifest.is_file() and not root_manifest.is_symlink():
++        found.append(root)
 +
-+class SafetyController:
-+    def __init__(self, stop_callback, storage_path=None):
-+        self._stop_callback = stop_callback
-+        self._state = "READY"
-+        self._detail = "Motion commands are permitted"
-+        self._updated_at_ns = time.time_ns()
-+        self._events = []
-+        self._lock = threading.RLock()
-+        self._storage_path = Path(storage_path) if storage_path else None
-+        if self._storage_path and self._storage_path.exists():
-+            if self._storage_path.is_symlink() or self._storage_path.stat().st_size > 64 * 1024:
-+                raise ValueError("Safety state file is unsafe or too large")
-+            try:
-+                stored = json.loads(self._storage_path.read_text(encoding="utf-8"))
-+                if not isinstance(stored, dict):
-+                    raise ValueError("Invalid persisted safety state")
-+                stored_state = stored["state"]
-+                if stored_state not in ("READY", "ACTIVE", "RESET_PENDING", "FAULT"):
-+                    raise ValueError("Invalid persisted safety state")
-+                self._state = stored_state
-+                self._detail = str(stored.get("detail", "Restored safety state"))[:512]
-+                self._updated_at_ns = int(stored.get("updated_at_ns", self._updated_at_ns))
-+                events = stored.get("events", [])
-+                if not isinstance(events, list) or len(events) > 128:
-+                    raise ValueError("Invalid persisted safety event history")
-+                if any(not isinstance(item, dict) for item in events):
-+                    raise ValueError("Invalid persisted safety event")
-+                self._events = []
-+                for item in events:
-+                    event = item.get("event")
-+                    timestamp_ns = item.get("timestamp_ns")
-+                    event_state = item.get("state")
-+                    if (
-+                        not isinstance(event, str)
-+                        or not isinstance(timestamp_ns, int)
-+                        or isinstance(timestamp_ns, bool)
-+                        or event_state not in ("READY", "ACTIVE", "RESET_PENDING", "FAULT")
-+                    ):
-+                        raise ValueError("Invalid persisted safety event")
-+                    self._events.append(
-+                        {
-+                            "event": event[:64],
-+                            "timestamp_ns": timestamp_ns,
-+                            "state": event_state,
-+                        }
-+                    )
-+                if self._state in ("ACTIVE", "RESET_PENDING"):
-+                    self._state = "ACTIVE"
-+                    self._detail = "Emergency stop restored as latched after service restart"
-+                elif self._state == "FAULT":
-+                    self._detail = "Safety fault restored after service restart"
-+            except (OSError, UnicodeError, json.JSONDecodeError, KeyError, TypeError) as error:
-+                raise ValueError("Safety state file is invalid") from error
++    source = root / "src"
++    if source.is_dir() and not source.is_symlink():
++        def on_error(error):
++            raise error
 +
-+    def _persist(self):
-+        if self._storage_path is None:
-+            return
-+        parent = self._storage_path.parent
-+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-+        if parent.is_symlink():
-+            raise OSError("Safety state directory must not be a symlink")
-+        descriptor, temporary = tempfile.mkstemp(
-+            prefix=".safety-state-", suffix=".tmp", dir=parent
-+        )
-+        try:
-+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-+                json.dump(
-+                    {
-+                        "state": self._state,
-+                        "detail": self._detail,
-+                        "updated_at_ns": self._updated_at_ns,
-+                        "events": self._events[-128:],
-+                    },
-+                    file,
-+                )
-+                file.flush()
-+                os.fsync(file.fileno())
-+            os.replace(temporary, self._storage_path)
-+        except Exception:
-+            try:
-+                os.unlink(temporary)
-+            except FileNotFoundError:
-+                pass
-+            raise
-+
-+    def _record_event(self, event):
-+        self._events.append(
-+            {
-+                "event": event,
-+                "timestamp_ns": self._updated_at_ns,
-+                "state": self._state,
-+            }
-+        )
-+        self._events = self._events[-128:]
-+
-+    def history(self):
-+        with self._lock:
-+            return tuple(dict(event) for event in self._events)
-+
-+    def snapshot(self):
-+        with self._lock:
-+            return self._state, self._detail, self._updated_at_ns
-+
-+    def require_motion_permitted(self):
-+        with self._lock:
-+            if self._state != "READY":
-+                raise ValueError(f"Motion is blocked while safety state is {self._state}")
-+
-+    def enforce_latched_stop(self):
-+        with self._lock:
-+            if self._state == "READY":
-+                return
-+            try:
-+                self._stop_callback()
-+            except Exception as error:
-+                self._state = "FAULT"
-+                self._detail = "Could not reassert emergency stop after service restart"
-+                self._updated_at_ns = time.time_ns()
-+                self._record_event("STOP_ENFORCEMENT_FAILED")
-+                try:
-+                    self._persist()
-+                except Exception:
-+                    self._detail += "; fault state could not be persisted"
-+                raise RuntimeError(self._detail) from error
-+            self._updated_at_ns = time.time_ns()
-+            self._record_event("STOP_REASSERTED")
-+            try:
-+                self._persist()
-+            except OSError as error:
-+                self._state = "FAULT"
-+                self._detail = "Could not persist reasserted emergency stop"
-+                self._updated_at_ns = time.time_ns()
-+                self._record_event("STOP_ENFORCEMENT_FAILED")
-+                raise RuntimeError(self._detail) from error
-+
-+    def latch_fault(self, detail):
-+        with self._lock:
-+            self._state = "FAULT"
-+            self._detail = str(detail)[:512]
-+            self._updated_at_ns = time.time_ns()
-+            self._record_event("FAULT_LATCHED")
-+            try:
-+                self._stop_callback()
-+            except Exception:
-+                self._detail = "Safety fault latched; emergency stop enforcement also failed"
-+                self._record_event("STOP_ENFORCEMENT_FAILED")
-+            self._persist()
-+
-+    def run_if_motion_permitted(self, operation):
-+        with self._lock:
-+            if self._state != "READY":
-+                raise ValueError(f"Motion is blocked while safety state is {self._state}")
-+            return operation()
-+
-+    def activate(self):
-+        with self._lock:
-+            if self._state == "FAULT":
-+                raise RuntimeError(f"Emergency stop is faulted: {self._detail}")
-+            self._state = "ACTIVE"
-+            self._detail = "Emergency stop is latched"
-+            self._updated_at_ns = time.time_ns()
-+            self._record_event("ACTIVATED")
-+            try:
-+                self._persist()
-+                self._stop_callback()
-+            except Exception as error:
-+                self._state = "FAULT"
-+                self._detail = "Could not persist or publish emergency stop"
-+                self._updated_at_ns = time.time_ns()
-+                self._record_event("ACTIVATION_FAILED")
-+                try:
-+                    self._stop_callback()
-+                except Exception:
-+                    self._detail += "; retrying the zero command also failed"
-+                    self._record_event("STOP_RETRY_FAILED")
-+                try:
-+                    self._persist()
-+                except Exception:
-+                    self._detail += "; fault state could not be persisted"
-+                raise RuntimeError(self._detail) from error
-+            return self.snapshot()
-+
-+    def reset(self):
-+        with self._lock:
-+            if self._state != "ACTIVE":
-+                raise ValueError("Reset is allowed only from the latched ACTIVE state")
-+            self._state = "RESET_PENDING"
-+            self._detail = "Applying stop before reset"
-+            self._updated_at_ns = time.time_ns()
-+            self._record_event("RESET_REQUESTED")
-+            try:
-+                self._persist()
-+                self._stop_callback()
-+            except Exception as error:
-+                self._state = "FAULT"
-+                self._detail = "Could not confirm stop during reset"
-+                self._updated_at_ns = time.time_ns()
-+                self._record_event("RESET_FAILED")
-+                try:
-+                    self._persist()
-+                except Exception:
-+                    self._detail += "; fault state could not be persisted"
-+                raise RuntimeError(self._detail) from error
-+            self._state = "READY"
-+            self._detail = "Reset confirmed; explicit new motion command required"
-+            self._updated_at_ns = time.time_ns()
-+            self._record_event("RESET_CONFIRMED")
-+            try:
-+                self._persist()
-+            except Exception as error:
-+                self._state = "FAULT"
-+                self._detail = "Could not persist reset; emergency stop remains faulted"
-+                self._updated_at_ns = time.time_ns()
-+                self._record_event("RESET_PERSISTENCE_FAILED")
-+                raise RuntimeError(self._detail) from error
-+            return self.snapshot()
-+
-+
-+@dataclass(frozen=True)
-+class RobotMotionConfig:
-+    topic_name: str
-+    max_linear_velocity: float = MAX_LINEAR_VELOCITY
-+    max_angular_velocity: float = MAX_ANGULAR_VELOCITY
-+    max_linear_acceleration: float = 1.0
-+    max_angular_acceleration: float = 2.0
-+    command_lease_ms: int = 500
-+    command_timeout_ms: int = 1000
-+    permitted_motion_modes: tuple = ("planar",)
-+
-+    def validate(self):
-+        if len(self.topic_name) > 200 or not ROS_TOPIC_PATTERN.fullmatch(self.topic_name):
-+            raise ValueError("Invalid robot command topic")
-+        for name, value, maximum in (
-+            ("max_linear_velocity", self.max_linear_velocity, MAX_CONFIG_LINEAR_VELOCITY),
-+            ("max_angular_velocity", self.max_angular_velocity, MAX_CONFIG_ANGULAR_VELOCITY),
-+            ("max_linear_acceleration", self.max_linear_acceleration, MAX_CONFIG_LINEAR_ACCELERATION),
-+            ("max_angular_acceleration", self.max_angular_acceleration, MAX_CONFIG_ANGULAR_ACCELERATION),
++        for current, directories, files in os.walk(
++            source, topdown=True, followlinks=False, onerror=on_error
 +        ):
-+            if (
-+                isinstance(value, bool)
-+                or not isinstance(value, (int, float))
-+                or not math.isfinite(value)
-+                or value <= 0
-+                or value > maximum
-+            ):
-+                raise ValueError(f"{name} must be positive and no greater than {maximum}")
-+        if (
-+            not isinstance(self.command_lease_ms, int)
-+            or isinstance(self.command_lease_ms, bool)
-+            or not 100 <= self.command_lease_ms <= 2000
-+        ):
-+            raise ValueError("command_lease_ms must be between 100 and 2000")
-+        if (
-+            not isinstance(self.command_timeout_ms, int)
-+            or isinstance(self.command_timeout_ms, bool)
-+            or not self.command_lease_ms <= self.command_timeout_ms <= 5000
-+        ):
-+            raise ValueError("command_timeout_ms must be at least the lease and no greater than 5000")
-+        if (
-+            not self.permitted_motion_modes
-+            or not isinstance(self.permitted_motion_modes, (list, tuple))
-+            or any(not isinstance(mode, str) for mode in self.permitted_motion_modes)
-+            or len(set(self.permitted_motion_modes)) != len(self.permitted_motion_modes)
-+            or any(mode not in ALLOWED_MOTION_MODES for mode in self.permitted_motion_modes)
-+        ):
-+            raise ValueError("permitted_motion_modes must contain supported unique modes")
-+        return self
-+
-+
-+class RobotConfigRegistry:
-+    def __init__(self, storage_path=None):
-+        self._configs = {}
-+        self._last_commands = {}
-+        self._lock = threading.Lock()
-+        self._storage_path = Path(storage_path) if storage_path else None
-+        if self._storage_path and self._storage_path.exists():
-+            if self._storage_path.is_symlink() or self._storage_path.stat().st_size > 1024 * 1024:
-+                raise ValueError("Robot configuration file is unsafe or too large")
-+            try:
-+                items = json.loads(self._storage_path.read_text(encoding="utf-8"))
-+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
-+                raise ValueError("Robot configuration file is invalid") from error
-+            if not isinstance(items, list) or len(items) > 128:
-+                raise ValueError("Robot configuration file has an invalid shape")
-+            for item in items:
-+                if not isinstance(item, dict):
-+                    raise ValueError("Robot configuration entry is invalid")
-+                item["permitted_motion_modes"] = tuple(item.get("permitted_motion_modes", ()))
-+                config = RobotMotionConfig(**item).validate()
-+                self._configs[config.topic_name] = config
-+
-+    def _persist(self, configs):
-+        if self._storage_path is None:
-+            return
-+        parent = self._storage_path.parent
-+        parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-+        if parent.is_symlink():
-+            raise OSError("Robot configuration directory must not be a symlink")
-+        serialized = [
-+            {
-+                **config.__dict__,
-+                "permitted_motion_modes": list(config.permitted_motion_modes),
-+            }
-+            for config in configs.values()
-+        ]
-+        descriptor, temporary = tempfile.mkstemp(
-+            prefix=".robot-config-", suffix=".tmp", dir=parent
-+        )
-+        try:
-+            with os.fdopen(descriptor, "w", encoding="utf-8") as file:
-+                json.dump(serialized, file, allow_nan=False)
-+                file.flush()
-+                os.fsync(file.fileno())
-+            os.replace(temporary, self._storage_path)
-+        except Exception:
-+            try:
-+                os.unlink(temporary)
-+            except FileNotFoundError:
-+                pass
-+            raise
-+
-+    def get(self, topic_name):
-+        with self._lock:
-+            return self._configs.get(topic_name, RobotMotionConfig(topic_name).validate())
-+
-+    def set(self, config):
-+        config.validate()
-+        with self._lock:
-+            updated = dict(self._configs)
-+            if config.topic_name not in updated and len(updated) >= 128:
-+                raise ValueError("Robot configuration capacity reached")
-+            updated[config.topic_name] = config
-+            self._persist(updated)
-+            self._configs = updated
-+            self._last_commands.pop(config.topic_name, None)
-+        return config
-+
-+    def reset(self, topic_name):
-+        default = RobotMotionConfig(topic_name).validate()
-+        with self._lock:
-+            updated = dict(self._configs)
-+            updated.pop(topic_name, None)
-+            self._persist(updated)
-+            self._configs = updated
-+            self._last_commands.pop(topic_name, None)
-+        return default
-+
-+    def validate_command(self, request, now_ns=None, monotonic_now=None, record=True):
-+        topic_name = request.topic_name
-+        config = self.get(topic_name)
-+        linear = (request.linear_x, request.linear_y, request.linear_z)
-+        angular = (request.angular_x, request.angular_y, request.angular_z)
-+        if not all(math.isfinite(value) for value in (*linear, *angular)):
-+            raise ValueError("Velocity components must be finite")
-+        if math.hypot(*linear) > config.max_linear_velocity:
-+            raise ValueError("Linear velocity magnitude exceeds the robot limit")
-+        if math.hypot(*angular) > config.max_angular_velocity:
-+            raise ValueError("Angular velocity magnitude exceeds the robot limit")
-+        if "full_twist" not in config.permitted_motion_modes and any(
-+            value != 0 for value in (request.linear_y, request.linear_z, request.angular_x, request.angular_y)
-+        ):
-+            raise ValueError("Robot configuration permits planar motion only")
-+
-+        current_time = time.monotonic() if monotonic_now is None else monotonic_now
-+        with self._lock:
-+            previous = self._last_commands.get(topic_name)
-+            if previous is not None:
-+                previous_linear, previous_angular, previous_time = previous
-+                elapsed = max(current_time - previous_time, 1e-6)
-+                linear_delta = math.sqrt(sum((a - b) ** 2 for a, b in zip(linear, previous_linear)))
-+                angular_delta = math.sqrt(sum((a - b) ** 2 for a, b in zip(angular, previous_angular)))
-+                if linear_delta > config.max_linear_acceleration * elapsed:
-+                    raise ValueError("Linear acceleration exceeds the robot limit")
-+                if angular_delta > config.max_angular_acceleration * elapsed:
-+                    raise ValueError("Angular acceleration exceeds the robot limit")
-+            if record:
-+                self._last_commands[topic_name] = (linear, angular, current_time)
-+        return config
-+
-+    def record_command(self, request, monotonic_now=None):
-+        current_time = time.monotonic() if monotonic_now is None else monotonic_now
-+        with self._lock:
-+            self._last_commands[request.topic_name] = (
-+                (request.linear_x, request.linear_y, request.linear_z),
-+                (request.angular_x, request.angular_y, request.angular_z),
-+                current_time,
++            current_path = Path(current)
++            directories[:] = sorted(
++                name
++                for name in directories
++                if name not in _PACKAGE_PRUNED_DIRECTORIES
++                and not (current_path / name).is_symlink()
 +            )
++            if "package.xml" in files:
++                manifest = current_path / "package.xml"
++                if not manifest.is_symlink() and _package_directory_is_within(root, current_path):
++                    found.append(current_path)
++                    directories[:] = []
++                    if len(found) > MAX_WORKSPACE_PACKAGES:
++                        raise ValueError("ROS workspace contains too many packages")
 +
-+    def reset_command(self, topic_name):
-+        with self._lock:
-+            self._last_commands.pop(topic_name, None)
-+
-+    def reset_all_commands(self):
-+        with self._lock:
-+            self._last_commands.clear()
- 
- 
- class EventHub:
--    def __init__(self, max_queue_size=MAX_EVENT_QUEUE_SIZE):
-+    def __init__(
-+        self,
-+        max_queue_size=MAX_EVENT_QUEUE_SIZE,
-+        history_path=None,
-+        event_encoder=None,
-+        event_decoder=None,
-+        history_capacity=MAX_EVENT_HISTORY_EVENTS,
-+        history_max_bytes=MAX_EVENT_HISTORY_BYTES,
-+    ):
-         if max_queue_size < 1:
-             raise ValueError("max_queue_size must be positive")
-+        if history_capacity < 1 or history_max_bytes < 1:
-+            raise ValueError("event history limits must be positive")
-+        if history_path is not None and not callable(event_encoder):
-+            raise ValueError("event_encoder is required for persistent event history")
-+        if history_path is not None and not callable(event_decoder):
-+            raise ValueError("event_decoder is required for persistent event history")
-         self._max_queue_size = max_queue_size
-         self._subscribers = set()
-         self._lock = threading.Lock()
-         self._latest_state = {}
-+        self._sequence = 0
-+        self._historical_dropped_telemetry = 0
-+        self._historical_critical_overflows = 0
-+        self._history_path = Path(history_path) if history_path else None
-+        self._event_encoder = event_encoder
-+        self._event_decoder = event_decoder
-+        self._history_capacity = history_capacity
-+        self._history_max_bytes = history_max_bytes
-+        self._history = []
-+        self._persistence_error = None
-+        if self._history_path is not None:
-+            self._load_history()
-+
-+    def _load_history(self):
-+        path = self._history_path
-+        parent = path.parent
-+        directory_fd = None
++    install = root / "install"
++    if install.is_dir() and not install.is_symlink():
++        share_roots = [install / "share"]
 +        try:
-+            try:
-+                directory_fd = os.open(
-+                    parent,
-+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-+                )
-+            except FileNotFoundError:
-+                return
-+            except NotADirectoryError as error:
-+                raise ValueError("Event history directory is unsafe") from error
-+            try:
-+                descriptor = os.open(
-+                    path.name,
-+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
-+                    dir_fd=directory_fd,
-+                )
-+            except FileNotFoundError:
-+                return
-+            with os.fdopen(descriptor, "rb") as file:
-+                metadata = os.fstat(file.fileno())
-+                if (
-+                    not stat.S_ISREG(metadata.st_mode)
-+                    or metadata.st_size > self._history_max_bytes
-+                ):
-+                    raise ValueError("Event history file is invalid or too large")
-+                contents = file.read(self._history_max_bytes + 1)
-+            if len(contents) > self._history_max_bytes:
-+                raise ValueError("Event history file is invalid or too large")
-+            stored = json.loads(contents.decode("utf-8"))
-+            if not isinstance(stored, dict) or stored.get("version") != 1:
-+                raise ValueError("Unsupported event history format")
-+            sequence = stored.get("last_sequence")
-+            events = stored.get("events")
-+            if (
-+                not isinstance(sequence, int)
-+                or isinstance(sequence, bool)
-+                or sequence < 0
-+                or not isinstance(events, list)
-+                or len(events) > self._history_capacity
-+            ):
-+                raise ValueError("Event history metadata is invalid")
-+            previous = 0
-+            for item in events:
-+                if not isinstance(item, dict):
-+                    raise ValueError("Event history entry is invalid")
-+                item_sequence = item.get("sequence")
-+                payload = item.get("payload")
-+                if (
-+                    not isinstance(item_sequence, int)
-+                    or isinstance(item_sequence, bool)
-+                    or item_sequence <= previous
-+                    or item_sequence > sequence
-+                    or not isinstance(payload, str)
-+                ):
-+                    raise ValueError("Event history entry is invalid")
-+                encoded = base64.b64decode(payload, validate=True)
-+                event = self._event_decoder(encoded)
-+                if getattr(event, "sequence", item_sequence) != item_sequence:
-+                    raise ValueError("Event history sequence does not match its payload")
-+                self._history.append((item_sequence, payload, event))
-+                previous = item_sequence
-+            if sequence > 0 and (
-+                not self._history or self._history[-1][0] != sequence
-+            ):
-+                raise ValueError("Event history sequence is inconsistent")
-+            self._sequence = sequence
-+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, KeyError) as error:
-+            raise ValueError("Event history file could not be loaded safely") from error
-+        finally:
-+            if directory_fd is not None:
-+                os.close(directory_fd)
-+
-+    def _persist_history(self, sequence, history):
-+        path = self._history_path
-+        parent = path.parent
-+        try:
-+            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-+            stored = {
-+                "version": 1,
-+                "last_sequence": sequence,
-+                "events": [
-+                    {"sequence": item_sequence, "payload": payload}
-+                    for item_sequence, payload, _ in history
-+                ],
-+            }
-+            encoded = json.dumps(stored, separators=(",", ":")).encode("utf-8")
-+            if len(encoded) > self._history_max_bytes:
-+                raise OSError("Event history exceeds its configured storage limit")
-+            directory_fd = os.open(
-+                parent,
-+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
++            prefixes = sorted(
++                child
++                for child in install.iterdir()
++                if child.is_dir()
++                and not child.is_symlink()
++                and child.name not in _PACKAGE_PRUNED_DIRECTORIES
 +            )
-+            temporary = ".event-history.tmp"
-+            try:
-+                flags = (
-+                    os.O_WRONLY
-+                    | os.O_CREAT
-+                    | os.O_EXCL
-+                    | os.O_NOFOLLOW
-+                    | os.O_CLOEXEC
-+                )
-+                try:
-+                    descriptor = os.open(
-+                        temporary, flags, 0o600, dir_fd=directory_fd
-+                    )
-+                except FileExistsError:
-+                    os.unlink(temporary, dir_fd=directory_fd)
-+                    descriptor = os.open(
-+                        temporary, flags, 0o600, dir_fd=directory_fd
-+                    )
-+                with os.fdopen(descriptor, "wb") as file:
-+                    file.write(encoded)
-+                    file.flush()
-+                    os.fsync(file.fileno())
-+                os.replace(
-+                    temporary,
-+                    path.name,
-+                    src_dir_fd=directory_fd,
-+                    dst_dir_fd=directory_fd,
-+                )
-+                os.fsync(directory_fd)
-+            except Exception:
-+                try:
-+                    os.unlink(temporary, dir_fd=directory_fd)
-+                except FileNotFoundError:
-+                    pass
-+                raise
-+            finally:
-+                os.close(directory_fd)
 +        except OSError as error:
-+            raise EventPersistenceError(f"Could not persist critical ROS event: {error}") from error
++            raise ValueError(f"Could not inspect ROS workspace install directory: {error}") from error
++        share_roots.extend(prefix / "share" for prefix in prefixes)
++        for share_root in share_roots:
++            if not share_root.is_dir() or share_root.is_symlink():
++                continue
++            try:
++                packages = sorted(share_root.iterdir())
++            except OSError as error:
++                raise ValueError(f"Could not inspect ROS package index directory: {error}") from error
++            for package_share in packages:
++                if (
++                    package_share.is_dir()
++                    and not package_share.is_symlink()
++                    and (package_share / "package.xml").is_file()
++                    and not (package_share / "package.xml").is_symlink()
++                    and _package_directory_is_within(root, package_share)
++                ):
++                    found.append(package_share)
++                    if len(found) > MAX_WORKSPACE_PACKAGES:
++                        raise ValueError("ROS workspace contains too many packages")
 +
-+    def _retained_history(self, sequence, event):
-+        try:
-+            payload = base64.b64encode(self._event_encoder(event)).decode("ascii")
-+        except Exception as error:
-+            raise EventPersistenceError(f"Could not encode critical ROS event: {error}") from error
-+        history = self._history + [(sequence, payload, event)]
-+        history = history[-self._history_capacity :]
-+        while True:
-+            serialized = json.dumps(
-+                {
-+                    "version": 1,
-+                    "last_sequence": sequence,
-+                    "events": [
-+                        {"sequence": item_sequence, "payload": item_payload}
-+                        for item_sequence, item_payload, _ in history
-+                    ],
-+                },
-+                separators=(",", ":"),
-+            ).encode("utf-8")
-+            if len(serialized) <= self._history_max_bytes:
-+                break
-+            if not history:
-+                raise EventPersistenceError(
-+                    "Critical ROS event exceeds the history storage limit"
-+                )
-+            history.pop(0)
-+        if not history or history[-1][1] != payload:
-+            raise EventPersistenceError("Critical ROS event exceeds the history storage limit")
-+        return history
- 
-     def subscribe(self):
-         subscriber = EventSubscriber(self._max_queue_size)
-         with self._lock:
-+            for key, event in self._latest_state.items():
-+                subscriber.put(event, critical=True, key=key)
-             self._subscribers.add(subscriber)
--            snapshots = tuple(self._latest_state.items())
--        for key, event in snapshots:
--            subscriber.put(event, critical=True, key=key)
-         return subscriber
- 
-     def unsubscribe(self, subscriber):
-         with self._lock:
--            self._subscribers.discard(subscriber)
-+            if subscriber in self._subscribers:
-+                stats = subscriber.health()
-+                self._historical_dropped_telemetry += stats["dropped_telemetry"]
-+                self._historical_critical_overflows += stats["dropped_critical"]
-+                self._subscribers.remove(subscriber)
- 
--    def publish(self, event, *, priority="critical", key=None, snapshot=False):
-+    def subscribe_with_replay(self, after_sequence=None):
-+        subscriber = EventSubscriber(self._max_queue_size)
-+        with self._lock:
-+            oldest = self._history[0][0] if self._history else self._sequence + 1
-+            gap = after_sequence is not None and (
-+                after_sequence > self._sequence
-+                or after_sequence < oldest - 1
-+                or (not self._history and after_sequence < self._sequence)
-+            )
-+            replay_after = (
-+                -1
-+                if after_sequence is not None and after_sequence > self._sequence
-+                else after_sequence
-+            )
-+            replay = (
-+                [
-+                    event
-+                    for sequence, _, event in self._history
-+                    if sequence > replay_after
-+                ]
-+                if replay_after is not None
-+                else []
-+            )
-+            snapshots = (
-+                list(self._latest_state.values())
-+                if after_sequence is None or after_sequence == 0 or gap
-+                else []
-+            )
-+            self._subscribers.add(subscriber)
-+            return subscriber, {
-+                "gap_detected": gap,
-+                "oldest_available_sequence": oldest,
-+                "latest_sequence": self._sequence,
-+                "snapshot_included": bool(snapshots),
-+                "retained_critical_events": len(self._history),
-+            }, replay + snapshots
++    return root, found
 +
-+    def publish(self, event, *, priority="critical", key=None, snapshot=False, durable=None):
-         if priority not in ("critical", "telemetry"):
-             raise ValueError("priority must be 'critical' or 'telemetry'")
-         if key is None:
-             key = id(event)
-         with self._lock:
-+            if self._history_path is None:
-+                self._sequence += 1
-+                event_sequence = self._sequence
-+                if hasattr(event, "sequence"):
-+                    event.sequence = event_sequence
-+            else:
-+                if durable is None:
-+                    durable = priority == "critical" and not snapshot
-+                event_sequence = self._sequence + 1 if durable else 0
-+                if durable:
-+                    previous_sequence = getattr(event, "sequence", None)
-+                    if hasattr(event, "sequence"):
-+                        event.sequence = event_sequence
-+                    try:
-+                        history = self._retained_history(event_sequence, event)
-+                        self._persist_history(event_sequence, history)
-+                    except EventPersistenceError as error:
-+                        self._persistence_error = str(error)
-+                        if previous_sequence is not None:
-+                            event.sequence = previous_sequence
-+                        raise
-+                    self._sequence = event_sequence
-+                    self._history = history
-+                elif hasattr(event, "sequence"):
-+                    event.sequence = 0
-             if snapshot:
-                 self._latest_state[key] = event
-             subscribers = tuple(self._subscribers)
-+            for subscriber in subscribers:
-+                subscriber.put(event, critical=priority == "critical", key=key)
- 
--        for subscriber in subscribers:
--            subscriber.put(event, critical=priority == "critical", key=key)
-+    def health(self):
-+        with self._lock:
-+            subscribers = tuple(self._subscribers)
-+            sequence = self._sequence
-+            historical_telemetry = self._historical_dropped_telemetry
-+            historical_critical = self._historical_critical_overflows
-+            persistence_error = self._persistence_error
-+            oldest = self._history[0][0] if self._history else sequence + 1
-+            retained = len(self._history)
-+        subscriber_stats = [subscriber.health() for subscriber in subscribers]
-+        return {
-+            "queue_capacity": self._max_queue_size,
-+            "subscriber_count": len(subscriber_stats),
-+            "last_sequence": sequence,
-+            "dropped_telemetry": historical_telemetry
-+            + sum(stat["dropped_telemetry"] for stat in subscriber_stats),
-+            "critical_overflows": historical_critical
-+            + sum(stat["dropped_critical"] for stat in subscriber_stats),
-+            "max_backlog": max((stat["pending_count"] for stat in subscriber_stats), default=0),
-+            "persistence_healthy": persistence_error is None,
-+            "persistence_error": persistence_error or "",
-+            "oldest_available_sequence": oldest,
-+            "retained_critical_events": retained,
++
++def _parse_package_manifest(package_directory):
++    manifest_path = package_directory / "package.xml"
++    package = {
++        "name": package_directory.name,
++        "version": None,
++        "description": None,
++        "package_type": "unknown",
++        "dependencies": [],
++        "metadata_error": None,
++    }
++    try:
++        if manifest_path.stat().st_size > PACKAGE_METADATA_LIMIT:
++            raise ValueError("package.xml exceeds the metadata size limit")
++        contents = manifest_path.read_bytes()
++        if b"<!DOCTYPE" in contents.upper() or b"<!ENTITY" in contents.upper():
++            raise ValueError("package.xml must not declare a DTD or entities")
++        root = ET.fromstring(contents)
++        if root.tag.rsplit("}", 1)[-1] != "package":
++            raise ValueError("package.xml root element must be <package>")
++
++        name = (root.findtext("name") or "").strip()
++        if name:
++            package["name"] = name
++        package["version"] = (root.findtext("version") or "").strip() or None
++        package["description"] = (root.findtext("description") or "").strip() or None
++        missing_fields = [
++            field
++            for field, value in (
++                ("name", name),
++                ("version", package["version"]),
++                ("description", package["description"]),
++            )
++            if not value
++        ]
++        if missing_fields:
++            package["metadata_error"] = (
++                "package.xml is missing required fields: " + ", ".join(missing_fields)
++            )[:256]
++
++        build_type = (root.findtext("export/build_type") or "").strip()
++        build_tools = {
++            (element.text or "").strip()
++            for tag in ("buildtool_depend", "buildtool_export_depend")
++            for element in root.findall(tag)
++            if (element.text or "").strip()
 +        }
- 
- 
- class EventSubscriber:
-@@ -59,22 +759,21 @@ class EventSubscriber:
-         self._condition = threading.Condition()
-         self.dropped_telemetry = 0
-         self.dropped_critical = 0
-+        self._overflowed = False
- 
-     def put(self, event, *, critical, key):
-         with self._condition:
-+            if self._overflowed:
-+                return
-             if critical:
-                 if len(self._critical) >= self._max_queue_size:
--                    if self._telemetry:
--                        self._telemetry.popitem(last=False)
--                        self.dropped_telemetry += 1
--                    else:
--                        for index, (queued_key, _) in enumerate(self._critical):
--                            if queued_key == key:
--                                del self._critical[index]
--                                break
--                        else:
--                            self._critical.popleft()
--                            self.dropped_critical += 1
-+                    self.dropped_critical += len(self._critical) + 1
-+                    self.dropped_telemetry += len(self._telemetry)
-+                    self._critical.clear()
-+                    self._telemetry.clear()
-+                    self._overflowed = True
-+                    self._condition.notify_all()
-+                    return
-                 self._critical.append((key, event))
-             else:
-                 if key in self._telemetry:
-@@ -89,11 +788,13 @@ class EventSubscriber:
-     def get(self, timeout=None):
-         deadline = None if timeout is None else time.monotonic() + timeout
-         with self._condition:
--            while not self._critical and not self._telemetry:
-+            while not self._critical and not self._telemetry and not self._overflowed:
-                 remaining = None if deadline is None else deadline - time.monotonic()
-                 if remaining is not None and remaining <= 0:
-                     raise queue.Empty
-                 self._condition.wait(remaining)
-+            if self._overflowed:
-+                raise EventOverflow("Critical event queue overflow; reconnect for state resynchronization")
-             if self._critical:
-                 return self._critical.popleft()[1]
-             return self._telemetry.popitem(last=False)[1]
-@@ -110,6 +811,15 @@ class EventSubscriber:
-         with self._condition:
-             return len(self._critical) + len(self._telemetry)
- 
-+    def health(self):
-+        with self._condition:
-+            return {
-+                "pending_count": len(self._critical) + len(self._telemetry),
-+                "dropped_telemetry": self.dropped_telemetry,
-+                "dropped_critical": self.dropped_critical,
-+                "overflowed": self._overflowed,
-+            }
++        if build_type in ("ament_cmake", "ament_python", "cmake"):
++            package["package_type"] = build_type
++        elif "ament_cmake" in build_tools:
++            package["package_type"] = "ament_cmake"
++        elif "ament_python" in build_tools:
++            package["package_type"] = "ament_python"
 +
- 
- class CommandLeaseManager:
-     def __init__(self, timeout_seconds=COMMAND_TIMEOUT_SECONDS):
-@@ -119,10 +829,13 @@ class CommandLeaseManager:
-         self._deadlines = {}
-         self._lock = threading.Lock()
- 
--    def refresh(self, key, now=None):
-+    def refresh(self, key, now=None, timeout_seconds=None):
-         current_time = time.monotonic() if now is None else now
-         with self._lock:
--            self._deadlines[key] = current_time + self._timeout_seconds
-+            timeout = self._timeout_seconds if timeout_seconds is None else timeout_seconds
-+            if timeout <= 0:
-+                raise ValueError("timeout_seconds must be positive")
-+            self._deadlines[key] = current_time + timeout
- 
-     def take_expired(self, now=None):
-         current_time = time.monotonic() if now is None else now
-@@ -135,8 +848,16 @@ class CommandLeaseManager:
-                 del self._deadlines[key]
-             return expired
- 
-+    def clear(self, key):
-+        with self._lock:
-+            self._deadlines.pop(key, None)
++        dependencies = {
++            (element.text or "").strip()
++            for tag in (
++                "depend",
++                "build_depend",
++                "buildtool_depend",
++                "buildtool_export_depend",
++                "exec_depend",
++                "test_depend",
++                "build_export_depend",
++                "doc_depend",
++                "group_depend",
++            )
++            for element in root.findall(tag)
++            if (element.text or "").strip()
++        }
++        package["dependencies"] = sorted(dependencies)
++    except (OSError, ET.ParseError, ValueError) as error:
++        package["metadata_error"] = str(error)[:256]
++    return package
 +
-+    def clear_all(self):
-+        with self._lock:
-+            self._deadlines.clear()
 +
- 
--def validate_twist_request(request, now_ns=None):
-+def validate_twist_request(request, now_ns=None, config_registry=None, record=True):
-     if len(request.topic_name) > 200 or not ROS_TOPIC_PATTERN.fullmatch(request.topic_name):
-         raise ValueError("Invalid ROS topic name")
- 
-@@ -144,10 +865,22 @@ def validate_twist_request(request, now_ns=None):
-     if not isinstance(timestamp_ns, int) or timestamp_ns <= 0:
-         raise ValueError("Command timestamp is missing or invalid")
-     current_time_ns = time.time_ns() if now_ns is None else now_ns
--    max_age_ns = int(MAX_COMMAND_AGE_SECONDS * 1_000_000_000)
-+    command_timeout = (
-+        config_registry.get(request.topic_name).command_timeout_ms / 1000.0
-+        if config_registry is not None
-+        else MAX_COMMAND_AGE_SECONDS
-+    )
-+    max_age_ns = int(command_timeout * 1_000_000_000)
-     if timestamp_ns > current_time_ns + 250_000_000 or current_time_ns - timestamp_ns > max_age_ns:
-         raise ValueError("Command is stale or has a future timestamp")
- 
-+    if config_registry is not None:
-+        return config_registry.validate_command(
-+            request,
-+            now_ns=current_time_ns,
-+            record=record,
++def _package_files(package_directory):
++    launch_files = []
++    config_files = []
++    files_seen = 0
++
++    def on_error(error):
++        raise error
++
++    for current, directories, files in os.walk(
++        package_directory, topdown=True, followlinks=False, onerror=on_error
++    ):
++        current_path = Path(current)
++        directories[:] = sorted(
++            name
++            for name in directories
++            if name not in _PACKAGE_PRUNED_DIRECTORIES
++            and not (current_path / name).is_symlink()
 +        )
++        for name in sorted(files):
++            candidate = current_path / name
++            if candidate.is_symlink() or not candidate.is_file():
++                continue
++            files_seen += 1
++            if files_seen > MAX_PACKAGE_SCAN_FILES:
++                raise ValueError("ROS package contains too many files to inspect")
++            relative = candidate.relative_to(package_directory).as_posix()
++            if name.endswith((".launch.py", ".launch.xml")) or name.endswith(".launch"):
++                if len(launch_files) < MAX_PACKAGE_DISCOVERY_FILES:
++                    launch_files.append(relative)
++            if candidate.suffix.lower() in (".yaml", ".yml", ".json", ".config", ".ini"):
++                if len(config_files) < MAX_PACKAGE_DISCOVERY_FILES:
++                    config_files.append(relative)
 +
-     linear = (request.linear_x, request.linear_y, request.linear_z)
-     angular = (request.angular_x, request.angular_y, request.angular_z)
-     if not all(math.isfinite(value) for value in (*linear, *angular)):
++    return sorted(launch_files), sorted(config_files)
++
++
++def _package_executables(workspace, package_name):
++    install = workspace / "install"
++    if install.is_symlink() or not install.is_dir():
++        return []
++    candidates = (install / "lib" / package_name,)
++    try:
++        prefixes = sorted(
++            child
++            for child in install.iterdir()
++            if child.is_dir()
++            and not child.is_symlink()
++            and child.name not in _PACKAGE_PRUNED_DIRECTORIES
++        )
++    except (FileNotFoundError, NotADirectoryError):
++        prefixes = ()
++    candidates += tuple(prefix / "lib" / package_name for prefix in prefixes)
++
++    executables = set()
++    for directory in candidates:
++        if (
++            not directory.is_dir()
++            or directory.is_symlink()
++            or directory.parent.is_symlink()
++            or not _package_directory_is_within(workspace, directory)
++        ):
++            continue
++        try:
++            entries = sorted(directory.iterdir())
++        except OSError as error:
++            raise ValueError(f"Could not inspect executables for package {package_name}: {error}") from error
++        for entry in entries:
++            if (
++                not entry.is_symlink()
++                and entry.is_file()
++                and os.access(entry, os.X_OK)
++            ):
++                executables.add(entry.name)
++    return sorted(executables)[:MAX_PACKAGE_DISCOVERY_FILES]
++
++
++def discover_workspace_packages(workspace="/workspace"):
++    """Return bounded package metadata found only inside the selected workspace."""
++    root, package_directories = _workspace_package_directories(workspace)
++    result_by_name = {}
++    for package_directory in package_directories:
++        package = _parse_package_manifest(package_directory)
++        name = package["name"]
++        existing = result_by_name.get(name)
++        relative_directory = package_directory.relative_to(root)
++        is_source_package = not relative_directory.parts or relative_directory.parts[0] == "src"
++        if existing and (not is_source_package or existing["is_source"]):
++            continue
++
++        launch_files, config_files = _package_files(package_directory)
++        package.update(
++            {
++                "path": relative_directory.as_posix(),
++                "executables": _package_executables(root, name),
++                "launch_files": launch_files,
++                "config_files": config_files,
++                "is_source": is_source_package,
++            }
++        )
++        result_by_name[name] = package
++
++    return [
++        {key: value for key, value in package.items() if key != "is_source"}
++        for _, package in sorted(result_by_name.items())
++    ]
++
++
++def action_from_send_goal_service(service_name, service_type):
++    """Return an action name/type only for canonical ROS 2 send-goal endpoints."""
++    if not service_name.endswith(ACTION_SEND_GOAL_SUFFIX):
++        return None
++    action_type, separator, suffix = service_type.rpartition("_SendGoal")
++    if not separator or suffix or not action_type:
++        return None
++    return service_name[: -len(ACTION_SEND_GOAL_SUFFIX)], action_type
+
+
+ class EventOverflow(Exception):
 diff --git a/src-tauri/resources/devcontainer/test_server_core.py b/src-tauri/resources/devcontainer/test_server_core.py
-index 6793a06..92a2a81 100644
+index 92a2a81..b969520 100644
 --- a/src-tauri/resources/devcontainer/test_server_core.py
 +++ b/src-tauri/resources/devcontainer/test_server_core.py
-@@ -1,13 +1,20 @@
- import math
- import json
-+import os
- import tempfile
- import time
- import unittest
-+from unittest import mock
- from types import SimpleNamespace
- 
- from server_core import (
-     CommandLeaseManager,
-+    EventPersistenceError,
-+    EventOverflow,
-     EventHub,
-+    RobotConfigRegistry,
-+    RobotMotionConfig,
-+    SafetyController,
+@@ -15,6 +15,8 @@ from server_core import (
+     RobotConfigRegistry,
+     RobotMotionConfig,
+     SafetyController,
++    action_from_send_goal_service,
++    discover_workspace_packages,
      is_valid_auth_token,
      load_auth_credentials,
      validate_twist_request,
-@@ -47,8 +54,21 @@ class EventHubTests(unittest.TestCase):
-         for value in range(3):
-             hub.publish(value)
- 
--        self.assertEqual([subscriber.get_nowait(), subscriber.get_nowait()], [1, 2])
--        self.assertEqual(subscriber.dropped_critical, 1)
-+        with self.assertRaises(EventOverflow):
-+            subscriber.get_nowait()
-+        self.assertEqual(subscriber.dropped_critical, 3)
-+        self.assertEqual(subscriber.pending_count, 0)
+@@ -35,6 +37,139 @@ def request(topic="/robot/cmd_vel", value=0.0, timestamp_ns=None, linear_y=0.0,
+     )
+
+
++class RosGraphDiscoveryTests(unittest.TestCase):
++    def test_extracts_canonical_ros_action_from_send_goal_service(self):
++        self.assertEqual(
++            action_from_send_goal_service(
++                "/fibonacci/_action/send_goal",
++                "example_interfaces/action/Fibonacci_SendGoal",
++            ),
++            ("/fibonacci", "example_interfaces/action/Fibonacci"),
++        )
 +
-+    def test_overflowed_subscriber_requires_snapshot_resynchronization(self):
-+        hub = EventHub(max_queue_size=1)
-+        hub.publish("node-snapshot-v1", key="nodes", snapshot=True)
-+        subscriber = hub.subscribe()
-+        hub.publish("node-started")
-+        hub.publish("node-crashed")
-+        with self.assertRaises(EventOverflow):
-+            subscriber.get_nowait()
-+        recovered = hub.subscribe()
-+        self.assertEqual(recovered.get_nowait(), "node-snapshot-v1")
- 
-     def test_telemetry_is_coalesced_by_key_and_drop_counted(self):
-         hub = EventHub(max_queue_size=3)
-@@ -114,6 +134,169 @@ class EventHubTests(unittest.TestCase):
- 
-         self.assertTrue(subscriber.empty())
- 
-+    def test_event_sequences_and_health_metrics_are_exposed(self):
-+        hub = EventHub(max_queue_size=2)
-+        subscriber = hub.subscribe()
-+        first = SimpleNamespace(sequence=0)
-+        second = SimpleNamespace(sequence=0)
-+        hub.publish(first)
-+        hub.publish(second)
-+        self.assertEqual((first.sequence, second.sequence), (1, 2))
-+        health = hub.health()
-+        self.assertEqual(health["queue_capacity"], 2)
-+        self.assertEqual(health["subscriber_count"], 1)
-+        self.assertEqual(health["last_sequence"], 2)
-+        self.assertEqual(health["max_backlog"], 2)
++    def test_ignores_non_action_or_malformed_send_goal_services(self):
++        self.assertIsNone(
++            action_from_send_goal_service(
++                "/fibonacci/send_goal",
++                "example_interfaces/action/Fibonacci_SendGoal",
++            )
++        )
++        self.assertIsNone(
++            action_from_send_goal_service(
++                "/fibonacci/_action/send_goal",
++                "example_interfaces/srv/SendGoal",
++            )
++        )
 +
++
++class WorkspacePackageDiscoveryTests(unittest.TestCase):
 +    @staticmethod
-+    def encode_event(event):
-+        return json.dumps(
-+            {"sequence": event.sequence, "name": event.name}
-+        ).encode("utf-8")
++    def create_package(workspace, package_path, manifest):
++        package = os.path.join(workspace, package_path)
++        os.makedirs(package, exist_ok=True)
++        with open(os.path.join(package, "package.xml"), "w", encoding="utf-8") as file:
++            file.write(manifest)
++        return package
 +
-+    @staticmethod
-+    def decode_event(payload):
-+        return SimpleNamespace(**json.loads(payload.decode("utf-8")))
++    def test_discovers_source_package_metadata_and_workspace_executables(self):
++        with tempfile.TemporaryDirectory() as workspace:
++            package = self.create_package(
++                workspace,
++                "src/robot_app",
++                """<package format="3">
++                  <name>robot_app</name><version>1.2.3</version>
++                  <description>Robot runtime package</description>
++                  <buildtool_depend>ament_cmake</buildtool_depend>
++                  <depend>rclpy</depend><exec_depend>geometry_msgs</exec_depend>
++                </package>""",
++            )
++            os.makedirs(os.path.join(package, "launch"))
++            os.makedirs(os.path.join(package, "config"))
++            with open(os.path.join(package, "launch", "start.launch.py"), "w") as file:
++                file.write("pass\n")
++            with open(os.path.join(package, "config", "robot.yaml"), "w") as file:
++                file.write("name: robot\n")
++            executable = os.path.join(workspace, "install", "lib", "robot_app", "driver")
++            os.makedirs(os.path.dirname(executable))
++            with open(executable, "w") as file:
++                file.write("#!/bin/sh\n")
++            os.chmod(executable, 0o755)
 +
-+    def test_persistent_history_replays_critical_events_after_restart(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            path = os.path.join(directory, "events.json")
-+            options = {
-+                "history_path": path,
-+                "event_encoder": self.encode_event,
-+                "event_decoder": self.decode_event,
++            packages = discover_workspace_packages(workspace)
++
++            self.assertEqual(len(packages), 1)
++            self.assertEqual(
++                packages[0],
++                {
++                    "name": "robot_app",
++                    "version": "1.2.3",
++                    "description": "Robot runtime package",
++                    "package_type": "ament_cmake",
++                    "dependencies": ["ament_cmake", "geometry_msgs", "rclpy"],
++                    "metadata_error": None,
++                    "path": "src/robot_app",
++                    "executables": ["driver"],
++                    "launch_files": ["launch/start.launch.py"],
++                    "config_files": ["config/robot.yaml"],
++                },
++            )
++
++    def test_detects_ament_python_and_malformed_package_metadata(self):
++        with tempfile.TemporaryDirectory() as workspace:
++            self.create_package(
++                workspace,
++                "src/python_node",
++                """<package format="3"><name>python_node</name>
++                  <version>0.1.0</version><description>Python node package</description>
++                  <buildtool_depend>ament_python</buildtool_depend></package>""",
++            )
++            self.create_package(workspace, "src/broken_node", "<package>")
++
++            packages = {
++                package["name"]: package
++                for package in discover_workspace_packages(workspace)
 +            }
-+            first = EventHub(**options)
-+            temporary = os.path.join(directory, ".event-history.tmp")
-+            with open(temporary, "w", encoding="utf-8") as file:
-+                file.write("interrupted write")
-+            first.publish(SimpleNamespace(sequence=0, name="node-started"))
-+            self.assertFalse(os.path.exists(temporary))
-+            first.publish(
-+                SimpleNamespace(sequence=99, name="telemetry"),
-+                priority="telemetry",
-+            )
-+            first.publish(SimpleNamespace(sequence=0, name="node-crashed"))
-+            self.assertEqual(first.health()["last_sequence"], 2)
 +
-+            restarted = EventHub(**options)
-+            restarted.publish(
-+                SimpleNamespace(sequence=0, name="current-state"),
-+                key="state",
-+                snapshot=True,
-+                durable=False,
++            self.assertEqual(packages["python_node"]["package_type"], "ament_python")
++            self.assertEqual(packages["python_node"]["version"], "0.1.0")
++            self.assertIsNone(packages["python_node"]["metadata_error"])
++            self.assertEqual(packages["broken_node"]["package_type"], "unknown")
++            self.assertTrue(packages["broken_node"]["metadata_error"])
++
++    def test_rejects_missing_workspace_and_isolates_selected_workspace(self):
++        with tempfile.TemporaryDirectory() as parent:
++            first = os.path.join(parent, "first")
++            second = os.path.join(parent, "second")
++            os.makedirs(first)
++            os.makedirs(second)
++            self.create_package(
++                first, "src/first_pkg", "<package><name>first_pkg</name></package>"
 +            )
-+            subscriber, recovery, replay = restarted.subscribe_with_replay(0)
-+            self.assertFalse(recovery["gap_detected"])
-+            self.assertTrue(recovery["snapshot_included"])
++            self.create_package(
++                second, "src/second_pkg", "<package><name>second_pkg</name></package>"
++            )
++
 +            self.assertEqual(
-+                [(event.sequence, event.name) for event in replay],
-+                [
-+                    (1, "node-started"),
-+                    (2, "node-crashed"),
-+                    (0, "current-state"),
-+                ],
++                [package["name"] for package in discover_workspace_packages(first)],
++                ["first_pkg"],
 +            )
-+            self.assertEqual(restarted.health()["last_sequence"], 2)
-+            restarted.unsubscribe(subscriber)
++            with self.assertRaisesRegex(ValueError, "missing or is not a directory"):
++                discover_workspace_packages(os.path.join(parent, "missing"))
 +
-+    def test_history_retention_reports_gaps_and_includes_latest_snapshot(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            hub = EventHub(
-+                history_path=os.path.join(directory, "events.json"),
-+                event_encoder=self.encode_event,
-+                event_decoder=self.decode_event,
-+                history_capacity=2,
++    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
++    def test_does_not_follow_symlinked_package_directories(self):
++        with tempfile.TemporaryDirectory() as parent:
++            workspace = os.path.join(parent, "workspace")
++            outside = os.path.join(parent, "outside")
++            os.makedirs(os.path.join(workspace, "src"))
++            self.create_package(
++                parent, "outside/escaped", "<package><name>escaped</name></package>"
 +            )
-+            for value in range(1, 5):
-+                hub.publish(SimpleNamespace(sequence=0, name=f"critical-{value}"))
-+            snapshot = SimpleNamespace(sequence=0, name="latest-state")
-+            hub.publish(snapshot, key="state", snapshot=True, durable=False)
++            os.symlink(outside, os.path.join(workspace, "src", "linked"))
 +
-+            subscriber, recovery, replay = hub.subscribe_with_replay(1)
-+            self.assertTrue(recovery["gap_detected"])
-+            self.assertTrue(recovery["snapshot_included"])
-+            self.assertEqual(recovery["oldest_available_sequence"], 3)
-+            self.assertEqual(recovery["retained_critical_events"], 2)
-+            self.assertEqual(
-+                [event.name for event in replay],
-+                ["critical-3", "critical-4", "latest-state"],
-+            )
-+            hub.unsubscribe(subscriber)
-+
-+    def test_replay_subscription_has_no_gap_with_concurrent_live_publish(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            hub = EventHub(
-+                history_path=os.path.join(directory, "events.json"),
-+                event_encoder=self.encode_event,
-+                event_decoder=self.decode_event,
-+            )
-+            hub.publish(SimpleNamespace(sequence=0, name="before-subscribe"))
-+            subscriber, recovery, replay = hub.subscribe_with_replay(0)
-+            hub.publish(SimpleNamespace(sequence=0, name="after-subscribe"))
-+
-+            self.assertFalse(recovery["gap_detected"])
-+            self.assertEqual([event.name for event in replay], ["before-subscribe"])
-+            self.assertEqual(subscriber.get_nowait().name, "after-subscribe")
-+            hub.unsubscribe(subscriber)
-+
-+    def test_future_replay_cursor_reports_gap_and_recovers_retained_history(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            hub = EventHub(
-+                history_path=os.path.join(directory, "events.json"),
-+                event_encoder=self.encode_event,
-+                event_decoder=self.decode_event,
-+            )
-+            hub.publish(SimpleNamespace(sequence=0, name="critical-1"))
-+            hub.publish(SimpleNamespace(sequence=0, name="critical-2"))
-+
-+            subscriber, recovery, replay = hub.subscribe_with_replay(9)
-+            self.assertTrue(recovery["gap_detected"])
-+            self.assertEqual(
-+                [event.name for event in replay],
-+                ["critical-1", "critical-2"],
-+            )
-+            hub.unsubscribe(subscriber)
-+
-+    def test_critical_event_persistence_failure_is_reported_without_sequence_advance(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            hub = EventHub(
-+                history_path=os.path.join(directory, "events.json"),
-+                event_encoder=self.encode_event,
-+                event_decoder=self.decode_event,
-+            )
-+            subscriber = hub.subscribe()
-+            event = SimpleNamespace(sequence=0, name="must-not-disappear")
-+            with mock.patch.object(
-+                hub,
-+                "_persist_history",
-+                side_effect=EventPersistenceError("disk unavailable"),
-+            ):
-+                with self.assertRaisesRegex(EventPersistenceError, "disk unavailable"):
-+                    hub.publish(event)
-+
-+            self.assertEqual(hub.health()["last_sequence"], 0)
-+            self.assertFalse(hub.health()["persistence_healthy"])
-+            self.assertIn("disk unavailable", hub.health()["persistence_error"])
-+            self.assertTrue(subscriber.empty())
-+            self.assertEqual(event.sequence, 0)
-+            hub.publish(SimpleNamespace(sequence=0, name="later-event"))
-+            self.assertFalse(hub.health()["persistence_healthy"])
-+
-+    def test_persistent_history_rejects_symlinked_journal(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            target = os.path.join(directory, "outside.json")
-+            journal = os.path.join(directory, "events.json")
-+            with open(target, "w", encoding="utf-8") as file:
-+                json.dump({"version": 1, "last_sequence": 0, "events": []}, file)
-+            os.symlink(target, journal)
-+            with self.assertRaisesRegex(ValueError, "could not be loaded safely"):
-+                EventHub(
-+                    history_path=journal,
-+                    event_encoder=self.encode_event,
-+                    event_decoder=self.decode_event,
-+                )
-+
- 
- class TwistValidationTests(unittest.TestCase):
-     def test_accepts_valid_request(self):
-@@ -135,6 +318,74 @@ class TwistValidationTests(unittest.TestCase):
-         with self.assertRaisesRegex(ValueError, "Angular velocity magnitude"):
-             validate_twist_request(request(angular_x=0.8, angular_z=0.8))
- 
-+    def test_robot_configs_apply_different_limits_and_modes(self):
-+        registry = RobotConfigRegistry()
-+        small_robot = RobotMotionConfig(
-+            "/small/cmd_vel",
-+            max_linear_velocity=0.2,
-+            max_angular_velocity=0.4,
-+            permitted_motion_modes=("planar",),
-+        )
-+        registry.set(small_robot)
-+        self.assertEqual(registry.get("/large/cmd_vel").max_linear_velocity, 0.5)
-+        with self.assertRaisesRegex(ValueError, "robot limit"):
-+            registry.validate_command(request("/small/cmd_vel", value=0.3))
-+        with self.assertRaisesRegex(ValueError, "planar"):
-+            registry.validate_command(
-+                request("/small/cmd_vel", value=0.1, linear_y=0.01)
-+            )
-+
-+    def test_robot_config_rejects_unsafe_limits_and_timeouts(self):
-+        with self.assertRaises(ValueError):
-+            RobotMotionConfig("/robot/cmd_vel", max_linear_velocity=100).validate()
-+        with self.assertRaises(ValueError):
-+            RobotMotionConfig("/robot/cmd_vel", max_linear_velocity=True).validate()
-+        with self.assertRaises(ValueError):
-+            RobotMotionConfig(
-+                "/robot/cmd_vel",
-+                command_lease_ms=2000,
-+                command_timeout_ms=1000,
-+            ).validate()
-+
-+    def test_robot_config_can_explicitly_allow_full_twist(self):
-+        registry = RobotConfigRegistry()
-+        registry.set(
-+            RobotMotionConfig(
-+                "/arm/cmd_vel",
-+                permitted_motion_modes=("full_twist",),
-+            )
-+        )
-+        command = request("/arm/cmd_vel", value=0.1, linear_y=0.1)
-+        registry.validate_command(command, monotonic_now=1.0)
-+
-+    def test_robot_configs_persist_and_reload(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            path = os.path.join(directory, "config", "robots.json")
-+            registry = RobotConfigRegistry(path)
-+            saved = RobotMotionConfig(
-+                "/robot/cmd_vel",
-+                max_linear_velocity=0.25,
-+                permitted_motion_modes=("planar",),
-+            )
-+            registry.set(saved)
-+            reloaded = RobotConfigRegistry(path)
-+            self.assertEqual(reloaded.get("/robot/cmd_vel"), saved)
-+            reloaded.reset("/robot/cmd_vel")
-+            self.assertEqual(reloaded.get("/robot/cmd_vel").max_linear_velocity, 0.5)
-+
-+    def test_acceleration_limits_are_enforced_per_robot(self):
-+        registry = RobotConfigRegistry()
-+        registry.set(
-+            RobotMotionConfig(
-+                "/robot/cmd_vel",
-+                max_linear_acceleration=0.5,
-+                max_angular_acceleration=1.0,
-+            )
-+        )
-+        registry.validate_command(request(value=0.1), monotonic_now=10.0)
-+        with self.assertRaisesRegex(ValueError, "acceleration"):
-+            registry.validate_command(request(value=0.2), monotonic_now=10.1)
-+
-     def test_command_lease_expires_and_refreshes(self):
-         leases = CommandLeaseManager(timeout_seconds=0.5)
-         leases.refresh("/robot/cmd_vel", now=10.0)
-@@ -181,5 +432,81 @@ class AuthenticationTests(unittest.TestCase):
-                     load_auth_credentials(credential_file.name)
- 
- 
-+class SafetyControllerTests(unittest.TestCase):
-+    def test_latches_activation_and_requires_explicit_reset(self):
-+        calls = []
-+        safety = SafetyController(lambda: calls.append("stop"))
-+        self.assertEqual(safety.snapshot()[0], "READY")
-+        self.assertEqual(safety.activate()[0], "ACTIVE")
-+        with self.assertRaisesRegex(ValueError, "ACTIVE"):
-+            safety.run_if_motion_permitted(lambda: None)
-+        self.assertEqual(safety.reset()[0], "READY")
-+        self.assertEqual(calls, ["stop", "stop"])
-+
-+    def test_stop_failure_latches_fault_and_reset_failure_is_not_reported_ready(self):
-+        safety = SafetyController(lambda: (_ for _ in ()).throw(OSError("publisher failed")))
-+        with self.assertRaises(RuntimeError):
-+            safety.activate()
-+        self.assertEqual(safety.snapshot()[0], "FAULT")
-+
-+    def test_event_history_failure_can_fail_closed_and_persist_safety_fault(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            stops = []
-+            safety = SafetyController(lambda: stops.append("stop"), os.path.join(directory, "safety.json"))
-+            safety.latch_fault("event history unavailable")
-+            self.assertEqual(safety.snapshot()[0], "FAULT")
-+            self.assertIn("event history unavailable", safety.snapshot()[1])
-+            self.assertEqual(stops, ["stop"])
-+            restarted = SafetyController(lambda: None, os.path.join(directory, "safety.json"))
-+            self.assertEqual(restarted.snapshot()[0], "FAULT")
-+
-+    def test_latched_state_survives_controller_restart(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            path = os.path.join(directory, "safety.json")
-+            first = SafetyController(lambda: None, path)
-+            first.activate()
-+            first.reset()
-+            restarted = SafetyController(lambda: None, path)
-+            self.assertEqual(restarted.snapshot()[0], "READY")
-+            self.assertEqual(
-+                [event["event"] for event in restarted.history()],
-+                ["ACTIVATED", "RESET_REQUESTED", "RESET_CONFIRMED"],
-+            )
-+
-+    def test_interrupted_reset_restores_as_latched_and_history_is_preserved(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            path = os.path.join(directory, "safety.json")
-+            first = SafetyController(lambda: None, path)
-+            first.activate()
-+            with open(path, encoding="utf-8") as state_file:
-+                state = json.load(state_file)
-+            state["state"] = "RESET_PENDING"
-+            with open(path, "w", encoding="utf-8") as state_file:
-+                json.dump(state, state_file)
-+
-+            restarted = SafetyController(lambda: None, path)
-+            self.assertEqual(restarted.snapshot()[0], "ACTIVE")
-+            self.assertEqual(restarted.history()[0]["event"], "ACTIVATED")
-+
-+    def test_restored_stop_is_reasserted_and_failure_latches_fault(self):
-+        with tempfile.TemporaryDirectory() as directory:
-+            path = os.path.join(directory, "safety.json")
-+            SafetyController(lambda: None, path).activate()
-+            calls = []
-+            restarted = SafetyController(lambda: calls.append("stop"), path)
-+            restarted.enforce_latched_stop()
-+            self.assertEqual(calls, ["stop"])
-+            self.assertEqual(restarted.snapshot()[0], "ACTIVE")
-+            self.assertEqual(restarted.history()[-1]["event"], "STOP_REASSERTED")
-+
-+            failing = SafetyController(
-+                lambda: (_ for _ in ()).throw(OSError("publisher failed")),
-+                path,
-+            )
-+            with self.assertRaises(RuntimeError):
-+                failing.enforce_latched_stop()
-+            self.assertEqual(failing.snapshot()[0], "FAULT")
++            self.assertEqual(discover_workspace_packages(workspace), [])
 +
 +
- if __name__ == "__main__":
-     unittest.main()
+ class EventHubTests(unittest.TestCase):
+     def test_subscribers_receive_independent_events(self):
+         hub = EventHub()
 diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
-index 8fd1649..586a93c 100644
+index 586a93c..9f082ee 100644
 --- a/src-tauri/src/lib.rs
 +++ b/src-tauri/src/lib.rs
-@@ -1,15 +1,18 @@
--use std::collections::HashSet;
-+use std::collections::{HashMap, HashSet};
- use std::fs;
+@@ -3,6 +3,8 @@ use std::fs;
  use std::path::{Component, Path, PathBuf};
--use std::sync::Mutex;
-+use std::sync::{Arc, Mutex, OnceLock};
- 
+ use std::sync::{Arc, Mutex, OnceLock};
+
++mod urdf;
++
  const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
  const MAX_WORLD_SIZE: u64 = 10 * 1024 * 1024;
  const MAX_DIRECTORY_ENTRIES: usize = 10_000;
-+static ACTIVE_ROS_WORKSPACE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
- 
- #[derive(Default)]
- struct FsAccess {
-     approved_roots: Mutex<HashSet<PathBuf>>,
-+    #[cfg(unix)]
-+    root_descriptors: Mutex<HashMap<PathBuf, Arc<rustix::fd::OwnedFd>>>,
+@@ -980,6 +982,11 @@ fn validate_sdf_file(path: &Path, content: &str) -> Result<(), String> {
+     Ok(())
  }
- 
- impl FsAccess {
-@@ -21,10 +24,39 @@ impl FsAccess {
-             return Err("Selected path is not a directory".to_string());
-         }
- 
-+        #[cfg(unix)]
-+        let descriptor = rustix::fs::open(
-+            &canonical,
-+            rustix::fs::OFlags::RDONLY
-+                | rustix::fs::OFlags::DIRECTORY
-+                | rustix::fs::OFlags::NOFOLLOW
-+                | rustix::fs::OFlags::CLOEXEC,
-+            rustix::fs::Mode::empty(),
-+        )
-+        .map_err(|error| format!("Could not pin selected directory: {error}"))?;
-+        #[cfg(unix)]
-+        {
-+            use std::os::unix::fs::MetadataExt;
-+            let path_metadata = fs::metadata(&canonical)
-+                .map_err(|error| format!("Could not verify selected directory: {error}"))?;
-+            let descriptor_metadata = rustix::fs::fstat(&descriptor)
-+                .map_err(|error| format!("Could not verify selected directory: {error}"))?;
-+            if path_metadata.dev() != descriptor_metadata.st_dev as u64
-+                || path_metadata.ino() != descriptor_metadata.st_ino
-+            {
-+                return Err("Selected directory changed while it was being approved".to_string());
-+            }
-+        }
-+
-         self.approved_roots
-             .lock()
-             .map_err(|_| "Filesystem access state is unavailable".to_string())?
-             .insert(canonical.clone());
-+        #[cfg(unix)]
-+        self.root_descriptors
-+            .lock()
-+            .map_err(|_| "Filesystem access state is unavailable".to_string())?
-+            .insert(canonical.clone(), Arc::new(descriptor));
-         Ok(canonical)
-     }
- 
-@@ -86,8 +118,365 @@ impl FsAccess {
- 
-         Err("Path is outside approved directories".to_string())
-     }
-+
-+    #[cfg(unix)]
-+    fn descriptor_and_relative_path(
-+        &self,
-+        path: &Path,
-+    ) -> Result<(rustix::fd::OwnedFd, PathBuf), String> {
-+        if !path.is_absolute()
-+            || path
-+                .components()
-+                .any(|component| matches!(component, Component::ParentDir | Component::Prefix(_)))
-+        {
-+            return Err(
-+                "Path must be absolute and cannot contain traversal components".to_string(),
-+            );
-+        }
-+
-+        let roots = self
-+            .approved_roots
-+            .lock()
-+            .map_err(|_| "Filesystem access state is unavailable".to_string())?;
-+        let candidate: PathBuf = if roots.iter().any(|root| path.starts_with(root)) {
-+            path.to_path_buf()
-+        } else {
-+            let normalized: std::io::Result<PathBuf> = path.canonicalize().or_else(|_| {
-+                let parent = path
-+                    .parent()
-+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?
-+                    .canonicalize()?;
-+                let name = path
-+                    .file_name()
-+                    .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))?;
-+                Ok(parent.join(name))
-+            });
-+            normalized.map_err(|_| "Path is outside approved directories".to_string())?
-+        };
-+        let root = roots
-+            .iter()
-+            .filter(|root| candidate.starts_with(root))
-+            .max_by_key(|root| root.components().count())
-+            .ok_or_else(|| "Path is outside approved directories".to_string())?;
-+        let relative = candidate
-+            .strip_prefix(root)
-+            .map_err(|_| "Path is outside approved directories".to_string())?;
-+        if relative
-+            .components()
-+            .any(|component| !matches!(component, Component::Normal(_)))
-+        {
-+            return Err("Path contains an unsupported component".to_string());
-+        }
-+
-+        let descriptors = self
-+            .root_descriptors
-+            .lock()
-+            .map_err(|_| "Filesystem access state is unavailable".to_string())?;
-+        let descriptor = descriptors
-+            .get(root)
-+            .ok_or_else(|| "Approved directory handle is unavailable".to_string())?;
-+        let path_metadata = fs::metadata(root)
-+            .map_err(|_| "An approved directory is no longer available".to_string())?;
-+        let descriptor_metadata = rustix::fs::fstat(&**descriptor)
-+            .map_err(|error| format!("Could not verify approved directory: {error}"))?;
-+        use std::os::unix::fs::MetadataExt;
-+        if path_metadata.dev() != descriptor_metadata.st_dev as u64
-+            || path_metadata.ino() != descriptor_metadata.st_ino
-+        {
-+            return Err("An approved directory has been moved or replaced".to_string());
-+        }
-+        let duplicated = rustix::io::dup(&**descriptor)
-+            .map_err(|error| format!("Could not access approved directory: {error}"))?;
-+        Ok((duplicated, relative.to_path_buf()))
-+    }
-+
-+    #[cfg(unix)]
-+    fn open_rooted_path(&self, path: &Path, flags: rustix::fs::OFlags) -> Result<fs::File, String> {
-+        use rustix::fs::{openat, Mode, OFlags};
-+
-+        let (mut current, relative) = self.descriptor_and_relative_path(path)?;
-+        let components = relative
-+            .components()
-+            .map(|component| match component {
-+                Component::Normal(name) => Ok(name.to_os_string()),
-+                _ => Err("Path contains an unsupported component".to_string()),
-+            })
-+            .collect::<Result<Vec<_>, _>>()?;
-+        if components.is_empty() {
-+            return Ok(fs::File::from(current));
-+        }
-+        for component in &components[..components.len() - 1] {
-+            current = openat(
-+                &current,
-+                component,
-+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+                Mode::empty(),
-+            )
-+            .map_err(|error| format!("Could not safely open directory: {error}"))?;
-+        }
-+        let descriptor = openat(
-+            &current,
-+            &components[components.len() - 1],
-+            flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+            Mode::empty(),
-+        )
-+        .map_err(|error| format!("Could not safely open file: {error}"))?;
-+        Ok(fs::File::from(descriptor))
-+    }
-+
-+    #[cfg(unix)]
-+    fn rooted_parent_and_name(
-+        &self,
-+        path: &Path,
-+    ) -> Result<(rustix::fd::OwnedFd, std::ffi::OsString), String> {
-+        use rustix::fs::{openat, Mode, OFlags};
-+
-+        let (mut current, relative) = self.descriptor_and_relative_path(path)?;
-+        let components = relative
-+            .components()
-+            .map(|component| match component {
-+                Component::Normal(name) => Ok(name.to_os_string()),
-+                _ => Err("Path contains an unsupported component".to_string()),
-+            })
-+            .collect::<Result<Vec<_>, _>>()?;
-+        let Some(name) = components.last().cloned() else {
-+            return Err("Destination must name a file inside an approved directory".to_string());
-+        };
-+        for component in &components[..components.len() - 1] {
-+            current = openat(
-+                &current,
-+                component,
-+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+                Mode::empty(),
-+            )
-+            .map_err(|error| format!("Could not safely open destination directory: {error}"))?;
-+        }
-+        Ok((current, name))
-+    }
-+
-+    #[cfg(unix)]
-+    fn create_directory(&self, path: &Path) -> Result<(), String> {
-+        let (parent, name) = self.rooted_parent_and_name(path)?;
-+        rustix::fs::mkdirat(&parent, name, rustix::fs::Mode::RWXU)
-+            .map_err(|error| format!("Could not safely create directory: {error}"))
-+    }
-+
-+    #[cfg(not(unix))]
-+    fn create_directory(&self, path: &Path) -> Result<(), String> {
-+        let path = self.resolve_for_write(path)?;
-+        fs::create_dir(path).map_err(|error| format!("Could not create directory: {error}"))
-+    }
-+
-+    fn ensure_directory(&self, path: &Path) -> Result<(), String> {
-+        if self.open_approved_directory(path).is_ok() {
-+            return Ok(());
-+        }
-+        self.create_directory(path)?;
-+        self.open_approved_directory(path)
-+    }
-+
-+    #[cfg(unix)]
-+    fn open_approved_directory(&self, path: &Path) -> Result<(), String> {
-+        self.open_rooted_path(
-+            path,
-+            rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
-+        )
-+        .map(|_| ())
-+    }
-+
-+    #[cfg(not(unix))]
-+    fn open_approved_directory(&self, path: &Path) -> Result<(), String> {
-+        let path = self.resolve_existing(path)?;
-+        if path.is_dir() {
-+            Ok(())
-+        } else {
-+            Err("Path is not a directory".to_string())
-+        }
-+    }
-+
-+    #[cfg(unix)]
-+    fn create_new_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
-+        use rustix::fs::{openat, unlinkat, AtFlags, Mode, OFlags};
-+
-+        if contents.len() as u64 > MAX_WORLD_SIZE {
-+            return Err(format!("File exceeds the {MAX_WORLD_SIZE}-byte limit"));
-+        }
-+        let (parent, name) = self.rooted_parent_and_name(path)?;
-+        let descriptor = openat(
-+            &parent,
-+            &name,
-+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+            Mode::RUSR | Mode::WUSR,
-+        )
-+        .map_err(|error| format!("Could not safely create file: {error}"))?;
-+        let mut file = fs::File::from(descriptor);
-+        let result = (|| {
-+            std::io::Write::write_all(&mut file, contents).map_err(|error| error.to_string())?;
-+            file.sync_all().map_err(|error| error.to_string())?;
-+            rustix::fs::fsync(&parent).map_err(|error| error.to_string())
-+        })();
-+        if result.is_err() {
-+            let _ = unlinkat(&parent, &name, AtFlags::empty());
-+        }
-+        result
-+    }
-+
-+    #[cfg(unix)]
-+    fn copy_file_if_missing(&self, source: &Path, destination: &Path) -> Result<(), String> {
-+        use rustix::fs::{openat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
-+
-+        let (parent, name) = self.rooted_parent_and_name(destination)?;
-+        match statat(&parent, &name, AtFlags::SYMLINK_NOFOLLOW) {
-+            Ok(metadata) if FileType::from_raw_mode(metadata.st_mode).is_file() => return Ok(()),
-+            Ok(_) => return Err("Copy destination must be a regular file".to_string()),
-+            Err(error) if error == rustix::io::Errno::NOENT => {}
-+            Err(error) => return Err(format!("Could not inspect copy destination: {error}")),
-+        }
-+
-+        let descriptor = openat(
-+            &parent,
-+            &name,
-+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+            Mode::RUSR | Mode::WUSR,
-+        )
-+        .map_err(|error| format!("Could not safely create copy destination: {error}"))?;
-+        let mut output = fs::File::from(descriptor);
-+        let result = (|| {
-+            let mut input = fs::File::open(source).map_err(|error| error.to_string())?;
-+            let permissions = input
-+                .metadata()
-+                .map_err(|error| error.to_string())?
-+                .permissions();
-+            std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
-+            output
-+                .set_permissions(permissions)
-+                .map_err(|error| error.to_string())?;
-+            output.sync_all().map_err(|error| error.to_string())?;
-+            rustix::fs::fsync(&parent).map_err(|error| error.to_string())
-+        })();
-+        if result.is_err() {
-+            let _ = unlinkat(&parent, &name, AtFlags::empty());
-+        }
-+        result
-+    }
-+
-+    #[cfg(unix)]
-+    fn read_file_if_present(&self, path: &Path) -> Result<Option<Vec<u8>>, String> {
-+        use rustix::fs::{openat, statat, AtFlags, FileType, OFlags};
-+
-+        let (parent, name) = self.rooted_parent_and_name(path)?;
-+        match statat(&parent, &name, AtFlags::SYMLINK_NOFOLLOW) {
-+            Ok(metadata) if FileType::from_raw_mode(metadata.st_mode).is_file() => {}
-+            Ok(_) => return Err("Workspace file must be a regular file".to_string()),
-+            Err(error) if error == rustix::io::Errno::NOENT => return Ok(None),
-+            Err(error) => return Err(format!("Could not inspect workspace file safely: {error}")),
-+        }
-+        let descriptor = openat(
-+            &parent,
-+            &name,
-+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+            rustix::fs::Mode::empty(),
-+        )
-+        .map_err(|error| format!("Could not safely read workspace file: {error}"))?;
-+        let mut file = fs::File::from(descriptor);
-+        let mut contents = Vec::new();
-+        file.by_ref()
-+            .take(MAX_FILE_SIZE + 1)
-+            .read_to_end(&mut contents)
-+            .map_err(|error| format!("Could not read workspace file: {error}"))?;
-+        if contents.len() as u64 > MAX_FILE_SIZE {
-+            return Err(format!(
-+                "Workspace file exceeds the {MAX_FILE_SIZE}-byte limit"
-+            ));
-+        }
-+        Ok(Some(contents))
-+    }
-+
-+    #[cfg(not(unix))]
-+    fn read_file_if_present(&self, path: &Path) -> Result<Option<Vec<u8>>, String> {
-+        let path = self.resolve_for_write(path)?;
-+        let metadata = match fs::symlink_metadata(&path) {
-+            Ok(metadata) => metadata,
-+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-+            Err(error) => return Err(format!("Could not inspect workspace file: {error}")),
-+        };
-+        if metadata.file_type().is_symlink() || !metadata.is_file() {
-+            return Err("Workspace file must be a regular file".to_string());
-+        }
-+        let mut file = fs::File::open(path)
-+            .map_err(|error| format!("Could not read workspace file: {error}"))?;
-+        let mut contents = Vec::new();
-+        file.by_ref()
-+            .take(MAX_FILE_SIZE + 1)
-+            .read_to_end(&mut contents)
-+            .map_err(|error| format!("Could not read workspace file: {error}"))?;
-+        if contents.len() as u64 > MAX_FILE_SIZE {
-+            return Err(format!(
-+                "Workspace file exceeds the {MAX_FILE_SIZE}-byte limit"
-+            ));
-+        }
-+        Ok(Some(contents))
-+    }
-+
-+    #[cfg(not(unix))]
-+    fn copy_file_if_missing(&self, source: &Path, destination: &Path) -> Result<(), String> {
-+        let destination = self.resolve_for_write(destination)?;
-+        match fs::symlink_metadata(&destination) {
-+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
-+                return Ok(());
-+            }
-+            Ok(_) => return Err("Copy destination must be a regular file".to_string()),
-+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-+            Err(error) => return Err(format!("Could not inspect copy destination: {error}")),
-+        }
-+
-+        let mut input = fs::File::open(source).map_err(|error| error.to_string())?;
-+        let permissions = input
-+            .metadata()
-+            .map_err(|error| error.to_string())?
-+            .permissions();
-+        let mut output = fs::OpenOptions::new()
-+            .write(true)
-+            .create_new(true)
-+            .open(destination)
-+            .map_err(|error| error.to_string())?;
-+        std::io::copy(&mut input, &mut output).map_err(|error| error.to_string())?;
-+        output
-+            .set_permissions(permissions)
-+            .map_err(|error| error.to_string())?;
-+        output.sync_all().map_err(|error| error.to_string())
-+    }
-+
-+    #[cfg(not(unix))]
-+    fn create_new_file(&self, path: &Path, contents: &[u8]) -> Result<(), String> {
-+        if contents.len() as u64 > MAX_WORLD_SIZE {
-+            return Err(format!("File exceeds the {MAX_WORLD_SIZE}-byte limit"));
-+        }
-+        let path = self.resolve_for_write(path)?;
-+        let mut file = fs::OpenOptions::new()
-+            .write(true)
-+            .create_new(true)
-+            .open(path)
-+            .map_err(|error| error.to_string())?;
-+        std::io::Write::write_all(&mut file, contents).map_err(|error| error.to_string())?;
-+        file.sync_all().map_err(|error| error.to_string())
-+    }
-+}
-+
-+#[cfg(unix)]
-+fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String> {
-+    let file = access.open_rooted_path(path, rustix::fs::OFlags::RDONLY)?;
-+    let metadata = file.metadata().map_err(|error| error.to_string())?;
-+    if !metadata.is_file() {
-+        return Err("Path is not a regular file".to_string());
-+    }
-+    if metadata.len() > MAX_FILE_SIZE {
-+        return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
-+    }
-+    read_file_limited(file, MAX_FILE_SIZE)
- }
- 
-+#[cfg(not(unix))]
- fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String> {
-     let path = access.resolve_existing(path)?;
-     let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
-@@ -100,6 +489,18 @@ fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String>
-     read_text_file_limited(&path, MAX_FILE_SIZE)
- }
- 
-+fn read_file_limited(mut file: fs::File, max_bytes: u64) -> Result<String, String> {
-+    let mut contents = String::new();
-+    file.by_ref()
-+        .take(max_bytes + 1)
-+        .read_to_string(&mut contents)
-+        .map_err(|error| error.to_string())?;
-+    if contents.len() as u64 > max_bytes {
-+        return Err(format!("File exceeds the {max_bytes}-byte limit"));
-+    }
-+    Ok(contents)
-+}
-+
- fn read_text_file_limited(path: &Path, max_bytes: u64) -> Result<String, String> {
-     let file = fs::File::open(path).map_err(|error| error.to_string())?;
-     let mut contents = String::new();
-@@ -112,6 +513,52 @@ fn read_text_file_limited(path: &Path, max_bytes: u64) -> Result<String, String>
-     Ok(contents)
- }
- 
-+#[cfg(unix)]
-+fn write_approved_file(access: &FsAccess, path: &Path, contents: &str) -> Result<(), String> {
-+    if contents.len() as u64 > MAX_FILE_SIZE {
-+        return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
-+    }
-+    use rustix::fs::{openat, renameat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
-+
-+    let (parent, name) = access.rooted_parent_and_name(path)?;
-+    match statat(&parent, &name, AtFlags::SYMLINK_NOFOLLOW) {
-+        Ok(metadata) => {
-+            if !FileType::from_raw_mode(metadata.st_mode).is_file() {
-+                return Err("Destination must be a regular file, not a symbolic link".to_string());
-+            }
-+        }
-+        Err(error) if error == rustix::io::Errno::NOENT => {}
-+        Err(error) => return Err(format!("Could not inspect destination safely: {error}")),
-+    }
-+    let counter = std::sync::atomic::AtomicU64::fetch_add(
-+        &FILE_WRITE_COUNTER,
-+        1,
-+        std::sync::atomic::Ordering::Relaxed,
-+    );
-+    let temporary = format!(".write-{}.{}.tmp", std::process::id(), counter);
-+    let write_result = (|| {
-+        let descriptor = openat(
-+            &parent,
-+            &temporary,
-+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-+            Mode::RUSR | Mode::WUSR,
-+        )
-+        .map_err(|error| format!("Could not create temporary file safely: {error}"))?;
-+        let mut file = fs::File::from(descriptor);
-+        std::io::Write::write_all(&mut file, contents.as_bytes())
-+            .map_err(|error| error.to_string())?;
-+        file.sync_all().map_err(|error| error.to_string())?;
-+        renameat(&parent, &temporary, &parent, &name)
-+            .map_err(|error| format!("Could not atomically replace destination: {error}"))?;
-+        rustix::fs::fsync(&parent).map_err(|error| error.to_string())
-+    })();
-+    if write_result.is_err() {
-+        let _ = unlinkat(&parent, &temporary, AtFlags::empty());
-+    }
-+    write_result
-+}
-+
-+#[cfg(not(unix))]
- fn write_approved_file(access: &FsAccess, path: &Path, contents: &str) -> Result<(), String> {
-     if contents.len() as u64 > MAX_FILE_SIZE {
-         return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
-@@ -305,36 +752,64 @@ struct FileEntry {
-     is_dir: bool,
- }
- 
--#[tauri::command]
--fn list_dir(access: tauri::State<'_, FsAccess>, path: String) -> Result<Vec<FileEntry>, String> {
--    let path = access.resolve_existing(Path::new(&path))?;
-+#[cfg(unix)]
-+fn list_approved_directory(access: &FsAccess, requested: &Path) -> Result<Vec<FileEntry>, String> {
-+    let path = access.open_rooted_path(
-+        requested,
-+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY,
-+    )?;
-+    let mut directory = rustix::fs::Dir::read_from(&path).map_err(|error| error.to_string())?;
-+    let mut result = Vec::new();
-+    while let Some(entry) = directory.read() {
-+        let entry = entry.map_err(|error| error.to_string())?;
-+        let name = entry.file_name().to_string_lossy().into_owned();
-+        if name == "." || name == ".." {
-+            continue;
-+        }
-+        if result.len() >= MAX_DIRECTORY_ENTRIES {
-+            return Err(format!(
-+                "Directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
-+            ));
-+        }
-+        result.push(FileEntry {
-+            path: requested.join(&name).to_string_lossy().into_owned(),
-+            name,
-+            is_dir: entry.file_type().is_dir(),
-+        });
-+    }
-+    Ok(result)
-+}
-+
-+#[cfg(not(unix))]
-+fn list_approved_directory(access: &FsAccess, requested: &Path) -> Result<Vec<FileEntry>, String> {
-+    let path = access.resolve_existing(requested)?;
-     if !path.is_dir() {
-         return Err("Path is not a directory".to_string());
-     }
--    let entries = fs::read_dir(&path).map_err(|e| e.to_string())?;
-+    let entries = fs::read_dir(&path).map_err(|error| error.to_string())?;
-     let mut result = Vec::new();
--
-     for (index, entry) in entries.enumerate() {
-         if index >= MAX_DIRECTORY_ENTRIES {
-             return Err(format!(
-                 "Directory contains more than {MAX_DIRECTORY_ENTRIES} entries"
-             ));
-         }
--        let entry = entry.map_err(|e| e.to_string())?;
--        let file_type = entry.file_type().map_err(|e| e.to_string())?;
--        let name = entry.file_name().to_string_lossy().to_string();
--        let full_path = entry.path().to_string_lossy().to_string();
--
-+        let entry = entry.map_err(|error| error.to_string())?;
-+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
-         result.push(FileEntry {
--            name,
--            path: full_path,
-+            name: entry.file_name().to_string_lossy().into_owned(),
-+            path: entry.path().to_string_lossy().into_owned(),
-             is_dir: file_type.is_dir(),
-         });
-     }
--
-     Ok(result)
- }
- 
+
 +#[tauri::command]
-+fn list_dir(access: tauri::State<'_, FsAccess>, path: String) -> Result<Vec<FileEntry>, String> {
-+    list_approved_directory(&access, Path::new(&path))
++fn parse_robot_description(content: String) -> Result<urdf::RobotDescription, String> {
++    urdf::parse_robot_description(&content)
 +}
 +
- #[tauri::command]
- async fn pick_directory(
-     app: AppHandle,
-@@ -506,34 +981,17 @@ fn validate_sdf_file(path: &Path, content: &str) -> Result<(), String> {
- }
- 
  fn import_world_contents(
-+    access: &FsAccess,
+     access: &FsAccess,
      workspace: &Path,
-     source: &Path,
-     content: &str,
- ) -> Result<PathBuf, String> {
-     validate_sdf_file(source, content)?;
--    let workspace = workspace
--        .canonicalize()
-+    let workspace = access
-+        .resolve_existing(workspace)
-         .map_err(|error| format!("ROS workspace is unavailable: {error}"))?;
-     let worlds_dir = workspace.join("worlds");
--    match fs::symlink_metadata(&worlds_dir) {
--        Ok(metadata) if metadata.file_type().is_symlink() => {
--            return Err("World import directory must not be a symbolic link".to_string());
--        }
--        Ok(metadata) if !metadata.is_dir() => {
--            return Err("World import path is not a directory".to_string());
--        }
--        Ok(_) => {}
--        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
--            fs::create_dir(&worlds_dir).map_err(|error| error.to_string())?;
--        }
--        Err(error) => return Err(error.to_string()),
--    }
--    let canonical_worlds = worlds_dir
--        .canonicalize()
--        .map_err(|error| format!("Could not resolve world import directory: {error}"))?;
--    if !canonical_worlds.starts_with(&workspace) {
--        return Err("World import directory escapes the ROS workspace".to_string());
--    }
-+    access.ensure_directory(&worlds_dir)?;
- 
-     let source_stem = source
-         .file_stem()
-@@ -559,20 +1017,10 @@ fn import_world_contents(
-             "{safe_stem}-{timestamp}-{}-{attempt}.sdf",
-             std::process::id()
-         );
--        let destination = canonical_worlds.join(name);
--        match std::fs::OpenOptions::new()
--            .write(true)
--            .create_new(true)
--            .open(&destination)
--        {
--            Ok(mut file) => {
--                if let Err(error) = std::io::Write::write_all(&mut file, content.as_bytes()) {
--                    let _ = fs::remove_file(&destination);
--                    return Err(format!("Could not import world file: {error}"));
--                }
--                return Ok(destination);
--            }
--            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-+        let destination = worlds_dir.join(&name);
-+        match access.create_new_file(&destination, content.as_bytes()) {
-+            Ok(()) => return Ok(destination),
-+            Err(error) if error.contains("File exists") => continue,
-             Err(error) => return Err(format!("Could not import world file: {error}")),
-         }
-     }
-@@ -613,7 +1061,7 @@ async fn import_world(
-     let workspace = PathBuf::from(get_default_workspace_dir()?);
-     fs::create_dir_all(&workspace).map_err(|error| error.to_string())?;
-     access.approve_directory(&workspace)?;
--    let imported = import_world_contents(&workspace, &source, &content)?;
-+    let imported = import_world_contents(&access, &workspace, &source, &content)?;
-     Ok(Some(imported.to_string_lossy().into_owned()))
- }
- 
-@@ -655,18 +1103,27 @@ pub fn run() {
-             write_file,
+@@ -1104,6 +1111,7 @@ pub fn run() {
              list_dir,
              pick_directory,
-+            set_ros_workspace,
+             set_ros_workspace,
++            parse_robot_description,
              pick_save_path,
              pick_keybindings_file,
              import_world,
-             start_ros_stream,
-             run_colcon_build,
-             run_colcon_build_streaming,
-+            cancel_colcon_build,
-+            list_managed_processes,
-+            list_ros_packages,
-             start_gazebo_sim,
-             stop_gazebo_sim,
-             reset_gazebo_sim,
-             ask_ai,
-             initialize_ros_environment,
-             publish_twist,
-+            set_emergency_stop,
-+            get_safety_state,
-+            get_robot_config,
-+            save_robot_config,
-+            reset_robot_config,
-             save_ai_settings,
-             load_ai_settings,
-             delete_ai_credential,
-@@ -695,6 +1152,68 @@ use std::sync::atomic::{AtomicBool, Ordering};
- use tauri::{AppHandle, Emitter};
- 
- static STREAM_RUNNING: AtomicBool = AtomicBool::new(false);
-+static LAST_ROS_EVENT_SEQUENCE_BY_WORKSPACE: OnceLock<Mutex<HashMap<String, u64>>> =
-+    OnceLock::new();
-+static ROS_SERVER_TLS_CERTIFICATE: OnceLock<Mutex<Option<Vec<u8>>>> = OnceLock::new();
-+
-+fn set_ros_server_tls_certificate(certificate: Vec<u8>) -> Result<(), String> {
-+    if !certificate.starts_with(b"-----BEGIN CERTIFICATE-----")
-+        || !certificate.ends_with(b"-----END CERTIFICATE-----\n")
-+    {
-+        return Err("ROS service returned an invalid TLS certificate".to_string());
-+    }
-+    *ROS_SERVER_TLS_CERTIFICATE
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "ROS TLS certificate state is unavailable".to_string())? = Some(certificate);
-+    Ok(())
-+}
-+
-+async fn connect_ros_engine() -> Result<RosEngineClient<tonic::transport::Channel>, String> {
-+    let certificate = ROS_SERVER_TLS_CERTIFICATE
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "ROS TLS certificate state is unavailable".to_string())?
-+        .clone()
-+        .ok_or_else(|| "ROS service TLS certificate is not initialized".to_string())?;
-+    let tls = tonic::transport::ClientTlsConfig::new()
-+        .ca_certificate(tonic::transport::Certificate::from_pem(certificate))
-+        .domain_name("localhost");
-+    let endpoint = tonic::transport::Endpoint::from_static("https://127.0.0.1:50051")
-+        .tls_config(tls)
-+        .map_err(|error| format!("Could not configure ROS TLS: {error}"))?;
-+    let channel = endpoint
-+        .connect()
-+        .await
-+        .map_err(|error| format!("Could not establish authenticated ROS TLS: {error:?}"))?;
-+    Ok(RosEngineClient::new(channel))
-+}
-+
-+fn ros_event_cursor(workspace: &str) -> Result<u64, String> {
-+    let cursors = LAST_ROS_EVENT_SEQUENCE_BY_WORKSPACE
-+        .get_or_init(|| Mutex::new(HashMap::new()))
-+        .lock()
-+        .map_err(|_| "ROS event recovery state is unavailable".to_string())?;
-+    Ok(*cursors.get(workspace).unwrap_or(&0))
-+}
-+
-+fn update_ros_event_cursor(
-+    workspace: &str,
-+    sequence: u64,
-+    reset_on_gap: bool,
-+) -> Result<(), String> {
-+    let mut cursors = LAST_ROS_EVENT_SEQUENCE_BY_WORKSPACE
-+        .get_or_init(|| Mutex::new(HashMap::new()))
-+        .lock()
-+        .map_err(|_| "ROS event recovery state is unavailable".to_string())?;
-+    let cursor = cursors.entry(workspace.to_string()).or_default();
-+    if reset_on_gap && sequence < *cursor {
-+        *cursor = sequence;
-+    } else {
-+        *cursor = (*cursor).max(sequence);
-+    }
-+    Ok(())
-+}
- 
- fn stop_stream_for_auth_recovery(app: &AppHandle, message: &str) {
-     let _ = app.emit("ros-auth-error", message.to_string());
-@@ -711,6 +1230,14 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
- 
-     tauri::async_runtime::spawn(async move {
-         loop {
-+            let stream_workspace = match get_default_workspace_dir() {
-+                Ok(workspace) => workspace,
-+                Err(error) => {
-+                    let _ = app.emit("ros-error", error);
-+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-+                    continue;
-+                }
-+            };
-             let token = match read_grpc_auth_token(&app) {
-                 Ok(token) => token,
-                 Err(error) => {
-@@ -719,12 +1246,9 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-                 }
-             };
-             let _ = app.emit("ros-connecting", ());
--            println!("[ros-stream] attempting connection to localhost:50051");
--            let client_result = tokio::time::timeout(
--                std::time::Duration::from_secs(5),
--                RosEngineClient::connect("http://localhost:50051"),
--            )
--            .await;
-+            println!("[ros-stream] attempting authenticated TLS connection to ROS service");
-+            let client_result =
-+                tokio::time::timeout(std::time::Duration::from_secs(5), connect_ros_engine()).await;
- 
-             let mut client = match client_result {
-                 Ok(Ok(c)) => {
-@@ -744,7 +1268,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-                     continue;
-                 }
-             };
--            let request = match authenticated_request(Empty {}, &token) {
-+            let request = match authenticated_request(
-+                rosengine::ReplayEventsRequest {
-+                    has_after_sequence: true,
-+                    after_sequence: match ros_event_cursor(&stream_workspace) {
-+                        Ok(sequence) => sequence,
-+                        Err(error) => {
-+                            let _ = app.emit("ros-error", error);
-+                            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-+                            continue;
-+                        }
-+                    },
-+                },
-+                &token,
-+            ) {
-                 Ok(request) => request,
-                 Err(error) => {
-                     let _ = app.emit("ros-error", error);
-@@ -754,12 +1291,12 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-             };
-             let mut stream = match tokio::time::timeout(
-                 std::time::Duration::from_secs(5),
--                client.stream_events(request),
-+                client.replay_events(request),
-             )
-             .await
-             {
-                 Ok(Ok(s)) => {
--                    println!("[ros-stream] stream_events established, awaiting messages");
-+                    println!("[ros-stream] replayable event stream established");
-                     s.into_inner()
-                 }
-                 Ok(Err(e)) if e.code() == tonic::Code::Unauthenticated => {
-@@ -775,7 +1312,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-                     continue;
-                 }
-                 Err(_) => {
--                    let _ = app.emit("ros-error", "stream_events timed out".to_string());
-+                    let _ = app.emit("ros-error", "replay_events timed out".to_string());
-                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                     continue;
-                 }
-@@ -784,8 +1321,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-             loop {
-                 match stream.message().await {
-                     Ok(Some(evt)) => {
-+                        if !get_default_workspace_dir()
-+                            .is_ok_and(|workspace| workspace == stream_workspace)
-+                        {
-+                            break;
-+                        }
-                         println!("[ros-stream] received event: {:?}", evt);
-                         let _ = app.emit("ros-event", format!("{:?}", evt));
-+                        if evt.sequence > 0 {
-+                            if let Err(error) =
-+                                update_ros_event_cursor(&stream_workspace, evt.sequence, false)
-+                            {
-+                                let _ = app.emit("ros-error", error);
-+                            }
-+                        }
- 
-                         if let Some(rosengine::workspace_event::Event::OdometryUpdate(odom)) =
-                             &evt.event
-@@ -826,6 +1375,61 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -1367,6 +1375,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+                                     qy: tf.qy,
+                                     qz: tf.qz,
+                                     qw: tf.qw,
++                                    topic_name: tf.topic_name.clone(),
+                                 },
+                             );
+                         }
+@@ -1375,6 +1384,25 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                          {
                              let _ = app.emit("node-snapshot", snap.node_names.clone());
                          }
-+                        if let Some(rosengine::workspace_event::Event::SafetyState(state)) =
++                        if let Some(rosengine::workspace_event::Event::RosGraphSnapshot(snapshot)) =
 +                            &evt.event
 +                        {
-+                            let _ = app.emit("safety-state", safety_state_response(state));
++                            let _ = app
++                                .emit("ros-graph-snapshot", ros_graph_snapshot_response(snapshot));
 +                        }
-+                        if let Some(rosengine::workspace_event::Event::EventHealth(health)) =
++                        if let Some(rosengine::workspace_event::Event::JointStateUpdate(update)) =
 +                            &evt.event
 +                        {
 +                            let _ = app.emit(
-+                                "event-health",
-+                                EventHealthResponse {
-+                                    queue_capacity: health.queue_capacity,
-+                                    subscriber_count: health.subscriber_count,
-+                                    last_sequence: health.last_sequence,
-+                                    dropped_telemetry: health.dropped_telemetry,
-+                                    critical_overflows: health.critical_overflows,
-+                                    max_backlog: health.max_backlog,
-+                                    persistence_healthy: health.persistence_healthy,
-+                                    persistence_error: health.persistence_error.clone(),
-+                                    oldest_available_sequence: health.oldest_available_sequence,
-+                                    retained_critical_events: health.retained_critical_events,
++                                "joint-state-update",
++                                JointStateUpdateResponse {
++                                    topic_name: update.topic_name.clone(),
++                                    names: update.names.clone(),
++                                    positions: update.positions.clone(),
++                                    truncated: update.truncated,
 +                                },
 +                            );
 +                        }
-+                        if let Some(rosengine::workspace_event::Event::EventRecovery(recovery)) =
-+                            &evt.event
-+                        {
-+                            if recovery.gap_detected {
-+                                match ros_event_cursor(&stream_workspace) {
-+                                    Ok(cursor) if recovery.latest_sequence < cursor => {
-+                                        if let Err(error) = update_ros_event_cursor(
-+                                            &stream_workspace,
-+                                            recovery.latest_sequence,
-+                                            true,
-+                                        ) {
-+                                            let _ = app.emit("ros-error", error);
-+                                        }
-+                                    }
-+                                    Err(error) => {
-+                                        let _ = app.emit("ros-error", error);
-+                                    }
-+                                    _ => {}
-+                                }
-+                            }
-+                            let _ = app.emit(
-+                                "event-recovery",
-+                                EventRecoveryResponse {
-+                                    gap_detected: recovery.gap_detected,
-+                                    oldest_available_sequence: recovery.oldest_available_sequence,
-+                                    latest_sequence: recovery.latest_sequence,
-+                                    snapshot_included: recovery.snapshot_included,
-+                                    retained_critical_events: recovery.retained_critical_events,
-+                                },
-+                            );
-+                        }
-                     }
-                     Ok(None) => {
-                         let _ = app.emit("ros-error", "Stream closed by server".to_string());
-@@ -955,7 +1559,7 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
-         "Angular",
-     )?;
- 
--    let mut client = RosEngineClient::connect("http://localhost:50051")
-+    let mut client = connect_ros_engine()
-         .await
-         .map_err(|_| docker_lost_connection_message())?;
- 
-@@ -986,26 +1590,387 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
-     Ok(())
+                         if let Some(rosengine::workspace_event::Event::SafetyState(state)) =
+                             &evt.event
+                         {
+@@ -1623,6 +1651,139 @@ struct EventRecoveryResponse {
+     retained_critical_events: u32,
  }
- 
--use std::process::Command as StdCommand;
+
 +#[derive(Serialize, Clone)]
 +#[serde(rename_all = "camelCase")]
-+struct SafetyStateResponse {
-+    state: String,
-+    detail: String,
-+    updated_at_ns: i64,
-+}
- 
--fn docker_command() -> StdCommand {
--    let mut cmd = StdCommand::new("docker");
--    let current_path = std::env::var("PATH").unwrap_or_default();
--    let augmented_path = format!(
--        "/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:{}",
--        current_path
--    );
-+#[derive(Serialize, Clone)]
-+#[serde(rename_all = "camelCase")]
-+struct EventHealthResponse {
-+    queue_capacity: u32,
-+    subscriber_count: u32,
-+    last_sequence: u64,
-+    dropped_telemetry: u64,
-+    critical_overflows: u64,
-+    max_backlog: u32,
-+    persistence_healthy: bool,
-+    persistence_error: String,
-+    oldest_available_sequence: u64,
-+    retained_critical_events: u32,
-+}
-+
-+#[derive(Serialize, Clone)]
-+#[serde(rename_all = "camelCase")]
-+struct EventRecoveryResponse {
-+    gap_detected: bool,
-+    oldest_available_sequence: u64,
-+    latest_sequence: u64,
-+    snapshot_included: bool,
-+    retained_critical_events: u32,
-+}
-+
-+fn safety_state_response(state: &rosengine::SafetyState) -> SafetyStateResponse {
-+    SafetyStateResponse {
-+        state: match state.state {
-+            0 => "READY",
-+            1 => "ACTIVE",
-+            2 => "RESET_PENDING",
-+            3 => "FAULT",
-+            _ => "DISCONNECTED",
-+        }
-+        .to_string(),
-+        detail: state.detail.clone(),
-+        updated_at_ns: state.updated_at_ns,
-+    }
-+}
-+
-+async fn connect_ros_client(
-+    app: &AppHandle,
-+) -> Result<(RosEngineClient<tonic::transport::Channel>, String), String> {
-+    let token = read_grpc_auth_token(app)?;
-+    let client = tokio::time::timeout(std::time::Duration::from_secs(5), connect_ros_engine())
-+        .await
-+        .map_err(|_| "ROS service connection timed out".to_string())??;
-+    Ok((client, token))
-+}
-+
-+#[tauri::command]
-+async fn set_emergency_stop(app: AppHandle, activate: bool) -> Result<SafetyStateResponse, String> {
-+    let (mut client, token) = connect_ros_client(&app).await?;
-+    let response = client
-+        .set_emergency_stop(authenticated_request(
-+            rosengine::EmergencyStopRequest {
-+                action: if activate { 1 } else { 2 },
-+            },
-+            &token,
-+        )?)
-+        .await
-+        .map_err(|error| format!("Emergency-stop request failed: {}", error.message()))?
-+        .into_inner();
-+    Ok(safety_state_response(&response))
-+}
-+
-+#[tauri::command]
-+async fn get_safety_state(app: AppHandle) -> Result<SafetyStateResponse, String> {
-+    let (mut client, token) = connect_ros_client(&app).await?;
-+    let response = client
-+        .get_safety_state(authenticated_request(Empty {}, &token)?)
-+        .await
-+        .map_err(|error| format!("Could not retrieve safety state: {}", error.message()))?
-+        .into_inner();
-+    Ok(safety_state_response(&response))
-+}
-+
-+#[derive(Serialize, Clone)]
-+#[serde(rename_all = "camelCase")]
-+struct RobotConfigResponse {
-+    topic_name: String,
-+    max_linear_velocity: f64,
-+    max_angular_velocity: f64,
-+    max_linear_acceleration: f64,
-+    max_angular_acceleration: f64,
-+    command_lease_ms: u32,
-+    command_timeout_ms: u32,
-+    permitted_motion_modes: Vec<String>,
-+}
-+
-+impl From<rosengine::RobotConfig> for RobotConfigResponse {
-+    fn from(config: rosengine::RobotConfig) -> Self {
-+        Self {
-+            topic_name: config.topic_name,
-+            max_linear_velocity: config.max_linear_velocity,
-+            max_angular_velocity: config.max_angular_velocity,
-+            max_linear_acceleration: config.max_linear_acceleration,
-+            max_angular_acceleration: config.max_angular_acceleration,
-+            command_lease_ms: config.command_lease_ms,
-+            command_timeout_ms: config.command_timeout_ms,
-+            permitted_motion_modes: config.permitted_motion_modes,
-+        }
-+    }
-+}
-+
-+#[derive(Deserialize)]
-+#[serde(rename_all = "camelCase")]
-+struct RobotConfigInput {
-+    topic_name: String,
-+    max_linear_velocity: f64,
-+    max_angular_velocity: f64,
-+    max_linear_acceleration: f64,
-+    max_angular_acceleration: f64,
-+    command_lease_ms: u32,
-+    command_timeout_ms: u32,
-+    permitted_motion_modes: Vec<String>,
-+}
-+
-+#[tauri::command]
-+async fn get_robot_config(
-+    app: AppHandle,
-+    topic_name: String,
-+) -> Result<RobotConfigResponse, String> {
-+    if !is_valid_ros_topic(&topic_name) {
-+        return Err("Invalid robot command topic".to_string());
-+    }
-+    let (mut client, token) = connect_ros_client(&app).await?;
-+    let response = client
-+        .get_robot_config(authenticated_request(
-+            rosengine::RobotConfigRequest { topic_name },
-+            &token,
-+        )?)
-+        .await
-+        .map_err(|error| format!("Could not retrieve robot settings: {}", error.message()))?
-+        .into_inner();
-+    Ok(response.into())
-+}
-+
-+#[tauri::command]
-+async fn save_robot_config(
-+    app: AppHandle,
-+    config: RobotConfigInput,
-+) -> Result<RobotConfigResponse, String> {
-+    if !is_valid_ros_topic(&config.topic_name) {
-+        return Err("Invalid robot command topic".to_string());
-+    }
-+    let proto_config = rosengine::RobotConfig {
-+        topic_name: config.topic_name,
-+        max_linear_velocity: config.max_linear_velocity,
-+        max_angular_velocity: config.max_angular_velocity,
-+        max_linear_acceleration: config.max_linear_acceleration,
-+        max_angular_acceleration: config.max_angular_acceleration,
-+        command_lease_ms: config.command_lease_ms,
-+        command_timeout_ms: config.command_timeout_ms,
-+        permitted_motion_modes: config.permitted_motion_modes,
-+        reset_to_defaults: false,
-+    };
-+    let (mut client, token) = connect_ros_client(&app).await?;
-+    let response = client
-+        .set_robot_config(authenticated_request(proto_config, &token)?)
-+        .await
-+        .map_err(|error| format!("Robot settings were rejected: {}", error.message()))?
-+        .into_inner();
-+    Ok(response.into())
-+}
-+
-+#[tauri::command]
-+async fn reset_robot_config(
-+    app: AppHandle,
-+    topic_name: String,
-+) -> Result<RobotConfigResponse, String> {
-+    if !is_valid_ros_topic(&topic_name) {
-+        return Err("Invalid robot command topic".to_string());
-+    }
-+    let (mut client, token) = connect_ros_client(&app).await?;
-+    let response = client
-+        .set_robot_config(authenticated_request(
-+            rosengine::RobotConfig {
-+                topic_name,
-+                max_linear_velocity: 0.0,
-+                max_angular_velocity: 0.0,
-+                max_linear_acceleration: 0.0,
-+                max_angular_acceleration: 0.0,
-+                command_lease_ms: 0,
-+                command_timeout_ms: 0,
-+                permitted_motion_modes: Vec::new(),
-+                reset_to_defaults: true,
-+            },
-+            &token,
-+        )?)
-+        .await
-+        .map_err(|error| format!("Could not reset robot settings: {}", error.message()))?
-+        .into_inner();
-+    Ok(response.into())
-+}
-+
-+use std::process::Command as StdCommand;
-+
-+fn docker_command() -> StdCommand {
-+    let mut cmd = StdCommand::new("docker");
-+    let current_path = std::env::var("PATH").unwrap_or_default();
-+    let augmented_path = format!(
-+        "/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:{}",
-+        current_path
-+    );
-     cmd.env("PATH", augmented_path);
-     cmd
- }
- 
-+fn workspace_selection_file() -> Result<PathBuf, String> {
-+    let home = std::env::var_os("HOME")
-+        .or_else(|| std::env::var_os("USERPROFILE"))
-+        .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
-+    Ok(PathBuf::from(home)
-+        .join(".robotics-studio")
-+        .join("selected-workspace.txt"))
-+}
-+
-+fn load_selected_workspace() -> Result<Option<PathBuf>, String> {
-+    let path = workspace_selection_file()?;
-+    let metadata = match fs::symlink_metadata(&path) {
-+        Ok(metadata) => metadata,
-+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-+        Err(error) => return Err(format!("Could not inspect selected workspace: {error}")),
-+    };
-+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > 4096 {
-+        return Err("Selected workspace record is unsafe or invalid".to_string());
-+    }
-+    let value = fs::read_to_string(path)
-+        .map_err(|error| format!("Could not read selected workspace record: {error}"))?;
-+    let selected = PathBuf::from(value.trim());
-+    if !selected.is_absolute() {
-+        return Err("Selected workspace record must contain an absolute path".to_string());
-+    }
-+    let canonical = selected
-+        .canonicalize()
-+        .map_err(|error| format!("Previously selected ROS workspace is unavailable: {error}"))?;
-+    if canonical != selected || !canonical.is_dir() {
-+        return Err("Previously selected ROS workspace was moved or replaced".to_string());
-+    }
-+    Ok(Some(canonical))
-+}
-+
-+fn workspace_path_for_shutdown() -> Result<PathBuf, String> {
-+    if let Some(workspace) = ACTIVE_ROS_WORKSPACE
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "Active ROS workspace state is unavailable".to_string())?
-+        .clone()
-+    {
-+        return Ok(workspace);
-+    }
-+    let selection_file = workspace_selection_file()?;
-+    match fs::symlink_metadata(&selection_file) {
-+        Ok(metadata)
-+            if metadata.file_type().is_symlink()
-+                || !metadata.is_file()
-+                || metadata.len() > 4096 =>
-+        {
-+            return Err("Selected workspace record is unsafe or invalid".to_string());
-+        }
-+        Ok(_) => {
-+            let value = fs::read_to_string(selection_file)
-+                .map_err(|error| format!("Could not read selected workspace record: {error}"))?;
-+            let workspace = PathBuf::from(value.trim());
-+            if !workspace.is_absolute() {
-+                return Err("Selected workspace record must contain an absolute path".to_string());
-+            }
-+            return Ok(workspace);
-+        }
-+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-+        Err(error) => return Err(format!("Could not inspect selected workspace: {error}")),
-+    }
-+    let home = std::env::var_os("HOME")
-+        .or_else(|| std::env::var_os("USERPROFILE"))
-+        .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
-+    Ok(PathBuf::from(home)
-+        .join(".robotics-studio")
-+        .join("ros2-workspace"))
-+}
-+
-+fn persist_selected_workspace(workspace: &Path) -> Result<(), String> {
-+    let selection_file = workspace_selection_file()?;
-+    let parent = selection_file
-+        .parent()
-+        .ok_or_else(|| "Workspace settings directory is invalid".to_string())?;
-+    match fs::symlink_metadata(parent) {
-+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-+            return Err("Workspace settings directory is unsafe".to_string());
-+        }
-+        Ok(_) => {}
-+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-+            fs::create_dir(parent)
-+                .map_err(|error| format!("Could not create workspace settings: {error}"))?;
-+        }
-+        Err(error) => return Err(format!("Could not inspect workspace settings: {error}")),
-+    }
-+    static NEXT_TEMP_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-+    let temporary = parent.join(format!(
-+        ".selected-workspace-{}-{}.tmp",
-+        std::process::id(),
-+        NEXT_TEMP_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-+    ));
-+    let result = (|| {
-+        let mut options = fs::OpenOptions::new();
-+        options.write(true).create_new(true);
-+        #[cfg(unix)]
-+        {
-+            use std::os::unix::fs::OpenOptionsExt;
-+            options.mode(0o600);
-+        }
-+        let mut file = options
-+            .open(&temporary)
-+            .map_err(|error| format!("Could not create workspace settings: {error}"))?;
-+        std::io::Write::write_all(&mut file, workspace.to_string_lossy().as_bytes())
-+            .map_err(|error| format!("Could not save selected workspace: {error}"))?;
-+        file.sync_all()
-+            .map_err(|error| format!("Could not sync selected workspace: {error}"))?;
-+        #[cfg(windows)]
-+        if selection_file.exists() {
-+            fs::remove_file(&selection_file)
-+                .map_err(|error| format!("Could not replace selected workspace: {error}"))?;
-+        }
-+        fs::rename(&temporary, &selection_file)
-+            .map_err(|error| format!("Could not save selected workspace: {error}"))?;
-+        Ok(())
-+    })();
-+    if result.is_err() {
-+        let _ = fs::remove_file(&temporary);
-+    }
-+    result
-+}
-+
- fn get_default_workspace_dir() -> Result<String, String> {
-+    let active = ACTIVE_ROS_WORKSPACE
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "Active ROS workspace state is unavailable".to_string())?
-+        .clone()
-+        .or(load_selected_workspace()?);
-+    if let Some(workspace) = active {
-+        let current = workspace
-+            .canonicalize()
-+            .map_err(|error| format!("Selected ROS workspace is unavailable: {error}"))?;
-+        if current != workspace || !current.is_dir() {
-+            return Err("Selected ROS workspace was moved or replaced".to_string());
-+        }
-+        *ACTIVE_ROS_WORKSPACE
-+            .get_or_init(|| Mutex::new(None))
-+            .lock()
-+            .map_err(|_| "Active ROS workspace state is unavailable".to_string())? =
-+            Some(current.clone());
-+        return Ok(current.to_string_lossy().into_owned());
-+    }
-     let home = std::env::var_os("HOME")
-         .or_else(|| std::env::var_os("USERPROFILE"))
-         .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
--    Ok(std::path::PathBuf::from(home)
-+    let fallback = std::path::PathBuf::from(home)
-         .join(".robotics-studio")
--        .join("ros2-workspace")
-+        .join("ros2-workspace");
-+    if fallback.exists() {
-+        let canonical = fallback
-+            .canonicalize()
-+            .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?;
-+        if canonical.is_dir() {
-+            return Ok(canonical.to_string_lossy().into_owned());
-+        }
-+    }
-+    fs::create_dir_all(&fallback)
-+        .map_err(|error| format!("Could not create default ROS workspace: {error}"))?;
-+    Ok(fallback
-+        .canonicalize()
-+        .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?
-         .to_string_lossy()
-         .into_owned())
- }
-@@ -1077,6 +2042,176 @@ fn ensure_loopback_grpc_binding(container_id: &str) -> Result<(), String> {
-     Ok(())
- }
- 
-+fn stop_workspace_container(workspace: &Path) -> Result<(), String> {
-+    let label_filter = format!(
-+        "label=devcontainer.local_folder={}",
-+        workspace.to_string_lossy()
-+    );
-+    let listed = docker_command()
-+        .args(["ps", "-q", "--filter", &label_filter])
-+        .output()
-+        .map_err(|error| format!("Could not inspect the current ROS container: {error}"))?;
-+    if !listed.status.success() {
-+        return Err(format!(
-+            "Could not inspect the current ROS container: {}",
-+            String::from_utf8_lossy(&listed.stderr).trim()
-+        ));
-+    }
-+    let listed_ids = String::from_utf8_lossy(&listed.stdout);
-+    let ids = listed_ids
-+        .lines()
-+        .map(str::trim)
-+        .filter(|id| !id.is_empty())
-+        .map(str::to_string)
-+        .collect::<Vec<_>>();
-+    if ids.is_empty() {
-+        return Ok(());
-+    }
-+    let stopped = docker_command()
-+        .arg("stop")
-+        .arg("--time")
-+        .arg("5")
-+        .args(&ids)
-+        .output()
-+        .map_err(|error| format!("Could not stop the previous ROS environment: {error}"))?;
-+    if !stopped.status.success() {
-+        return Err(format!(
-+            "Could not stop the previous ROS environment: {}",
-+            String::from_utf8_lossy(&stopped.stderr).trim()
-+        ));
-+    }
-+    Ok(())
-+}
-+
-+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-+struct RosPackageInfo {
++struct RosGraphNodeResponse {
 +    name: String,
-+    path: String,
-+    package_type: String,
-+    version: Option<String>,
-+    dependencies: Vec<String>,
-+    executables: Vec<String>,
-+    launch_files: Vec<String>,
-+    config_files: Vec<String>,
++    namespace: String,
 +}
 +
-+#[tauri::command]
-+fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
-+    let container_name = find_dev_container()?;
-+    let workspace = get_default_workspace_dir()?;
-+    let script = format!(
-+        r#"source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || exit 1
-+export ROBOTICS_STUDIO_WORKSPACE="{}"
-+if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash >/dev/null 2>&1 || true; fi
-+python3 - <<'PY'
-+import json
-+import os
-+import xml.etree.ElementTree as ET
-+from pathlib import Path
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct RosGraphEndpointResponse {
++    node_name: String,
++    node_namespace: String,
++    topic_type: String,
++    reliability: String,
++    durability: String,
++    history: String,
++    depth: u32,
++}
 +
-+try:
-+    from ament_index_python.packages import get_packages
-+except Exception as exc:  # pragma: no cover - depends on ROS installation
-+    print(json.dumps([]))
-+    raise SystemExit(0)
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct RosGraphTopicResponse {
++    name: String,
++    types: Vec<String>,
++    publishers: Vec<RosGraphEndpointResponse>,
++    subscribers: Vec<RosGraphEndpointResponse>,
++}
 +
-+packages = get_packages()
-+results = []
-+for name in sorted(packages):
-+    pkg_path = Path(packages[name])
-+    package_xml = pkg_path / 'package.xml'
-+    version = None
-+    package_type = 'ros_package'
-+    dependencies = []
-+    executables = []
-+    launch_files = []
-+    config_files = []
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct RosGraphServiceResponse {
++    name: String,
++    types: Vec<String>,
++    server_nodes: Vec<String>,
++    client_nodes: Vec<String>,
++}
 +
-+    if package_xml.exists():
-+        try:
-+            root = ET.parse(package_xml).getroot()
-+            version = root.attrib.get('version')
-+            package_type = root.findtext('export/build_type') or root.tag.rsplit('}}', 1)[-1] or 'ros_package'
-+            for tag_name in ['depend', 'build_depend', 'buildtool_depend', 'exec_depend', 'test_depend', 'build_export_depend']:
-+                for element in root.findall(tag_name):
-+                    value = (element.text or '').strip()
-+                    if value:
-+                        dependencies.append(value)
-+            dependencies = sorted(dict.fromkeys(dependencies))
-+        except Exception:
-+            pass
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct RosGraphActionResponse {
++    name: String,
++    types: Vec<String>,
++    server_nodes: Vec<String>,
++    client_nodes: Vec<String>,
++}
 +
-+    for candidate in sorted(pkg_path.iterdir()):
-+        if candidate.name.endswith('.py') and os.access(candidate, os.X_OK):
-+            executables.append(candidate.name)
-+        if candidate.suffix in {{'.launch', '.xml'}} and candidate.name.endswith('.launch'):
-+            launch_files.append(candidate.name)
-+        if candidate.suffix in {{'.yaml', '.yml', '.json', '.config', '.ini'}}:
-+            config_files.append(candidate.name)
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct RosGraphSnapshotResponse {
++    nodes: Vec<RosGraphNodeResponse>,
++    topics: Vec<RosGraphTopicResponse>,
++    services: Vec<RosGraphServiceResponse>,
++    actions: Vec<RosGraphActionResponse>,
++    truncated: bool,
++}
 +
-+    if not version and package_xml.exists():
-+        try:
-+            for elem in ET.parse(package_xml).getroot():
-+                if elem.tag.endswith('version'):
-+                    version = (elem.text or '').strip()
-+                    break
-+        except Exception:
-+            pass
++#[derive(Serialize, Clone)]
++#[serde(rename_all = "camelCase")]
++struct JointStateUpdateResponse {
++    topic_name: String,
++    names: Vec<String>,
++    positions: Vec<f64>,
++    truncated: bool,
++}
 +
-+    results.append({{
-+        'name': name,
-+        'path': str(pkg_path),
-+        'package_type': package_type,
-+        'version': version,
-+        'dependencies': dependencies,
-+        'executables': executables,
-+        'launch_files': launch_files,
-+        'config_files': config_files,
-+    }})
++fn ros_graph_snapshot_response(snapshot: &rosengine::RosGraphSnapshot) -> RosGraphSnapshotResponse {
++    RosGraphSnapshotResponse {
++        nodes: snapshot
++            .nodes
++            .iter()
++            .map(|node| RosGraphNodeResponse {
++                name: node.name.clone(),
++                namespace: node.namespace.clone(),
++            })
++            .collect(),
++        topics: snapshot
++            .topics
++            .iter()
++            .map(|topic| RosGraphTopicResponse {
++                name: topic.name.clone(),
++                types: topic.types.clone(),
++                publishers: topic
++                    .publishers
++                    .iter()
++                    .map(|endpoint| RosGraphEndpointResponse {
++                        node_name: endpoint.node_name.clone(),
++                        node_namespace: endpoint.node_namespace.clone(),
++                        topic_type: endpoint.topic_type.clone(),
++                        reliability: endpoint.reliability.clone(),
++                        durability: endpoint.durability.clone(),
++                        history: endpoint.history.clone(),
++                        depth: endpoint.depth,
++                    })
++                    .collect(),
++                subscribers: topic
++                    .subscribers
++                    .iter()
++                    .map(|endpoint| RosGraphEndpointResponse {
++                        node_name: endpoint.node_name.clone(),
++                        node_namespace: endpoint.node_namespace.clone(),
++                        topic_type: endpoint.topic_type.clone(),
++                        reliability: endpoint.reliability.clone(),
++                        durability: endpoint.durability.clone(),
++                        history: endpoint.history.clone(),
++                        depth: endpoint.depth,
++                    })
++                    .collect(),
++            })
++            .collect(),
++        services: snapshot
++            .services
++            .iter()
++            .map(|service| RosGraphServiceResponse {
++                name: service.name.clone(),
++                types: service.types.clone(),
++                server_nodes: service.server_nodes.clone(),
++                client_nodes: service.client_nodes.clone(),
++            })
++            .collect(),
++        actions: snapshot
++            .actions
++            .iter()
++            .map(|action| RosGraphActionResponse {
++                name: action.name.clone(),
++                types: action.types.clone(),
++                server_nodes: action.server_nodes.clone(),
++                client_nodes: action.client_nodes.clone(),
++            })
++            .collect(),
++        truncated: snapshot.truncated,
++    }
++}
 +
-+print(json.dumps(results))
-+PY
-+"#,
-+        workspace
-+    );
-+    let output = docker_command()
-+        .args(["exec", &container_name, "bash", "-lc", &script])
-+        .output()
-+        .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
-+    if !output.status.success() {
+ fn safety_state_response(state: &rosengine::SafetyState) -> SafetyStateResponse {
+     SafetyStateResponse {
+         state: match state.state {
+@@ -2089,93 +2250,65 @@ struct RosPackageInfo {
+     path: String,
+     package_type: String,
+     version: Option<String>,
++    description: Option<String>,
+     dependencies: Vec<String>,
+     executables: Vec<String>,
+     launch_files: Vec<String>,
+     config_files: Vec<String>,
++    metadata_error: Option<String>,
++}
++
++fn resolve_workspace_package_path(
++    workspace: &Path,
++    package_name: &str,
++    relative_path: &str,
++) -> Result<PathBuf, String> {
++    let relative_path = Path::new(relative_path);
++    if relative_path.is_absolute()
++        || relative_path.components().any(|component| {
++            matches!(
++                component,
++                std::path::Component::ParentDir
++                    | std::path::Component::RootDir
++                    | std::path::Component::Prefix(_)
++            )
++        })
++    {
 +        return Err(format!(
-+            "Could not inspect ROS packages: {}",
-+            String::from_utf8_lossy(&output.stderr).trim()
++            "ROS package {package_name} returned a path outside the selected workspace"
 +        ));
 +    }
-+    let stdout = String::from_utf8_lossy(&output.stdout);
-+    let parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
-+        .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
-+    Ok(parsed)
-+}
 +
-+#[tauri::command]
-+fn set_ros_workspace(
-+    access: tauri::State<'_, FsAccess>,
-+    workspace_root: String,
-+) -> Result<String, String> {
-+    let workspace = access.resolve_existing(Path::new(&workspace_root))?;
-+    if !workspace.is_dir() {
-+        return Err("Selected ROS workspace is not a directory".to_string());
++    let canonical_workspace = workspace
++        .canonicalize()
++        .map_err(|error| format!("Could not validate selected ROS workspace: {error}"))?;
++    let canonical_package_path = canonical_workspace
++        .join(relative_path)
++        .canonicalize()
++        .map_err(|error| {
++            format!("Could not validate path for ROS package {package_name}: {error}")
++        })?;
++    if !canonical_package_path.starts_with(&canonical_workspace) || !canonical_package_path.is_dir()
++    {
++        return Err(format!(
++            "ROS package {package_name} resolved outside the selected workspace"
++        ));
 +    }
-+    let previous = workspace_path_for_shutdown()?;
-+    if previous != workspace {
-+        stop_workspace_container(&previous)?;
-+    }
-+    persist_selected_workspace(&workspace)?;
-+    *ACTIVE_ROS_WORKSPACE
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "Active ROS workspace state is unavailable".to_string())? =
-+        Some(workspace.clone());
-+    Ok(workspace.to_string_lossy().into_owned())
-+}
-+
- fn find_dev_container() -> Result<String, String> {
-     if ensure_docker_available().is_err() {
-         return Err(docker_lost_connection_message());
-@@ -1293,6 +2428,184 @@ fn stream_process_output<R: Read + Send + 'static>(
++    Ok(canonical_package_path)
  }
- 
- static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
-+static BUILD_CONTAINER: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
-+static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-+
-+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-+pub enum ManagedProcessStatus {
-+    Running,
-+    Completed,
-+    Failed,
-+    Cancelled,
-+    TimedOut,
-+}
-+
-+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-+pub struct ManagedProcess {
-+    pub id: String,
-+    pub process_type: String,
-+    pub command: Vec<String>,
-+    pub workspace: Option<String>,
-+    pub created_at: u64,
-+    pub started_at: Option<u64>,
-+    pub status: ManagedProcessStatus,
-+    pub exit_code: Option<i32>,
-+    pub error: Option<String>,
-+    pub parent_task_id: Option<String>,
-+}
-+
-+#[derive(Default)]
-+struct ProcessRegistry {
-+    processes: Mutex<HashMap<String, ManagedProcess>>,
-+}
-+
-+impl ProcessRegistry {
-+    #[allow(dead_code)]
-+    fn register(
-+        &self,
-+        id: String,
-+        process_type: String,
-+        command: Vec<String>,
-+        workspace: Option<String>,
-+        parent_task_id: Option<String>,
-+    ) -> ManagedProcess {
-+        let process = ManagedProcess {
-+            id: id.clone(),
-+            process_type,
-+            command,
-+            workspace,
-+            created_at: current_unix_seconds(),
-+            started_at: Some(current_unix_seconds()),
-+            status: ManagedProcessStatus::Running,
-+            exit_code: None,
-+            error: None,
-+            parent_task_id,
-+        };
-+        self.processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner)
-+            .insert(id.clone(), process.clone());
-+        process
-+    }
-+
-+    #[allow(dead_code)]
-+    fn get(&self, id: &str) -> Option<ManagedProcess> {
-+        self.processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner)
-+            .get(id)
-+            .cloned()
-+    }
-+
-+    fn list(&self) -> Vec<ManagedProcess> {
-+        let processes = self
-+            .processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        let mut entries: Vec<_> = processes.values().cloned().collect();
-+        entries.sort_by_key(|entry| entry.created_at);
-+        entries
-+    }
-+
-+    fn mark_completed(
-+        &self,
-+        id: &str,
-+        exit_code: Option<i32>,
-+        status: ManagedProcessStatus,
-+        error: Option<String>,
-+    ) {
-+        let mut processes = self
-+            .processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        if let Some(process) = processes.get_mut(id) {
-+            process.status = status;
-+            process.exit_code = exit_code;
-+            process.error = error;
-+        }
-+    }
-+
-+    fn cancel(&self, id: &str) -> bool {
-+        let mut processes = self
-+            .processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        let Some(process) = processes.get_mut(id) else {
-+            return false;
-+        };
-+        if process.status != ManagedProcessStatus::Running {
-+            return false;
-+        }
-+        process.status = ManagedProcessStatus::Cancelled;
-+        process.error = Some("Cancelled by user".to_string());
-+        true
-+    }
-+
-+    #[allow(dead_code)]
-+    fn remove_finished(&self, id: &str) -> Option<ManagedProcess> {
-+        let mut processes = self
-+            .processes
-+            .lock()
-+            .unwrap_or_else(std::sync::PoisonError::into_inner);
-+        processes.remove(id)
-+    }
-+}
-+
-+static MANAGED_PROCESSES: OnceLock<ProcessRegistry> = OnceLock::new();
-+
-+fn managed_process_registry() -> &'static ProcessRegistry {
-+    MANAGED_PROCESSES.get_or_init(ProcessRegistry::default)
-+}
-+
-+fn current_unix_seconds() -> u64 {
-+    std::time::SystemTime::now()
-+        .duration_since(std::time::UNIX_EPOCH)
-+        .unwrap_or_default()
-+        .as_secs()
-+}
-+
-+const COLCON_BUILD_SCRIPT: &str = r#"
-+source /opt/ros/jazzy/setup.bash || exit $?
-+cd /workspace || exit $?
-+run_id="$1"
-+case "$run_id" in *[!0-9-]*|"") exit 2 ;; esac
-+pid_file="/tmp/robotics-studio-build-$run_id.pid"
-+cancel_file="/tmp/robotics-studio-build-$run_id.cancel"
-+if [ -e "$cancel_file" ]; then
-+  rm -f "$cancel_file"
-+  exit 130
-+fi
-+setsid bash -c 'exec colcon build' &
-+build_pid=$!
-+printf '%s\n' "$build_pid" > "$pid_file"
-+while kill -0 "$build_pid" 2>/dev/null; do
-+  if [ -e "$cancel_file" ]; then
-+    kill -TERM -- "-$build_pid" 2>/dev/null || true
-+    break
-+  fi
-+  sleep 0.1
-+done
-+wait "$build_pid"
-+status=$?
-+rm -f "$pid_file" "$cancel_file"
-+exit "$status"
-+"#;
-+
-+const CANCEL_COLCON_BUILD_SCRIPT: &str = r#"
-+run_id="$1"
-+case "$run_id" in *[!0-9-]*|"") exit 2 ;; esac
-+pid_file="/tmp/robotics-studio-build-$run_id.pid"
-+cancel_file="/tmp/robotics-studio-build-$run_id.cancel"
-+touch "$cancel_file" || exit $?
-+if [ -r "$pid_file" ]; then
-+  build_pid=$(cat "$pid_file" 2>/dev/null || true)
-+  case "$build_pid" in
-+    "") ;;
-+    *[!0-9]*) exit 2 ;;
-+    *) kill -TERM -- "-$build_pid" 2>/dev/null || true ;;
-+  esac
-+fi
-+"#;
- static INITIALIZATION_RUNNING: AtomicBool = AtomicBool::new(false);
- 
- struct BuildRunGuard;
-@@ -1300,6 +2613,11 @@ struct InitializationGuard;
- 
- impl Drop for BuildRunGuard {
-     fn drop(&mut self) {
-+        if let Some(state) = BUILD_CONTAINER.get() {
-+            *state
-+                .lock()
-+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-+        }
-         BUILD_RUNNING.store(false, Ordering::SeqCst);
-     }
- }
-@@ -1317,6 +2635,31 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
-         return Err("A build is already running".to_string());
-     }
-     let build_guard = BuildRunGuard;
-+    let build_id = format!(
-+        "{}-{}",
-+        std::process::id(),
-+        BUILD_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
-+    );
-+    let workspace = Some(get_default_workspace_dir().unwrap_or_else(|_| "".to_string()));
-+    managed_process_registry().register(
-+        build_id.clone(),
-+        "colcon-build".to_string(),
-+        vec![
-+            "docker".to_string(),
-+            "exec".to_string(),
-+            container_name.clone(),
-+            "bash".to_string(),
-+            "-lc".to_string(),
-+            "colcon build".to_string(),
-+        ],
-+        workspace,
-+        None,
-+    );
-+    *BUILD_CONTAINER
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "Build process state is unavailable".to_string())? =
-+        Some((container_name.clone(), build_id.clone()));
- 
-     tauri::async_runtime::spawn(async move {
-         let _build_guard = build_guard;
-@@ -1326,7 +2669,9 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
-                 &container_name,
-                 "bash",
-                 "-c",
--                "source /opt/ros/jazzy/setup.bash && cd /workspace && colcon build",
-+                COLCON_BUILD_SCRIPT,
-+                "robotics-studio-build",
-+                &build_id,
-             ])
-             .stdout(Stdio::piped())
-             .stderr(Stdio::piped())
-@@ -1356,9 +2701,29 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
-                 if let Some(reader) = stderr_reader {
-                     let _ = reader.join();
-                 }
-+                managed_process_registry().mark_completed(
-+                    &build_id,
-+                    Some(status.code().unwrap_or(-1)),
-+                    if status.success() {
-+                        ManagedProcessStatus::Completed
-+                    } else {
-+                        ManagedProcessStatus::Failed
-+                    },
-+                    if status.success() {
-+                        None
-+                    } else {
-+                        Some("colcon build exited with a non-zero status".to_string())
-+                    },
-+                );
-                 let _ = app.emit("build-finished", status.success());
-             }
-             Err(e) => {
-+                managed_process_registry().mark_completed(
-+                    &build_id,
-+                    None,
-+                    ManagedProcessStatus::Failed,
-+                    Some(e.to_string()),
-+                );
-                 let _ = app.emit("build-error", e.to_string());
-                 let _ = app.emit("build-finished", false);
-             }
-@@ -1390,6 +2755,110 @@ fn detect_models_in_sdf(sdf_content: &str) -> Vec<String> {
-     models
- }
- 
-+#[tauri::command]
-+fn cancel_colcon_build() -> Result<(), String> {
-+    if !BUILD_RUNNING.load(Ordering::SeqCst) {
-+        return Err("No build is currently running".to_string());
-+    }
-+    let (container, build_id) = BUILD_CONTAINER
-+        .get_or_init(|| Mutex::new(None))
-+        .lock()
-+        .map_err(|_| "Build process state is unavailable".to_string())?
-+        .clone()
-+        .ok_or_else(|| "Build process state is unavailable".to_string())?;
-+    managed_process_registry().cancel(&build_id);
-+    let output = docker_command()
+
+ #[tauri::command]
+ fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
+     let container_name = find_dev_container()?;
+-    let workspace = get_default_workspace_dir()?;
+-    let script = format!(
+-        r#"source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || exit 1
+-export ROBOTICS_STUDIO_WORKSPACE="{}"
+-if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash >/dev/null 2>&1 || true; fi
+-python3 - <<'PY'
+-import json
+-import os
+-import xml.etree.ElementTree as ET
+-from pathlib import Path
+-
+-try:
+-    from ament_index_python.packages import get_packages
+-except Exception as exc:  # pragma: no cover - depends on ROS installation
+-    print(json.dumps([]))
+-    raise SystemExit(0)
+-
+-packages = get_packages()
+-results = []
+-for name in sorted(packages):
+-    pkg_path = Path(packages[name])
+-    package_xml = pkg_path / 'package.xml'
+-    version = None
+-    package_type = 'ros_package'
+-    dependencies = []
+-    executables = []
+-    launch_files = []
+-    config_files = []
+-
+-    if package_xml.exists():
+-        try:
+-            root = ET.parse(package_xml).getroot()
+-            version = root.attrib.get('version')
+-            package_type = root.findtext('export/build_type') or root.tag.rsplit('}}', 1)[-1] or 'ros_package'
+-            for tag_name in ['depend', 'build_depend', 'buildtool_depend', 'exec_depend', 'test_depend', 'build_export_depend']:
+-                for element in root.findall(tag_name):
+-                    value = (element.text or '').strip()
+-                    if value:
+-                        dependencies.append(value)
+-            dependencies = sorted(dict.fromkeys(dependencies))
+-        except Exception:
+-            pass
+-
+-    for candidate in sorted(pkg_path.iterdir()):
+-        if candidate.name.endswith('.py') and os.access(candidate, os.X_OK):
+-            executables.append(candidate.name)
+-        if candidate.suffix in {{'.launch', '.xml'}} and candidate.name.endswith('.launch'):
+-            launch_files.append(candidate.name)
+-        if candidate.suffix in {{'.yaml', '.yml', '.json', '.config', '.ini'}}:
+-            config_files.append(candidate.name)
+-
+-    if not version and package_xml.exists():
+-        try:
+-            for elem in ET.parse(package_xml).getroot():
+-                if elem.tag.endswith('version'):
+-                    version = (elem.text or '').strip()
+-                    break
+-        except Exception:
+-            pass
+-
+-    results.append({{
+-        'name': name,
+-        'path': str(pkg_path),
+-        'package_type': package_type,
+-        'version': version,
+-        'dependencies': dependencies,
+-        'executables': executables,
+-        'launch_files': launch_files,
+-        'config_files': config_files,
+-    }})
+-
+-print(json.dumps(results))
+-PY
+-"#,
+-        workspace
+-    );
++    let workspace = PathBuf::from(get_default_workspace_dir()?);
+     let output = docker_command()
+-        .args(["exec", &container_name, "bash", "-lc", &script])
 +        .args([
 +            "exec",
-+            &container,
++            &container_name,
 +            "bash",
-+            "-c",
-+            CANCEL_COLCON_BUILD_SCRIPT,
-+            "robotics-studio-cancel",
-+            &build_id,
++            "-lc",
++            "cd /opt/robotics-studio && python3 -c \"import json; from server_core import discover_workspace_packages; print(json.dumps(discover_workspace_packages('/workspace')))\"",
 +        ])
-+        .output()
-+        .map_err(|error| format!("Could not request build cancellation: {error}"))?;
-+    if !output.status.success() {
-+        return Err(format!(
-+            "Could not request build cancellation: {}",
-+            String::from_utf8_lossy(&output.stderr).trim()
-+        ));
+         .output()
+         .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
+     if !output.status.success() {
+@@ -2185,8 +2318,13 @@ PY
+         ));
+     }
+     let stdout = String::from_utf8_lossy(&output.stdout);
+-    let parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
++    let mut parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
+         .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
++    for package in &mut parsed {
++        package.path = resolve_workspace_package_path(&workspace, &package.name, &package.path)?
++            .to_string_lossy()
++            .into_owned();
 +    }
-+    Ok(())
-+}
-+
-+#[tauri::command]
-+fn list_managed_processes() -> Result<Vec<ManagedProcess>, String> {
-+    Ok(managed_process_registry().list())
-+}
-+
-+fn parse_gazebo_world_control_service(output: &str) -> Result<Option<String>, String> {
-+    let mut services = Vec::new();
-+    for service in output.lines().map(str::trim) {
-+        let Some(world) = service
-+            .strip_prefix("/world/")
-+            .and_then(|world| world.strip_suffix("/control"))
-+        else {
-+            continue;
-+        };
-+        if world.is_empty()
-+            || !world
-+                .chars()
-+                .all(|character| character.is_ascii_alphanumeric() || "_-".contains(character))
-+        {
-+            return Err(format!("Invalid Gazebo world control service: {service}"));
-+        }
-+        services.push(service);
-+    }
-+    match services.as_slice() {
-+        [] => Ok(None),
-+        [service] => Ok(Some((*service).to_string())),
-+        _ => Err("Multiple Gazebo worlds are active; reset is ambiguous".to_string()),
-+    }
-+}
-+
-+fn gazebo_world_control_service(container_name: &str) -> Result<Option<String>, String> {
+     Ok(parsed)
+ }
+
+@@ -2838,6 +2976,30 @@ fn gazebo_world_control_service(container_name: &str) -> Result<Option<String>,
+     parse_gazebo_world_control_service(&String::from_utf8_lossy(&output.stdout))
+ }
+
++fn validate_sdf_with_gazebo(container_name: &str, world_path: &str) -> Result<(), String> {
 +    let output = docker_command()
 +        .args([
 +            "exec",
 +            container_name,
 +            "bash",
 +            "-lc",
-+            "source /opt/ros/jazzy/setup.bash && gz service -l",
++            "source /opt/ros/jazzy/setup.bash && gz sdf --check \"$1\"",
++            "robotics-studio-sdf-check",
++            world_path,
 +        ])
 +        .output()
-+        .map_err(|error| format!("Could not inspect Gazebo readiness: {error}"))?;
++        .map_err(|error| format!("Could not run SDFormat validation: {error}"))?;
 +    if !output.status.success() {
-+        return Err(format!(
-+            "Could not inspect Gazebo readiness: {}",
-+            String::from_utf8_lossy(&output.stderr).trim()
-+        ));
-+    }
-+    parse_gazebo_world_control_service(&String::from_utf8_lossy(&output.stdout))
-+}
-+
-+fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
-+    let output = docker_command()
-+        .args([
-+            "exec",
-+            container_name,
-+            "bash",
-+            "-c",
-+            "pkill -TERM -f '[g]z sim -s' || true; \
-+             pkill -TERM -f '[p]arameter_bridge' || true",
-+        ])
-+        .output()
-+        .map_err(|error| format!("Could not stop Gazebo processes: {error}"))?;
-+    if !output.status.success() {
-+        return Err(format!(
-+            "Could not stop Gazebo processes: {}",
-+            String::from_utf8_lossy(&output.stderr).trim()
-+        ));
++        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
++        return Err(if detail.is_empty() {
++            "Gazebo rejected the SDF world".to_string()
++        } else {
++            format!("Gazebo rejected the SDF world: {detail}")
++        });
 +    }
 +    Ok(())
 +}
 +
- #[tauri::command]
- fn start_gazebo_sim(
-     world_path: Option<String>,
-@@ -1501,11 +2970,26 @@ fn start_gazebo_sim(
-         if ensure_docker_available().is_err() {
-             return Err(docker_lost_connection_message());
-         }
--        return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
-+        return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
-+    }
-+
-+    let mut world_control_service = None;
-+    for _ in 0..20 {
-+        if let Some(service) = gazebo_world_control_service(&container_name)? {
-+            world_control_service = Some(service);
-+            break;
-+        }
-+        std::thread::sleep(std::time::Duration::from_secs(1));
-+    }
-+    if world_control_service.is_none() {
-+        let cleanup = stop_gazebo_processes(&container_name);
-+        return Err(match cleanup {
-+            Ok(()) => "Gazebo did not become ready within 20 seconds".to_string(),
-+            Err(error) => {
-+                format!("Gazebo did not become ready within 20 seconds; cleanup failed: {error}")
-+            }
-+        });
-     }
--
--    // Give Gazebo a moment to actually start before launching the bridge
--    std::thread::sleep(std::time::Duration::from_secs(2));
- 
-     // Build bridge args dynamically based on models actually found in the
-     // world file, rather than hardcoding vehicle_blue/vehicle_green.
-@@ -1541,10 +3025,17 @@ fn start_gazebo_sim(
-         .map_err(|_| docker_lost_connection_message())?;
- 
-     if !bridge_result.status.success() {
-+        let cleanup = stop_gazebo_processes(&container_name);
-         if ensure_docker_available().is_err() {
-             return Err(docker_lost_connection_message());
-         }
--        return Err(String::from_utf8_lossy(&bridge_result.stderr).to_string());
-+        return Err(match cleanup {
-+            Ok(()) => String::from_utf8_lossy(&bridge_result.stderr).to_string(),
-+            Err(error) => format!(
-+                "{}; simulator cleanup failed: {error}",
-+                String::from_utf8_lossy(&bridge_result.stderr)
-+            ),
-+        });
-     }
- 
-     Ok("Gazebo and bridge started".to_string())
-@@ -1553,24 +3044,16 @@ fn start_gazebo_sim(
- #[tauri::command]
- fn stop_gazebo_sim() -> Result<String, String> {
-     let container_name = find_dev_container()?;
--
--    let result = docker_command()
--        .args([
--            "exec",
--            &container_name,
--            "bash",
--            "-c",
--            "pkill -f 'gz sim' ; pkill -f parameter_bridge",
--        ])
--        .output()
--        .map_err(|_| docker_lost_connection_message())?;
--
--    Ok(String::from_utf8_lossy(&result.stdout).to_string())
-+    stop_gazebo_processes(&container_name)?;
-+    Ok("Gazebo and ROS-Gazebo bridge stopped".to_string())
- }
- 
- #[tauri::command]
- fn reset_gazebo_sim() -> Result<String, String> {
-     let container_name = find_dev_container()?;
-+    let service = gazebo_world_control_service(&container_name)?.ok_or_else(|| {
-+        "Gazebo world is not ready; start the simulation before resetting".to_string()
-+    })?;
- 
-     let result = docker_command()
+ fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
+     let output = docker_command()
          .args([
-@@ -1578,24 +3061,34 @@ fn reset_gazebo_sim() -> Result<String, String> {
-             &container_name,
-             "bash",
-             "-c",
--            "gz service -s /world/default/control --reqtype gz.msgs.WorldControl \
-+            "source /opt/ros/jazzy/setup.bash && \
-+             gz service -s \"$1\" --reqtype gz.msgs.WorldControl \
-              --reptype gz.msgs.Boolean --timeout 2000 --req 'reset: {all: true}'",
-+            "robotics-studio",
-+            &service,
-         ])
-         .output()
-         .map_err(|_| docker_lost_connection_message())?;
- 
-+    if !result.status.success() {
-+        return Err(format!(
-+            "Could not reset Gazebo world: {}",
-+            String::from_utf8_lossy(&result.stderr).trim()
-+        ));
-+    }
-     Ok(String::from_utf8_lossy(&result.stdout).to_string())
- }
- 
- use tauri::Manager;
- 
--fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
--    copy_dir_recursive_impl(src, dst, 0)
-+fn copy_dir_recursive(src: &Path, dst: &Path, access: &FsAccess) -> Result<(), String> {
-+    copy_dir_recursive_impl(src, dst, access, 0)
- }
- 
- fn copy_dir_recursive_impl(
--    src: &std::path::Path,
--    dst: &std::path::Path,
-+    src: &Path,
-+    dst: &Path,
-+    access: &FsAccess,
-     depth: u32,
- ) -> Result<(), String> {
-     if depth > 50 {
-@@ -1604,7 +3097,7 @@ fn copy_dir_recursive_impl(
-             src, dst
-         ));
-     }
--    std::fs::create_dir_all(dst).map_err(|e| e.to_string())?;
-+    access.ensure_directory(dst)?;
-     for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
-         let entry = entry.map_err(|e| e.to_string())?;
-         let src_path = entry.path();
-@@ -1616,9 +3109,9 @@ fn copy_dir_recursive_impl(
+@@ -2946,6 +3108,8 @@ fn start_gazebo_sim(
          }
- 
-         if file_type.is_dir() {
--            copy_dir_recursive_impl(&src_path, &dst_path, depth + 1)?;
--        } else if !dst_path.exists() {
--            std::fs::copy(&src_path, &dst_path).map_err(|e| e.to_string())?;
-+            copy_dir_recursive_impl(&src_path, &dst_path, access, depth + 1)?;
-+        } else if file_type.is_file() {
-+            access.copy_file_if_missing(&src_path, &dst_path)?;
+     };
+
++    validate_sdf_with_gazebo(&container_name, &container_world_path)?;
++
+     let models = detect_models_in_sdf(&sdf_content);
+     let robot_models: Vec<&String> = models
+         .iter()
+@@ -4182,6 +4346,7 @@ struct TfUpdate {
+     qy: f64,
+     qz: f64,
+     qw: f64,
++    topic_name: String,
+ }
+
+ #[derive(Deserialize)]
+@@ -4817,6 +4982,37 @@ mod filesystem_security_tests {
          }
      }
- 
-@@ -1627,7 +3120,13 @@ fn copy_dir_recursive_impl(
- 
- const GRPC_AUTH_CONTAINER_PATH: &str = "/run/robotics-studio/grpc-auth.json";
- const GRPC_AUTH_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
--const AUTH_PROTOCOL_MARKER: &str = "AUTH_PROTOCOL_VERSION = 1";
-+const ROS_SERVER_CONTAINER_DIRECTORY: &str = "/opt/robotics-studio";
-+const GRPC_CA_CERTIFICATE_PATH: &str = "/run/robotics-studio/grpc-ca.crt";
-+const GRPC_CA_PRIVATE_KEY_PATH: &str = "/run/robotics-studio/grpc-ca.key";
-+const GRPC_SERVER_CERTIFICATE_PATH: &str = "/run/robotics-studio/grpc-server.crt";
-+const GRPC_SERVER_PRIVATE_KEY_PATH: &str = "/run/robotics-studio/grpc-server.key";
-+const GRPC_SERVER_CSR_PATH: &str = "/run/robotics-studio/grpc-server.csr";
-+const GRPC_SERVER_EXTENSIONS_PATH: &str = "/run/robotics-studio/grpc-server.ext";
- 
- #[derive(Serialize, Deserialize)]
- struct GrpcAuthCredentials {
-@@ -1770,6 +3269,7 @@ fn install_authenticated_server_files(
-     resource_dir: &Path,
-     workspace_dir: &Path,
-     backup_dir: &Path,
-+    access: &FsAccess,
- ) -> Result<(), String> {
-     fs::create_dir_all(backup_dir)
-         .map_err(|error| format!("Could not prepare server migration backup: {error}"))?;
-@@ -1778,24 +3278,23 @@ fn install_authenticated_server_files(
-         let target_path = workspace_dir.join(file_name);
-         let bundled = fs::read(&bundled_path)
-             .map_err(|error| format!("Could not read bundled {file_name}: {error}"))?;
--        let installed = match fs::symlink_metadata(&target_path) {
--            Ok(metadata) if metadata.file_type().is_symlink() => {
--                return Err(format!("Workspace {file_name} must not be a symbolic link"));
--            }
--            Ok(_) => Some(
--                fs::read(&target_path)
--                    .map_err(|error| format!("Could not inspect workspace {file_name}: {error}"))?,
--            ),
--            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
--            Err(error) => return Err(format!("Could not inspect workspace {file_name}: {error}")),
--        };
--        if installed.as_ref().is_some_and(|contents| {
--            String::from_utf8_lossy(contents).contains(AUTH_PROTOCOL_MARKER)
--        }) {
-+        let bundled_text = std::str::from_utf8(&bundled)
-+            .map_err(|error| format!("Bundled {file_name} is not valid UTF-8: {error}"))?;
-+        let target_parent = target_path
-+            .parent()
-+            .ok_or_else(|| format!("Invalid workspace path for {file_name}"))?;
-+        access
-+            .ensure_directory(target_parent)
-+            .map_err(|error| format!("Could not safely access {file_name} directory: {error}"))?;
-+        let installed = access.read_file_if_present(&target_path)?;
-+        if installed
-+            .as_ref()
-+            .is_some_and(|contents| contents == &bundled)
+
++    #[test]
++    fn ros_package_paths_are_confined_to_selected_workspace() {
++        let workspace = TempDirectory::new();
++        let outside = TempDirectory::new();
++        let package = workspace.0.join("src/robot");
++        fs::create_dir_all(&package).unwrap();
++        fs::create_dir_all(outside.0.join("robot")).unwrap();
++
++        assert_eq!(
++            resolve_workspace_package_path(&workspace.0, "robot", "src/robot").unwrap(),
++            package.canonicalize().unwrap()
++        );
++        assert!(
++            resolve_workspace_package_path(&workspace.0, "robot", "../robot")
++                .unwrap_err()
++                .contains("outside the selected workspace")
++        );
++        assert!(resolve_workspace_package_path(
++            &workspace.0,
++            "robot",
++            outside.0.to_string_lossy().as_ref()
++        )
++        .is_err());
++
++        #[cfg(unix)]
 +        {
-             continue;
-         }
- 
--        if installed.is_some() {
-+        if let Some(installed) = &installed {
-             let timestamp = std::time::SystemTime::now()
-                 .duration_since(std::time::UNIX_EPOCH)
-                 .map_err(|error| error.to_string())?
-@@ -1805,48 +3304,143 @@ fn install_authenticated_server_files(
-                 file_name.replace('/', "_"),
-                 std::process::id()
-             ));
--            fs::copy(&target_path, &backup_path)
-+            fs::write(&backup_path, installed)
-                 .map_err(|error| format!("Could not preserve existing {file_name}: {error}"))?;
-         }
- 
--        let timestamp = std::time::SystemTime::now()
--            .duration_since(std::time::UNIX_EPOCH)
--            .map_err(|error| error.to_string())?
--            .as_nanos();
--        let target_parent = target_path
--            .parent()
--            .ok_or_else(|| format!("Invalid workspace path for {file_name}"))?;
--        let target_name = target_path
--            .file_name()
--            .ok_or_else(|| format!("Invalid workspace filename for {file_name}"))?
--            .to_string_lossy();
--        let temporary = target_parent.join(format!(
--            ".{target_name}.auth-{}-{timestamp}.tmp",
--            std::process::id()
-+        write_approved_file(access, &target_path, bundled_text)
-+            .map_err(|error| format!("Could not install secure {file_name}: {error}"))?;
-+    }
-+    Ok(())
-+}
-+
-+fn install_ros_server_resources(container_id: &str, resource_dir: &Path) -> Result<(), String> {
-+    let prepared = docker_command()
-+        .args([
-+            "exec",
-+            container_id,
-+            "mkdir",
-+            "-p",
-+            ROS_SERVER_CONTAINER_DIRECTORY,
-+        ])
-+        .output()
-+        .map_err(|error| format!("Could not prepare the trusted ROS service: {error}"))?;
-+    if !prepared.status.success() {
-+        return Err(format!(
-+            "Could not prepare the trusted ROS service: {}",
-+            String::from_utf8_lossy(&prepared.stderr)
-         ));
--        fs::write(&temporary, bundled)
--            .map_err(|error| format!("Could not stage secure {file_name}: {error}"))?;
--        #[cfg(windows)]
--        if target_path.exists() {
--            fs::remove_file(&target_path)
--                .map_err(|error| format!("Could not update secure {file_name}: {error}"))?;
--        }
--        if let Err(error) = fs::rename(&temporary, &target_path) {
--            let _ = fs::remove_file(&temporary);
--            return Err(format!("Could not install secure {file_name}: {error}"));
-+    }
-+
-+    for file_name in ["server.py", "server_core.py"] {
-+        let source = resource_dir.join(file_name);
-+        let destination = format!("{container_id}:{ROS_SERVER_CONTAINER_DIRECTORY}/{file_name}");
-+        let copied = docker_command()
-+            .args(["cp", &source.to_string_lossy(), &destination])
-+            .output()
-+            .map_err(|error| format!("Could not install trusted {file_name}: {error}"))?;
-+        if !copied.status.success() {
-+            return Err(format!(
-+                "Could not install trusted {file_name}: {}",
-+                String::from_utf8_lossy(&copied.stderr)
-+            ));
-         }
-     }
-+    let proto_source = resource_dir.join("proto/ros_engine.proto");
-+    let proto_destination = format!("{container_id}:{ROS_SERVER_CONTAINER_DIRECTORY}/proto");
-+    let proto_directory = docker_command()
-+        .args([
-+            "exec",
-+            container_id,
-+            "mkdir",
-+            "-p",
-+            &format!("{ROS_SERVER_CONTAINER_DIRECTORY}/proto"),
-+        ])
-+        .output()
-+        .map_err(|error| format!("Could not prepare the trusted ROS protocol: {error}"))?;
-+    if !proto_directory.status.success() {
-+        return Err(format!(
-+            "Could not prepare the trusted ROS protocol: {}",
-+            String::from_utf8_lossy(&proto_directory.stderr)
-+        ));
-+    }
-+    let copied = docker_command()
-+        .args(["cp", &proto_source.to_string_lossy(), &proto_destination])
-+        .output()
-+        .map_err(|error| format!("Could not install the trusted ROS protocol: {error}"))?;
-+    if !copied.status.success() {
-+        return Err(format!(
-+            "Could not install the trusted ROS protocol: {}",
-+            String::from_utf8_lossy(&copied.stderr)
-+        ));
-+    }
-+
-+    let certificate_command = format!(
-+        "set -eu; \
-+         mkdir -p /run/robotics-studio; chmod 700 /run/robotics-studio; \
-+         if [ ! -s '{GRPC_CA_CERTIFICATE_PATH}' ] || \
-+            [ ! -s '{GRPC_CA_PRIVATE_KEY_PATH}' ] || \
-+            [ ! -s '{GRPC_SERVER_CERTIFICATE_PATH}' ] || \
-+            [ ! -s '{GRPC_SERVER_PRIVATE_KEY_PATH}' ]; then \
-+           openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-+             -keyout '{GRPC_CA_PRIVATE_KEY_PATH}' \
-+             -out '{GRPC_CA_CERTIFICATE_PATH}' \
-+             -subj '/CN=Robotics Studio local gRPC CA' \
-+             -addext 'basicConstraints=critical,CA:TRUE' \
-+             -addext 'keyUsage=critical,keyCertSign,cRLSign'; \
-+           openssl req -new -newkey rsa:2048 -nodes \
-+             -keyout '{GRPC_SERVER_PRIVATE_KEY_PATH}' \
-+             -out '{GRPC_SERVER_CSR_PATH}' \
-+             -subj '/CN=127.0.0.1'; \
-+           printf '%s\\n' \
-+             'basicConstraints=critical,CA:FALSE' \
-+             'keyUsage=critical,digitalSignature,keyEncipherment' \
-+             'extendedKeyUsage=serverAuth' \
-+             'subjectAltName=IP:127.0.0.1,DNS:localhost' \
-+             > '{GRPC_SERVER_EXTENSIONS_PATH}'; \
-+           openssl x509 -req -in '{GRPC_SERVER_CSR_PATH}' \
-+             -CA '{GRPC_CA_CERTIFICATE_PATH}' \
-+             -CAkey '{GRPC_CA_PRIVATE_KEY_PATH}' -CAcreateserial \
-+             -out '{GRPC_SERVER_CERTIFICATE_PATH}' -days 3650 -sha256 \
-+             -extfile '{GRPC_SERVER_EXTENSIONS_PATH}'; \
-+         fi; \
-+         chmod 600 '{GRPC_CA_PRIVATE_KEY_PATH}' '{GRPC_SERVER_PRIVATE_KEY_PATH}'; \
-+         chmod 644 '{GRPC_CA_CERTIFICATE_PATH}' '{GRPC_SERVER_CERTIFICATE_PATH}'; \
-+         cat '{GRPC_CA_CERTIFICATE_PATH}'"
-+    );
-+    let certificate = docker_command()
-+        .args(["exec", container_id, "bash", "-c", &certificate_command])
-+        .output()
-+        .map_err(|error| format!("Could not provision ROS TLS credentials: {error}"))?;
-+    if !certificate.status.success() {
-+        return Err(format!(
-+            "Could not provision ROS TLS credentials: {}",
-+            String::from_utf8_lossy(&certificate.stderr)
-+        ));
-+    }
-+    set_ros_server_tls_certificate(certificate.stdout)?;
-     Ok(())
- }
- 
--fn start_ros_engine_server(container_id: &str, auth_file: &Path) -> Result<(), String> {
-+fn start_ros_engine_server(
-+    container_id: &str,
-+    auth_file: &Path,
-+    resource_dir: &Path,
-+) -> Result<(), String> {
-+    install_ros_server_resources(container_id, resource_dir)?;
-     let generate = docker_command()
-         .args([
-             "exec",
-             container_id,
-             "bash",
-             "-c",
--            "source /opt/ros/jazzy/setup.bash && cd /workspace && mkdir -p generated && python3 -m grpc_tools.protoc -I proto --python_out=generated --grpc_python_out=generated proto/ros_engine.proto",
-+            "source /opt/ros/jazzy/setup.bash && \
-+             mkdir -p /opt/robotics-studio/generated && \
-+             python3 -m grpc_tools.protoc \
-+               -I /opt/robotics-studio/proto \
-+               --python_out=/opt/robotics-studio/generated \
-+               --grpc_python_out=/opt/robotics-studio/generated \
-+               /opt/robotics-studio/proto/ros_engine.proto",
-         ])
-         .output()
-         .map_err(|error| format!("Failed to generate gRPC modules: {error}"))?;
-@@ -1878,7 +3472,11 @@ fn start_ros_engine_server(container_id: &str, auth_file: &Path) -> Result<(), S
-             container_id,
-             "bash",
-             "-c",
--            "source /opt/ros/jazzy/setup.bash && cd /workspace && ROBOTICS_STUDIO_AUTH_FILE=/run/robotics-studio/grpc-auth.json exec python3 server.py > /tmp/server.log 2>&1",
-+            "source /opt/ros/jazzy/setup.bash && \
-+             cd /opt/robotics-studio && \
-+             ROBOTICS_STUDIO_AUTH_FILE=/run/robotics-studio/grpc-auth.json \
-+             ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated \
-+             exec python3 /opt/robotics-studio/server.py > /tmp/server.log 2>&1",
-         ])
-         .output()
-         .map_err(|error| format!("Failed to start ROS engine server: {error}"))?;
-@@ -1904,11 +3502,8 @@ fn authenticated_request<T>(message: T, token: &str) -> Result<tonic::Request<T>
- 
- async fn wait_for_ros_engine(container_id: &str, token: &str) -> Result<(), String> {
-     for _ in 0..30 {
--        if let Ok(Ok(mut client)) = tokio::time::timeout(
--            std::time::Duration::from_secs(2),
--            RosEngineClient::connect("http://127.0.0.1:50051"),
--        )
--        .await
-+        if let Ok(Ok(mut client)) =
-+            tokio::time::timeout(std::time::Duration::from_secs(2), connect_ros_engine()).await
-         {
-             if tokio::time::timeout(
-                 std::time::Duration::from_secs(2),
-@@ -1970,13 +3565,13 @@ async fn initialize_ros_environment(
- 
-     // Install missing resources and preserve legacy server files before updating
-     // the authentication-critical ROS service scripts.
--    copy_dir_recursive(&resource_path, workspace_path)?;
-+    copy_dir_recursive(&resource_path, workspace_path, &access)?;
-     let backup_dir = app
-         .path()
-         .app_config_dir()
-         .map_err(|error| error.to_string())?
-         .join("server-migration-backups");
--    install_authenticated_server_files(&resource_path, workspace_path, &backup_dir)?;
-+    install_authenticated_server_files(&resource_path, workspace_path, &backup_dir, &access)?;
- 
-     let filter = format!("label=devcontainer.local_folder={}", workspace_dir);
- 
-@@ -2021,6 +3616,7 @@ async fn initialize_ros_environment(
- 
-         let app = app.clone();
-         let workspace_dir = workspace_dir.clone();
-+        let resource_path = resource_path.clone();
-         tauri::async_runtime::spawn(async move {
-             let _initialization_guard = initialization_guard;
-             let _ = app.emit(
-@@ -2030,7 +3626,8 @@ async fn initialize_ros_environment(
-                     text: "Existing environment found. Checking ROS engine...".to_string(),
-                 },
-             );
--            let result = match start_ros_engine_server(&container_name, &auth_file) {
-+            let result = match start_ros_engine_server(&container_name, &auth_file, &resource_path)
-+            {
-                 Ok(()) => wait_for_ros_engine(&container_name, &auth_token).await,
-                 Err(error) => Err(error),
-             };
-@@ -2153,7 +3750,7 @@ async fn initialize_ros_environment(
-         };
-         let _ = app.emit("init-progress", event);
- 
--        match start_ros_engine_server(&container_id, &auth_file) {
-+        match start_ros_engine_server(&container_id, &auth_file, &resource_path) {
-             Ok(()) => match wait_for_ros_engine(&container_id, &auth_token).await {
-                 Ok(()) => {
-                     let _ = app.emit("init-finished", workspace_dir.clone());
-@@ -2451,7 +4048,7 @@ fn get_total_ram_gb() -> Result<u64, String> {
- #[cfg(target_os = "linux")]
- fn get_total_ram_gb() -> Result<u64, String> {
-     let output = std::process::Command::new("grep")
--        .args(&["MemTotal", "/proc/meminfo"])
-+        .args(["MemTotal", "/proc/meminfo"])
-         .output()
-         .map_err(|e| e.to_string())?;
-     let output_str = String::from_utf8_lossy(&output.stdout);
-@@ -3014,7 +4611,7 @@ fn create_project_from_template(
-     }
- 
-     std::fs::create_dir(&dest).map_err(|e| format!("Could not create project directory: {e}"))?;
--    if let Err(error) = copy_dir_recursive(&template_path, &dest) {
-+    if let Err(error) = copy_dir_recursive(&template_path, &dest, &access) {
-         if let Err(cleanup_error) = std::fs::remove_dir_all(&dest) {
-             return Err(format!(
-                 "Project creation failed: {error}. Incomplete project could not be removed: {cleanup_error}"
-@@ -3136,6 +4733,25 @@ mod recent_project_tests {
- mod validation_tests {
-     use super::*;
- 
-+    #[test]
-+    fn resolves_the_active_gazebo_world_control_service() {
-+        assert_eq!(
-+            parse_gazebo_world_control_service(
-+                "/world/diff_drive/control\n/world/diff_drive/scene/info\n"
-+            )
-+            .unwrap(),
-+            Some("/world/diff_drive/control".to_string())
-+        );
-+        assert_eq!(
-+            parse_gazebo_world_control_service("/world/diff_drive/scene/info\n").unwrap(),
-+            None
-+        );
-+        assert!(
-+            parse_gazebo_world_control_service("/world/one/control\n/world/two/control\n").is_err()
-+        );
-+        assert!(parse_gazebo_world_control_service("/world/../control\n").is_err());
++            std::os::unix::fs::symlink(&outside.0, workspace.0.join("linked")).unwrap();
++            assert!(resolve_workspace_package_path(&workspace.0, "robot", "linked/robot").is_err());
++        }
 +    }
 +
      #[test]
-     fn validates_absolute_ros_topics() {
-         assert!(is_valid_ros_topic("/robot/cmd_vel"));
-@@ -3201,6 +4817,50 @@ mod filesystem_security_tests {
-         }
-     }
- 
-+    #[test]
-+    fn workspace_service_marker_does_not_authenticate_modified_server_files() {
-+        let directory = TempDirectory::new();
-+        let resources = directory.0.join("resources");
-+        let workspace = directory.0.join("workspace");
-+        let backup = directory.0.join("backups");
-+        fs::create_dir_all(resources.join("proto")).unwrap();
-+        fs::create_dir_all(workspace.join("proto")).unwrap();
-+        for (name, trusted) in [
-+            ("server.py", b"trusted service".as_slice()),
-+            ("server_core.py", b"trusted core".as_slice()),
-+            ("proto/ros_engine.proto", b"trusted protocol".as_slice()),
-+        ] {
-+            fs::write(resources.join(name), trusted).unwrap();
-+            fs::write(
-+                workspace.join(name),
-+                b"AUTH_PROTOCOL_VERSION = 1\nmalicious replacement",
-+            )
-+            .unwrap();
-+        }
-+        let access = FsAccess::default();
-+        access.approve_directory(&workspace).unwrap();
-+
-+        install_authenticated_server_files(&resources, &workspace, &backup, &access).unwrap();
-+
-+        for (name, trusted) in [
-+            ("server.py", b"trusted service".as_slice()),
-+            ("server_core.py", b"trusted core".as_slice()),
-+            ("proto/ros_engine.proto", b"trusted protocol".as_slice()),
-+        ] {
-+            assert_eq!(fs::read(workspace.join(name)).unwrap(), trusted);
-+        }
-+        let preserved = fs::read_dir(&backup)
-+            .unwrap()
-+            .collect::<Result<Vec<_>, _>>()
-+            .unwrap();
-+        assert_eq!(preserved.len(), 3);
-+        assert!(preserved.iter().all(|entry| {
-+            fs::read(entry.path()).is_ok_and(|contents| {
-+                contents == b"AUTH_PROTOCOL_VERSION = 1\nmalicious replacement"
-+            })
-+        }));
-+    }
-+
-     #[test]
-     fn approved_root_allows_normal_reads_and_writes() {
+     fn workspace_service_marker_does_not_authenticate_modified_server_files() {
          let directory = TempDirectory::new();
-@@ -3233,6 +4893,7 @@ mod filesystem_security_tests {
- 
-         let directory = TempDirectory::new();
-         let outside = TempDirectory::new();
-+        fs::write(outside.0.join("secret.txt"), "outside").unwrap();
-         let access = FsAccess::default();
-         access.approve_directory(&directory.0).unwrap();
-         symlink(&outside.0, directory.0.join("escape")).unwrap();
-@@ -3240,18 +4901,326 @@ mod filesystem_security_tests {
-         assert!(access
-             .resolve_existing(&directory.0.join("escape"))
-             .is_err());
-+        assert!(read_approved_file(&access, &directory.0.join("escape/secret.txt")).is_err());
-+        assert!(
-+            write_approved_file(&access, &directory.0.join("escape/secret.txt"), "changed")
-+                .is_err()
-+        );
-+        assert_eq!(
-+            fs::read_to_string(outside.0.join("secret.txt")).unwrap(),
-+            "outside"
-+        );
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn recursive_copy_rejects_symlinked_destination_directories() {
-+        use std::os::unix::fs::symlink;
-+
-+        let directory = TempDirectory::new();
-+        let source = directory.0.join("source");
-+        let workspace = directory.0.join("workspace");
-+        let outside = directory.0.join("outside");
-+        fs::create_dir_all(source.join("proto")).unwrap();
-+        fs::create_dir(&workspace).unwrap();
-+        fs::create_dir(&outside).unwrap();
-+        fs::write(source.join("proto/ros_engine.proto"), "bundled").unwrap();
-+        symlink(&outside, workspace.join("proto")).unwrap();
-+        let access = FsAccess::default();
-+        access.approve_directory(&workspace).unwrap();
-+
-+        assert!(copy_dir_recursive(&source, &workspace, &access).is_err());
-+        assert!(!outside.join("ros_engine.proto").exists());
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn authenticated_service_install_rejects_symlinked_proto_directory() {
-+        use std::os::unix::fs::symlink;
-+
-+        let directory = TempDirectory::new();
-+        let resources = directory.0.join("resources");
-+        let workspace = directory.0.join("workspace");
-+        let outside = directory.0.join("outside");
-+        fs::create_dir_all(resources.join("proto")).unwrap();
-+        fs::create_dir(&workspace).unwrap();
-+        fs::create_dir(&outside).unwrap();
-+        fs::write(resources.join("server.py"), "service").unwrap();
-+        fs::write(resources.join("server_core.py"), "core").unwrap();
-+        fs::write(resources.join("proto/ros_engine.proto"), "protocol").unwrap();
-+        symlink(&outside, workspace.join("proto")).unwrap();
-+        let access = FsAccess::default();
-+        access.approve_directory(&workspace).unwrap();
-+
-+        assert!(install_authenticated_server_files(
-+            &resources,
-+            &workspace,
-+            &directory.0.join("backups"),
-+            &access
-+        )
-+        .is_err());
-+        assert!(!outside.join("ros_engine.proto").exists());
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn rejects_replaced_approved_root_after_selection() {
-+        let directory = TempDirectory::new();
-+        let moved = directory.0.with_extension("moved");
-+        let access = FsAccess::default();
-+        access.approve_directory(&directory.0).unwrap();
-+        fs::rename(&directory.0, &moved).unwrap();
-+        fs::create_dir(&directory.0).unwrap();
-+        fs::write(directory.0.join("sentinel.txt"), "replacement").unwrap();
-+
-+        assert!(read_approved_file(&access, &directory.0.join("sentinel.txt")).is_err());
-+        assert!(
-+            write_approved_file(&access, &directory.0.join("sentinel.txt"), "must not write")
-+                .is_err()
-+        );
-+        assert_eq!(
-+            fs::read_to_string(directory.0.join("sentinel.txt")).unwrap(),
-+            "replacement"
-+        );
-+        fs::remove_dir_all(moved).unwrap();
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn concurrent_parent_symlink_swaps_never_escape_the_approved_root() {
-+        use std::os::unix::fs::symlink;
-+        use std::sync::atomic::{AtomicBool, Ordering};
-+
-+        let directory = TempDirectory::new();
-+        let outside = TempDirectory::new();
-+        let nested = directory.0.join("nested");
-+        let held = directory.0.join("held");
-+        fs::create_dir(&nested).unwrap();
-+        fs::write(nested.join("value.txt"), "inside").unwrap();
-+        fs::write(outside.0.join("value.txt"), "outside").unwrap();
-+        let access = Arc::new(FsAccess::default());
-+        access.approve_directory(&directory.0).unwrap();
-+        let running = Arc::new(AtomicBool::new(true));
-+        let thread_running = Arc::clone(&running);
-+        let thread_root = directory.0.clone();
-+        let thread_outside = outside.0.clone();
-+        let attacker = std::thread::spawn(move || {
-+            let nested = thread_root.join("nested");
-+            let held = thread_root.join("held");
-+            while thread_running.load(Ordering::Relaxed) {
-+                if fs::rename(&nested, &held).is_ok() {
-+                    if symlink(&thread_outside, &nested).is_ok() {
-+                        let _ = fs::remove_file(&nested);
-+                    }
-+                    let _ = fs::rename(&held, &nested);
-+                }
-+            }
-+            if fs::symlink_metadata(&nested).is_ok_and(|metadata| metadata.file_type().is_symlink())
-+            {
-+                let _ = fs::remove_file(&nested);
-+            }
-+            if held.exists() && !nested.exists() {
-+                let _ = fs::rename(held, nested);
-+            }
-+        });
-+
-+        for _ in 0..500 {
-+            if let Ok(contents) = read_approved_file(&access, &nested.join("value.txt")) {
-+                assert_eq!(contents, "inside");
-+            }
-+            let _ = write_approved_file(&access, &nested.join("value.txt"), "inside");
-+        }
-+
-+        running.store(false, Ordering::Relaxed);
-+        attacker.join().unwrap();
-+        assert_eq!(
-+            fs::read_to_string(outside.0.join("value.txt")).unwrap(),
-+            "outside"
-+        );
-+        assert!(!held.exists());
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn rejects_symlink_file_replacement_for_atomic_writes() {
-+        use std::os::unix::fs::symlink;
-+
-+        let directory = TempDirectory::new();
-+        let outside = TempDirectory::new();
-+        fs::write(outside.0.join("secret.txt"), "outside").unwrap();
-+        let access = FsAccess::default();
-+        access.approve_directory(&directory.0).unwrap();
-+        symlink(outside.0.join("secret.txt"), directory.0.join("link.txt")).unwrap();
-+
-+        assert!(write_approved_file(&access, &directory.0.join("link.txt"), "changed").is_err());
-+        assert_eq!(
-+            fs::read_to_string(outside.0.join("secret.txt")).unwrap(),
-+            "outside"
-+        );
-+    }
-+
-+    #[test]
-+    fn active_workspace_context_switches_between_approved_roots() {
-+        let first = TempDirectory::new();
-+        let second = TempDirectory::new();
-+        let previous = ACTIVE_ROS_WORKSPACE
-+            .get_or_init(|| Mutex::new(None))
-+            .lock()
-+            .unwrap()
-+            .clone();
-+        let first = first.0.canonicalize().unwrap();
-+        let second = second.0.canonicalize().unwrap();
-+
-+        *ACTIVE_ROS_WORKSPACE
-+            .get_or_init(|| Mutex::new(None))
-+            .lock()
-+            .unwrap() = Some(first.clone());
-+        assert_eq!(
-+            get_default_workspace_dir().unwrap(),
-+            first.to_string_lossy()
-+        );
-+        *ACTIVE_ROS_WORKSPACE
-+            .get_or_init(|| Mutex::new(None))
-+            .lock()
-+            .unwrap() = Some(second.clone());
-+        assert_eq!(
-+            get_default_workspace_dir().unwrap(),
-+            second.to_string_lossy()
-+        );
-+
-+        *ACTIVE_ROS_WORKSPACE
-+            .get_or_init(|| Mutex::new(None))
-+            .lock()
-+            .unwrap() = previous;
-+    }
-+
-+    #[test]
-+    fn ros_event_recovery_cursors_are_isolated_by_workspace() {
-+        let first = format!("workspace-a-{}", std::process::id());
-+        let second = format!("workspace-b-{}", std::process::id());
-+
-+        update_ros_event_cursor(&first, 12, false).unwrap();
-+        update_ros_event_cursor(&second, 3, false).unwrap();
-+        assert_eq!(ros_event_cursor(&first).unwrap(), 12);
-+        assert_eq!(ros_event_cursor(&second).unwrap(), 3);
-+
-+        update_ros_event_cursor(&second, 1, true).unwrap();
-+        assert_eq!(ros_event_cursor(&second).unwrap(), 1);
-+        assert_eq!(ros_event_cursor(&first).unwrap(), 12);
-+    }
-+
-+    #[cfg(unix)]
-+    #[test]
-+    fn colcon_cancellation_script_terminates_only_its_process_group() {
-+        use std::os::unix::fs::PermissionsExt;
-+        use std::process::Command;
-+        use std::sync::mpsc;
-+
-+        let directory = TempDirectory::new();
-+        let ready_file = directory.0.join("colcon-ready");
-+        let fake_colcon = directory.0.join("colcon");
-+        fs::write(
-+            &fake_colcon,
-+            "#!/bin/sh\n: > \"$COLCON_TEST_READY_FILE\"\nexec sleep 30\n",
-+        )
-+        .unwrap();
-+        let fake_setsid = directory.0.join("setsid");
-+        fs::write(
-+            &fake_setsid,
-+            "#!/usr/bin/env python3\nimport os, sys\nos.setsid()\nos.execvp(sys.argv[1], sys.argv[1:])\n",
-+        )
-+        .unwrap();
-+        for executable in [&fake_colcon, &fake_setsid] {
-+            let mut permissions = fs::metadata(executable).unwrap().permissions();
-+            permissions.set_mode(0o700);
-+            fs::set_permissions(executable, permissions).unwrap();
-+        }
-+        let run_id = format!(
-+            "{}-{}",
-+            std::process::id(),
-+            std::time::SystemTime::now()
-+                .duration_since(std::time::UNIX_EPOCH)
-+                .unwrap()
-+                .as_nanos()
-+        );
-+        let pid_file = PathBuf::from(format!("/tmp/robotics-studio-build-{run_id}.pid"));
-+        let cancel_file = PathBuf::from(format!("/tmp/robotics-studio-build-{run_id}.cancel"));
-+        let script = COLCON_BUILD_SCRIPT
-+            .replace("source /opt/ros/jazzy/setup.bash || exit $?", ":")
-+            .replace(
-+                "cd /workspace || exit $?",
-+                &format!("cd '{}' || exit $?", directory.0.display()),
-+            );
-+        let path = format!(
-+            "{}:{}",
-+            directory.0.display(),
-+            std::env::var("PATH").unwrap_or_default()
-+        );
-+        let mut child = Command::new("bash")
-+            .args(["-c", &script, "test-colcon-build", &run_id])
-+            .env("PATH", path)
-+            .env("COLCON_TEST_READY_FILE", &ready_file)
-+            .spawn()
-+            .unwrap();
-+
-+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-+        while !ready_file.exists() && std::time::Instant::now() < deadline {
-+            std::thread::sleep(std::time::Duration::from_millis(10));
-+        }
-+        assert!(
-+            pid_file.exists() && ready_file.exists(),
-+            "fake colcon process did not start"
-+        );
-+        let build_pid = fs::read_to_string(&pid_file).unwrap();
-+        let build_is_alive = Command::new("bash")
-+            .args([
-+                "-c",
-+                "kill -0 \"$1\"",
-+                "test-build-status",
-+                build_pid.trim(),
-+            ])
-+            .status()
-+            .unwrap();
-+        assert!(
-+            build_is_alive.success(),
-+            "fake colcon process did not start"
-+        );
-+        let cancellation = Command::new("bash")
-+            .args([
-+                "-c",
-+                CANCEL_COLCON_BUILD_SCRIPT,
-+                "test-colcon-cancel",
-+                &run_id,
-+            ])
-+            .status()
-+            .unwrap();
-+        assert!(cancellation.success());
-+
-+        let (sender, receiver) = mpsc::channel();
-+        std::thread::spawn(move || {
-+            let _ = sender.send(child.wait());
-+        });
-+        let status = receiver
-+            .recv_timeout(std::time::Duration::from_secs(5))
-+            .expect("build did not exit after cancellation")
-+            .unwrap();
-+        assert!(!status.success());
-+        assert!(!pid_file.exists());
-+        assert!(!cancel_file.exists());
-     }
- 
-     #[test]
-     fn imports_worlds_to_unique_safe_paths_without_overwriting() {
-         let directory = TempDirectory::new();
-+        let access = FsAccess::default();
-         let source = Path::new("../../Dockerfile.sdf");
-         let sdf = "<sdf version=\"1.9\"><world name=\"test\"/></sdf>";
--        let first = import_world_contents(&directory.0, source, sdf).unwrap();
--        let second = import_world_contents(&directory.0, source, sdf).unwrap();
-+        let workspace = access.approve_directory(&directory.0).unwrap();
-+        let first = import_world_contents(&access, &workspace, source, sdf).unwrap();
-+        let second = import_world_contents(&access, &workspace, source, sdf).unwrap();
- 
-         assert_ne!(first, second);
--        assert!(first.starts_with(directory.0.canonicalize().unwrap().join("worlds")));
-+        assert!(first.starts_with(workspace.join("worlds")));
-         assert!(first
-             .file_name()
-             .unwrap()
-@@ -3264,12 +5233,19 @@ mod filesystem_security_tests {
-     #[test]
-     fn rejects_invalid_world_document_and_extension() {
-         let directory = TempDirectory::new();
-+        let access = FsAccess::default();
-+        let workspace = access.approve_directory(&directory.0).unwrap();
-         assert!(
--            import_world_contents(&directory.0, Path::new("world.txt"), "<sdf></sdf>").is_err()
--        );
--        assert!(
--            import_world_contents(&directory.0, Path::new("world.sdf"), "<world></world>").is_err()
-+            import_world_contents(&access, &workspace, Path::new("world.txt"), "<sdf></sdf>")
-+                .is_err()
-         );
-+        assert!(import_world_contents(
-+            &access,
-+            &workspace,
-+            Path::new("world.sdf"),
-+            "<world></world>"
-+        )
-+        .is_err());
-     }
- 
-     #[test]
-@@ -3309,14 +5285,97 @@ mod filesystem_security_tests {
-         let directory = TempDirectory::new();
-         let outside = TempDirectory::new();
-         symlink(&outside.0, directory.0.join("worlds")).unwrap();
-+        let access = FsAccess::default();
-+        let workspace = access.approve_directory(&directory.0).unwrap();
- 
-         assert!(
--            import_world_contents(&directory.0, Path::new("world.sdf"), "<sdf></sdf>").is_err()
-+            import_world_contents(&access, &workspace, Path::new("world.sdf"), "<sdf></sdf>")
-+                .is_err()
-         );
-         assert_eq!(fs::read_dir(&outside.0).unwrap().count(), 0);
-     }
- }
- 
-+#[cfg(test)]
-+mod process_registry_tests {
-+    use super::*;
-+
-+    #[test]
-+    fn process_registry_tracks_completion_and_cancellation() {
-+        let registry = ProcessRegistry::default();
-+        let process = registry.register(
-+            "test-proc".to_string(),
-+            "build".to_string(),
-+            vec![
-+                "bash".to_string(),
-+                "-lc".to_string(),
-+                "sleep 30".to_string(),
-+            ],
-+            Some("/tmp/workspace".to_string()),
-+            None,
-+        );
-+        assert_eq!(process.status, ManagedProcessStatus::Running);
-+        assert!(registry.cancel("test-proc"));
-+        assert_eq!(
-+            registry.get("test-proc").unwrap().status,
-+            ManagedProcessStatus::Cancelled
-+        );
-+        registry.mark_completed(
-+            "test-proc",
-+            Some(130),
-+            ManagedProcessStatus::Cancelled,
-+            Some("Cancelled by user".to_string()),
-+        );
-+        assert_eq!(registry.get("test-proc").unwrap().exit_code, Some(130));
-+    }
-+
-+    #[test]
-+    fn process_registry_rejects_unknown_or_finished_process_ids() {
-+        let registry = ProcessRegistry::default();
-+        assert!(registry.get("missing").is_none());
-+        assert!(!registry.cancel("missing"));
-+
-+        let process = registry.register(
-+            "done".to_string(),
-+            "sim".to_string(),
-+            vec!["true".to_string()],
-+            None,
-+            None,
-+        );
-+        assert_eq!(process.status, ManagedProcessStatus::Running);
-+        registry.mark_completed("done", Some(0), ManagedProcessStatus::Completed, None);
-+        assert_eq!(
-+            registry.get("done").unwrap().status,
-+            ManagedProcessStatus::Completed
-+        );
-+        assert!(!registry.cancel("done"));
-+    }
-+}
-+
-+#[cfg(test)]
-+mod ros_docker_integration_tests {
-+    use super::*;
-+
-+    #[tokio::test]
-+    #[ignore = "requires a Docker ROS service listening on localhost:50051"]
-+    async fn pinned_tls_client_authenticates_to_docker_ros_service() {
-+        let certificate_path = std::env::var_os("ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE")
-+            .expect("ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE must point to the pinned certificate");
-+        let certificate =
-+            fs::read(certificate_path).expect("could not read pinned TLS certificate");
-+        let token = std::env::var("ROBOTICS_STUDIO_TEST_AUTH_TOKEN")
-+            .expect("ROBOTICS_STUDIO_TEST_AUTH_TOKEN must contain the test token");
-+        set_ros_server_tls_certificate(certificate).unwrap();
-+        let mut client = connect_ros_engine().await.unwrap();
-+        let response = client
-+            .get_safety_state(authenticated_request(Empty {}, &token).unwrap())
-+            .await
-+            .unwrap()
-+            .into_inner();
-+        assert_eq!(response.state, 0);
-+    }
-+}
-+
- #[cfg(test)]
- mod stream_line_buffer_tests {
-     use super::*;
 diff --git a/src/App.tsx b/src/App.tsx
-index 0abef8f..2813fb2 100644
+index 9483e16..32f14b1 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
-@@ -50,6 +50,17 @@ interface RecentProject {
-   last_opened: string;
+@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
+ import RobotView, { RobotControls } from "./components/RobotView";
+ import { listen, emit } from "@tauri-apps/api/event";
+ import TFTree from "./components/TFTree";
++import RosGraphExplorer from "./components/RosGraphExplorer";
++import type { RosGraphSnapshot } from "./components/RosGraphExplorer";
+ import Settings from "./components/Settings";
+ import NewProjectModal from "./components/NewProjectModal";
+ import {
+@@ -55,10 +57,12 @@ interface RosPackageInfo {
+   path: string;
+   package_type: string;
+   version: string | null;
++  description: string | null;
+   dependencies: string[];
+   executables: string[];
+   launch_files: string[];
+   config_files: string[];
++  metadata_error: string | null;
  }
- 
-+interface RosPackageInfo {
-+  name: string;
-+  path: string;
-+  package_type: string;
-+  version: string | null;
-+  dependencies: string[];
-+  executables: string[];
-+  launch_files: string[];
-+  config_files: string[];
-+}
-+
+
  interface LogEvent {
-   kind: "append" | "replace";
-   text: string;
-@@ -206,6 +217,8 @@ function FileTree({
- }
- 
- function App() {
-+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
-+  const [buildError, setBuildError] = useState<string | null>(null);
-   // --- File browser state ---
-   const [entries, setEntries] = useState<FileEntry[]>([]);
-   const [currentPath, setCurrentPath] = useState<string | null>(null);
-@@ -266,7 +279,35 @@ function App() {
-   // --- ROS event log ---
+@@ -280,8 +284,17 @@ function App() {
    const [rosEvents, setRosEvents] = useState<string[]>([]);
    const [rosConnected, setRosConnected] = useState(false);
-+  const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
-+  const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
-+  const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
+   const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
++  const [rosGraph, setRosGraph] = useState<RosGraphSnapshot | null>(null);
+   const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
+   const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
++  const [rosPackageFilter, setRosPackageFilter] = useState("");
++  const [expandedRosPackage, setExpandedRosPackage] = useState<string | null>(
++    null,
++  );
++  const [rosPackageContentsError, setRosPackageContentsError] = useState<
++    string | null
++  >(null);
++  const rosPackagesRequest = useRef(0);
    const [initializing, setInitializing] = useState(false);
-+  const [safetyState, setSafetyState] = useState<
-+    "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
-+  >("DISCONNECTED");
-+  const [safetyError, setSafetyError] = useState<string | null>(null);
-+  const [safetyPending, setSafetyPending] = useState(false);
-+  const [eventHealth, setEventHealth] = useState<{
-+    queueCapacity: number;
-+    subscriberCount: number;
-+    lastSequence: number;
-+    droppedTelemetry: number;
-+    criticalOverflows: number;
-+    maxBacklog: number;
-+    persistenceHealthy: boolean;
-+    persistenceError: string;
-+    oldestAvailableSequence: number;
-+    retainedCriticalEvents: number;
-+  } | null>(null);
-+  const [eventRecovery, setEventRecovery] = useState<{
-+    gapDetected: boolean;
-+    oldestAvailableSequence: number;
-+    latestSequence: number;
-+    snapshotIncluded: boolean;
-+    retainedCriticalEvents: number;
-+  } | null>(null);
-+  const [robotCommandError, setRobotCommandError] = useState<string | null>(null);
-   const rosWorkspaceReady = useRef(false);
-   const authRecoveryStarted = useRef(false);
-   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
-@@ -276,9 +317,14 @@ function App() {
-   const [buildOutput, setBuildOutput] = useState<string[]>([]);
-   const [building, setBuilding] = useState(false);
-   const diagnostics = [
-+    ...(workspaceError ? [workspaceError] : []),
-+    ...(buildError ? [buildError] : []),
-     ...setupOutput.filter((line) => line.startsWith("❌")),
-     ...buildOutput.filter((line) => /error|failed/i.test(line)),
-     ...rosEvents.filter((line) => /NodeCrashed|error/i.test(line)),
-+    ...(eventHealth && !eventHealth.persistenceHealthy
-+      ? [`Critical ROS event persistence failed: ${eventHealth.persistenceError}`]
-+      : []),
+   const [safetyState, setSafetyState] = useState<
+     "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
+@@ -330,6 +343,21 @@ function App() {
+         ]
+       : []),
    ];
- 
++  const filteredRosPackages = rosPackages.filter((pkg) => {
++    const filter = rosPackageFilter.trim().toLocaleLowerCase();
++    return (
++      !filter ||
++      [
++        pkg.name,
++        pkg.description ?? "",
++        pkg.package_type,
++        ...pkg.dependencies,
++      ]
++        .join(" ")
++        .toLocaleLowerCase()
++        .includes(filter)
++    );
++  });
+
    // --- AI chat ---
-@@ -511,15 +557,57 @@ function App() {
+   const [chatInput, setChatInput] = useState("");
+@@ -561,28 +589,55 @@ function App() {
    };
- 
+
    // ---------- ROS workspace selection ----------
-+  const refreshRosPackages = useCallback(async () => {
-+    if (!rosWorkspacePath) {
-+      setRosPackages([]);
-+      setRosPackagesError(null);
-+      return;
-+    }
-+    setRosPackagesLoading(true);
-+    setRosPackagesError(null);
-+    try {
-+      const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
-+      setRosPackages(packages);
-+    } catch (error) {
-+      setRosPackages([]);
-+      setRosPackagesError(String(error));
-+    } finally {
-+      setRosPackagesLoading(false);
-+    }
-+  }, [rosWorkspacePath]);
+-  const refreshRosPackages = useCallback(async () => {
+-    if (!rosWorkspacePath) {
+-      setRosPackages([]);
++  const refreshRosPackages = useCallback(
++    async (allowUninitializedWorkspace = false) => {
++      const requestId = ++rosPackagesRequest.current;
++      if (!rosWorkspacePath && !allowUninitializedWorkspace) {
++        setRosPackagesLoading(false);
++        setRosPackages([]);
++        setRosPackagesError(null);
++        return;
++      }
++      setRosPackagesLoading(true);
+       setRosPackagesError(null);
++      try {
++        const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
++        if (requestId === rosPackagesRequest.current) {
++          setRosPackages(packages);
++        }
++      } catch (error) {
++        if (requestId === rosPackagesRequest.current) {
++          setRosPackages([]);
++          setRosPackagesError(String(error));
++        }
++      } finally {
++        if (requestId === rosPackagesRequest.current) {
++          setRosPackagesLoading(false);
++        }
++      }
++    },
++    [rosWorkspacePath],
++  );
 +
 +  useEffect(() => {
 +    void refreshRosPackages();
 +  }, [refreshRosPackages]);
 +
-   const pickRosWorkspace = async () => {
--    const selected = await invoke<string | null>("pick_directory");
--    if (selected) {
--      setRosWorkspacePath(selected);
-+    try {
-+      const selected = await invoke<string | null>("pick_directory");
-+      if (selected) {
-+        const activeWorkspace = await invoke<string>("set_ros_workspace", {
-+          workspaceRoot: selected,
-+        });
-+        setRosWorkspacePath(activeWorkspace);
-+        rosWorkspaceReady.current = false;
-+        setRosConnected(false);
-+        setSafetyState("DISCONNECTED");
-+        setSafetyError(null);
-+        setNodeStatus({});
-+        setAvailableRobots([]);
-+        setWorldPath(null);
-+        setEventHealth(null);
-+        setEventRecovery(null);
-+        setWorkspaceError(null);
-+        await initializeRosEnvironment();
-+      }
-+    } catch (error) {
-+      setWorkspaceError(`Could not switch ROS workspace: ${String(error)}`);
++  const inspectRosPackage = async (path: string) => {
++    if (expandedRosPackage === path) {
++      setExpandedRosPackage(null);
++      setRosPackageContentsError(null);
+       return;
      }
-   };
- 
-   // ---------- Build actions ----------
-   const triggerBuild = async () => {
-+    setBuildError(null);
-     setBuildOutput([]);
-     setBuilding(true);
-     setBottomCollapsed(false);
-@@ -532,6 +620,15 @@ function App() {
-     }
-   };
- 
-+  const cancelBuild = async () => {
-+    try {
-+      await invoke("cancel_colcon_build");
-+      setBuildError(null);
-+    } catch (error) {
-+      setBuildError(`Build cancellation failed: ${String(error)}`);
-+    }
-+  };
-+
-   const initializeRosEnvironment = async () => {
-     setInitializing(true);
-     setSetupOutput(["Starting..."]);
-@@ -583,12 +680,39 @@ function App() {
-     linearX: number,
-     angularZ: number,
-   ) => {
-+    setRobotCommandError(null);
+-    setRosPackagesLoading(true);
+-    setRosPackagesError(null);
++    setExpandedRosPackage(path);
++    setRosPackageContentsError(null);
      try {
-       await invoke("publish_twist", {
-         command: { topicName, linearX, angularZ },
-       });
-     } catch (err) {
--      console.error("Twist command failed:", err);
-+      setRobotCommandError(String(err));
-+    }
-+  };
-+
-+  const requestEmergencyStop = async (activate: boolean) => {
-+    if (safetyPending) return;
-+    if (!activate && !window.confirm("Reset the latched emergency stop? Motion will remain stopped until a new command is issued.")) {
-+      return;
-+    }
-+    setSafetyPending(true);
-+    setSafetyError(null);
-+    try {
-+      const state = await invoke<{
-+        state: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
-+        detail: string;
-+      }>("set_emergency_stop", { activate });
-+      setSafetyState(state.state);
-+      if (state.state !== (activate ? "ACTIVE" : "READY")) {
-+        setSafetyError(state.detail || "Backend did not confirm the requested safety state.");
-+      }
-+    } catch (error) {
-+      if (activate) {
-+        setSafetyState("DISCONNECTED");
-+      }
-+      setSafetyError(`Emergency-stop request was not confirmed: ${String(error)}`);
-+    } finally {
-+      setSafetyPending(false);
+-      const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
+-      setRosPackages(packages);
++      const contents = await invoke<FileEntry[]>("list_dir", { path });
++      setChildrenByPath((previous) => ({ ...previous, [path]: contents }));
+     } catch (error) {
+-      setRosPackages([]);
+-      setRosPackagesError(String(error));
+-    } finally {
+-      setRosPackagesLoading(false);
++      setRosPackageContentsError(String(error));
      }
-   };
- 
-@@ -758,10 +882,12 @@ function App() {
+-  }, [rosWorkspacePath]);
+-
+-  useEffect(() => {
+-    void refreshRosPackages();
+-  }, [refreshRosPackages]);
++  };
+
+   const pickRosWorkspace = async () => {
+     try {
+@@ -618,6 +673,7 @@ function App() {
+     setActiveTab("build");
+     try {
+       await invoke("run_colcon_build_streaming");
++      await refreshRosPackages();
+     } catch (error) {
+       setBuilding(false);
+       setBuildOutput((prev) => appendLog(prev, `ERROR: ${String(error)}`));
+@@ -639,6 +695,7 @@ function App() {
+     setCurrentSetupLine("Starting...");
+     try {
+       await invoke("initialize_ros_environment");
++      await refreshRosPackages(true);
+     } catch (err) {
+       setSetupOutput((prev) => appendLog(prev, `❌ ${err}`));
+       setCurrentSetupLine(`❌ ${err}`);
+@@ -895,6 +952,7 @@ function App() {
      const unlistenError = listen<string>("ros-error", (event) => {
        console.error("ROS error:", event.payload);
        setRosConnected(false);
-+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
-     });
- 
++      setRosGraph(null);
+       setSafetyState((state) =>
+         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
+       );
+@@ -902,6 +960,7 @@ function App() {
+
      const unlistenAuthError = listen<string>("ros-auth-error", (event) => {
        setRosConnected(false);
-+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
-       setRosEvents((prev) =>
-         [...prev.slice(-49), `Authentication: ${event.payload}`],
++      setRosGraph(null);
+       setSafetyState((state) =>
+         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
        );
-@@ -773,6 +899,37 @@ function App() {
- 
+@@ -917,6 +976,7 @@ function App() {
+
      const unlistenConnecting = listen<void>("ros-connecting", () => {
        setRosConnected(false);
-+      setSafetyState((state) => state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED");
-+    });
-+    const unlistenSafety = listen<{
-+      state: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
-+      detail: string;
-+    }>("safety-state", (event) => {
-+      setSafetyState(event.payload.state);
-+      setSafetyError(event.payload.state === "FAULT" ? event.payload.detail : null);
-+    });
-+    const unlistenEventHealth = listen<{
-+      queueCapacity: number;
-+      subscriberCount: number;
-+      lastSequence: number;
-+      droppedTelemetry: number;
-+      criticalOverflows: number;
-+      maxBacklog: number;
-+      persistenceHealthy: boolean;
-+      persistenceError: string;
-+      oldestAvailableSequence: number;
-+      retainedCriticalEvents: number;
-+    }>("event-health", (event) => {
-+      setEventHealth(event.payload);
-+    });
-+    const unlistenEventRecovery = listen<{
-+      gapDetected: boolean;
-+      oldestAvailableSequence: number;
-+      latestSequence: number;
-+      snapshotIncluded: boolean;
-+      retainedCriticalEvents: number;
-+    }>("event-recovery", (event) => {
-+      setEventRecovery(event.payload);
++      setRosGraph(null);
+       setSafetyState((state) =>
+         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
+       );
+@@ -953,6 +1013,10 @@ function App() {
+     }>("event-recovery", (event) => {
+       setEventRecovery(event.payload);
      });
- 
++    const unlistenRosGraph = listen<RosGraphSnapshot>(
++      "ros-graph-snapshot",
++      (event) => setRosGraph(event.payload),
++    );
+
      const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
-@@ -812,6 +969,9 @@ function App() {
-       unlistenAuthError.then((f) => f());
-       unlistenNodeSnapshot.then((f) => f());
-       unlistenConnecting.then((f) => f());
-+      unlistenSafety.then((f) => f());
-+      unlistenEventHealth.then((f) => f());
-+      unlistenEventRecovery.then((f) => f());
+       const { kind, text } = event.payload;
+@@ -994,6 +1058,7 @@ function App() {
+       unlistenSafety.then((f) => f());
+       unlistenEventHealth.then((f) => f());
+       unlistenEventRecovery.then((f) => f());
++      unlistenRosGraph.then((f) => f());
        unlistenBuildOutput.then((f) => f());
        unlistenBuildError.then((f) => f());
        unlistenBuildFinished.then((f) => f());
-@@ -1016,6 +1176,11 @@ function App() {
-             </>
-           )}
-         </button>
-+        {building && (
-+          <button className="ide-btn" onClick={cancelBuild}>
-+            Cancel Build
-+          </button>
-+        )}
-         <select
-           value={worldPath ?? "default"}
-           onChange={(e) => {
-@@ -1256,10 +1421,91 @@ function App() {
-                       {rosWorkspacePath ? "set" : "not set"}
-                     </span>
+@@ -1436,15 +1501,43 @@ function App() {
+
+               {activityView === "ros" && (
+                 <div style={{ padding: "4px 14px", fontSize: 12 }}>
+-                  <div style={{ opacity: 0.7, marginBottom: 6 }}>
+-                    Workspace:{" "}
+-                    <span
+-                      style={{
+-                        color: rosWorkspacePath ? "#7cd992" : "#e08080",
+-                      }}
++                  <div
++                    style={{
++                      display: "flex",
++                      alignItems: "center",
++                      gap: 8,
++                      marginBottom: 8,
++                    }}
++                  >
++                    <div style={{ opacity: 0.7, flex: 1, minWidth: 0 }}>
++                      Workspace:{" "}
++                      <span
++                        title={rosWorkspacePath ?? undefined}
++                        style={{
++                          color: rosWorkspacePath ? "#7cd992" : "#e08080",
++                          overflowWrap: "anywhere",
++                        }}
++                      >
++                        {rosWorkspacePath ? "selected" : "not set"}
++                      </span>
++                    </div>
++                    <button
++                      className="ide-btn"
++                      type="button"
++                      onClick={() => void refreshRosPackages()}
++                      disabled={rosPackagesLoading || !rosWorkspacePath}
++                      aria-label="Refresh ROS packages"
++                      title="Refresh ROS packages"
+                     >
+-                      {rosWorkspacePath ? "set" : "not set"}
+-                    </span>
++                      <RotateCw
++                        size={13}
++                        style={{
++                          animation: rosPackagesLoading
++                            ? "spin 1s linear infinite"
++                            : undefined,
++                        }}
++                      />
++                    </button>
                    </div>
--                  <div style={{ opacity: 0.5, fontSize: 11 }}>
--                    Live node/topic graph coming soon — inspect activity in the
--                    ROS Log panel below.
--                  </div>
-+
-+                  {rosPackagesLoading && (
-+                    <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.7 }}>
-+                      <LoaderCircle size={14} className="spin" />
-+                      Loading packages...
-+                    </div>
-+                  )}
-+
-+                  {!rosPackagesLoading && rosPackagesError && (
-+                    <div style={{ color: "#f0a3a3", whiteSpace: "pre-wrap" }}>
-+                      {rosPackagesError}
-+                    </div>
-+                  )}
-+
-+                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length === 0 && (
-+                    <div style={{ opacity: 0.6 }}>
-+                      No ROS packages discovered in the active environment.
-+                    </div>
-+                  )}
-+
-+                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length > 0 && (
-+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-+                      {rosPackages.map((pkg) => (
-+                        <div
-+                          key={pkg.name}
+
+                   {rosPackagesLoading && (
+@@ -1471,21 +1564,47 @@ function App() {
+                     !rosPackagesError &&
+                     rosPackages.length === 0 && (
+                       <div style={{ opacity: 0.6 }}>
+-                        No ROS packages discovered in the active environment.
++                        No packages found in the selected workspace. Build the
++                        workspace after adding packages, then refresh.
+                       </div>
+                     )}
+
+                   {!rosPackagesLoading &&
+                     !rosPackagesError &&
+                     rosPackages.length > 0 && (
+-                      <div
+-                        style={{
+-                          display: "flex",
+-                          flexDirection: "column",
+-                          gap: 8,
+-                        }}
+-                      >
+-                        {rosPackages.map((pkg) => (
++                      <>
++                        <input
++                          type="search"
++                          aria-label="Filter ROS packages"
++                          value={rosPackageFilter}
++                          onChange={(event) =>
++                            setRosPackageFilter(event.target.value)
++                          }
++                          placeholder="Filter packages..."
 +                          style={{
-+                            background: "rgba(255,255,255,0.02)",
-+                            border: "1px solid rgba(255,255,255,0.08)",
-+                            borderRadius: 6,
-+                            padding: 8,
++                            boxSizing: "border-box",
++                            width: "100%",
++                            marginBottom: 8,
++                            padding: "6px 8px",
++                            color: "#ddd",
++                            background: "#1e1e1e",
++                            border: "1px solid #444",
++                            borderRadius: 4,
 +                          }}
-+                        >
-+                          <div style={{ fontWeight: 600, color: "#e8e8e8", marginBottom: 4 }}>
-+                            {pkg.name}
++                        />
++                        {filteredRosPackages.length === 0 ? (
++                          <div style={{ opacity: 0.6 }}>
++                            No packages match this filter.
 +                          </div>
-+                          <div style={{ opacity: 0.7, wordBreak: "break-word", marginBottom: 4 }}>
-+                            {pkg.path}
-+                          </div>
-+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-+                            {pkg.package_type && (
-+                              <span style={{ background: "rgba(79,195,247,0.12)", borderRadius: 999, padding: "2px 6px" }}>
-+                                {pkg.package_type}
-+                              </span>
-+                            )}
-+                            {pkg.version && (
-+                              <span style={{ background: "rgba(124,217,146,0.12)", borderRadius: 999, padding: "2px 6px" }}>
-+                                v{pkg.version}
-+                              </span>
-+                            )}
-+                          </div>
-+                          {pkg.dependencies.length > 0 && (
-+                            <div style={{ marginTop: 6 }}>
-+                              <div style={{ opacity: 0.6, marginBottom: 2 }}>Dependencies</div>
-+                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-+                                {pkg.dependencies.slice(0, 8).map((dep) => (
-+                                  <span key={`${pkg.name}-${dep}`} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 999, padding: "2px 6px" }}>
-+                                    {dep}
-+                                  </span>
-+                                ))}
++                        ) : (
++                          <div
++                            style={{
++                              display: "flex",
++                              flexDirection: "column",
++                              gap: 8,
++                            }}
++                          >
++                            {filteredRosPackages.map((pkg) => (
+                           <div
+                             key={pkg.name}
+                             style={{
+@@ -1504,6 +1623,17 @@ function App() {
+                             >
+                               {pkg.name}
+                             </div>
++                            {pkg.description && (
++                              <div
++                                style={{
++                                  opacity: 0.75,
++                                  marginBottom: 4,
++                                  overflowWrap: "anywhere",
++                                }}
++                              >
++                                {pkg.description}
 +                              </div>
-+                            </div>
-+                          )}
-+                          {(pkg.executables.length > 0 || pkg.launch_files.length > 0 || pkg.config_files.length > 0) && (
-+                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
-+                              {pkg.executables.length > 0 && (
-+                                <div style={{ opacity: 0.6 }}>
-+                                  Executables: {pkg.executables.join(", ")}
++                            )}
+                             <div
+                               style={{
+                                 opacity: 0.7,
+@@ -1543,6 +1673,19 @@ function App() {
+                                 </span>
+                               )}
+                             </div>
++                            {pkg.metadata_error && (
++                              <div
++                                role="status"
++                                style={{
++                                  color: "#e0b060",
++                                  marginTop: 6,
++                                  overflowWrap: "anywhere",
++                                }}
++                              >
++                                Package metadata is incomplete:{" "}
++                                {pkg.metadata_error}
++                              </div>
++                            )}
+                             {pkg.dependencies.length > 0 && (
+                               <div style={{ marginTop: 6 }}>
+                                 <div style={{ opacity: 0.6, marginBottom: 2 }}>
+@@ -1598,10 +1741,59 @@ function App() {
+                                 )}
+                               </div>
+                             )}
++                            <button
++                              className="ide-btn"
++                              type="button"
++                              aria-expanded={expandedRosPackage === pkg.path}
++                              onClick={() => void inspectRosPackage(pkg.path)}
++                              style={{ marginTop: 8 }}
++                            >
++                              {expandedRosPackage === pkg.path
++                                ? "Hide contents"
++                                : "Inspect contents"}
++                            </button>
++                            {expandedRosPackage === pkg.path &&
++                              rosPackageContentsError && (
++                                <div
++                                  role="alert"
++                                  style={{
++                                    color: "#f0a3a3",
++                                    marginTop: 6,
++                                    overflowWrap: "anywhere",
++                                  }}
++                                >
++                                  Could not inspect package:{" "}
++                                  {rosPackageContentsError}
 +                                </div>
 +                              )}
-+                              {pkg.launch_files.length > 0 && (
-+                                <div style={{ opacity: 0.6 }}>
-+                                  Launch: {pkg.launch_files.join(", ")}
++                            {expandedRosPackage === pkg.path &&
++                              childrenByPath[pkg.path] && (
++                                <div style={{ marginTop: 6 }}>
++                                  <FileTree
++                                    entries={childrenByPath[pkg.path]}
++                                    depth={0}
++                                    expandedPaths={expandedPaths}
++                                    childrenByPath={childrenByPath}
++                                    activeFilePath={activeFilePath}
++                                    onToggleFolder={toggleFolder}
++                                    onOpenFile={(path, name) => {
++                                      void openFile(path, name).catch(
++                                        (error) =>
++                                          setRosPackageContentsError(
++                                            String(error),
++                                          ),
++                                      );
++                                    }}
++                                  />
 +                                </div>
 +                              )}
-+                              {pkg.config_files.length > 0 && (
-+                                <div style={{ opacity: 0.6 }}>
-+                                  Config: {pkg.config_files.join(", ")}
-+                                </div>
-+                              )}
-+                            </div>
-+                          )}
-+                        </div>
-+                      ))}
-+                    </div>
-+                  )}
+                           </div>
+-                        ))}
+-                      </div>
++                            ))}
++                          </div>
++                        )}
++                      </>
+                     )}
++                  <RosGraphExplorer graph={rosGraph} connected={rosConnected} />
                  </div>
                )}
              </div>
-@@ -1880,6 +2126,12 @@ function App() {
-                     <RobotControls
-                       onCommand={sendTwist}
-                       availableRobots={availableRobots}
-+                      safetyState={safetyState}
-+                      safetyPending={safetyPending}
-+                      safetyError={safetyError}
-+                      commandError={robotCommandError}
-+                      onEmergencyStop={() => void requestEmergencyStop(true)}
-+                      onResetEmergencyStop={() => void requestEmergencyStop(false)}
-                     />
+@@ -2240,7 +2432,13 @@ function App() {
+               {activeTab === "sim" && (
+                 <div style={{ height: "100%", display: "flex" }}>
+                   <div style={{ flex: 1 }}>
+-                    <RobotView />
++                    <RobotView
++                      descriptionContent={
++                        activeFile?.name.toLowerCase().endsWith(".urdf")
++                          ? activeFile.content
++                          : null
++                      }
++                    />
                    </div>
-                 </div>
-@@ -1887,6 +2139,21 @@ function App() {
-               {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
-               {activeTab === "problems" && (
-                 <div style={{ padding: 8, fontSize: 12 }}>
-+                  {eventHealth && (
-+                    <div role="status" style={{ padding: "6px 0", color: !eventHealth.persistenceHealthy ? "#e08080" : eventHealth.criticalOverflows > 0 ? "#e0b060" : "#7cd992" }}>
-+                      ROS event queue: {eventHealth.subscriberCount} subscriber(s), backlog {eventHealth.maxBacklog}/{eventHealth.queueCapacity}, critical overflows {eventHealth.criticalOverflows}, coalesced/dropped telemetry {eventHealth.droppedTelemetry}; retained critical events {eventHealth.retainedCriticalEvents}.
-+                    </div>
-+                  )}
-+                  {eventHealth && !eventHealth.persistenceHealthy && (
-+                    <div role="alert" style={{ color: "#e08080", padding: "4px 0" }}>
-+                      Critical event history is unavailable: {eventHealth.persistenceError}
-+                    </div>
-+                  )}
-+                  {eventRecovery?.gapDetected && (
-+                    <div role="status" style={{ color: "#e0b060", padding: "4px 0" }}>
-+                      ROS event history had a gap. {eventRecovery.snapshotIncluded ? "Current state snapshots were restored." : "A state snapshot is not available yet."} Oldest retained sequence: {eventRecovery.oldestAvailableSequence}; latest sequence: {eventRecovery.latestSequence}.
-+                    </div>
-+                  )}
-                   {diagnostics.length === 0 ? (
-                     <div style={{ color: "#777" }}>No problems reported by recent environment, build, or ROS output.</div>
-                   ) : (
+                   <div style={{ width: 200, borderLeft: "1px solid #333" }}>
+                     <RobotControls
 diff --git a/src/components/RobotView.tsx b/src/components/RobotView.tsx
-index 50e76fa..ccf33c3 100644
+index ccf33c3..624f0eb 100644
 --- a/src/components/RobotView.tsx
 +++ b/src/components/RobotView.tsx
-@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
- import * as THREE from "three";
- import { listen } from "@tauri-apps/api/event";
+@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
  import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-+import { invoke } from "@tauri-apps/api/core";
+ import { invoke } from "@tauri-apps/api/core";
  import { ArrowUp, ArrowDown, RotateCcw, RotateCw, Square } from "lucide-react";
- 
++import { buildRobotInstance } from "../robotDescription";
++import type { RobotDescription, RobotInstance } from "../robotDescription";
+
  interface OdometryUpdate {
-@@ -223,11 +224,69 @@ export default function RobotView() {
- export function RobotControls({
-   onCommand,
-   availableRobots,
-+  safetyState,
-+  safetyPending,
-+  safetyError,
-+  commandError,
-+  onEmergencyStop,
-+  onResetEmergencyStop,
- }: {
-   onCommand: (topic: string, lin: number, ang: number) => void;
-   availableRobots: string[];
-+  safetyState: "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED";
-+  safetyPending: boolean;
-+  safetyError: string | null;
-+  commandError: string | null;
-+  onEmergencyStop: () => void;
-+  onResetEmergencyStop: () => void;
- }) {
-   const [selectedRobot, setSelectedRobot] = useState<string | null>(null);
-+  const [robotConfig, setRobotConfig] = useState<RobotMotionConfig | null>(null);
-+  const [configError, setConfigError] = useState<string | null>(null);
-+  const [configBusy, setConfigBusy] = useState(false);
+   node: string;
+@@ -16,9 +18,89 @@ interface OdometryUpdate {
+   qw: number;
+ }
+
+-export default function RobotView() {
++interface JointStateUpdate {
++  names: string[];
++  positions: number[];
++}
++
++function buildPlaceholderRobot(node: string): RobotInstance {
++  const isBlue = node.includes("blue");
++  const bodyColor = isBlue ? 0x8080ff : 0x80ff80;
++  const wheelColor = 0x333333;
++  const group = new THREE.Group();
++
++  const chassis = new THREE.Mesh(
++    new THREE.BoxGeometry(2.01142, 0.568726, 1),
++    new THREE.MeshStandardMaterial({ color: bodyColor }),
++  );
++  chassis.position.set(-0.151427, 0.175, 0);
++  chassis.castShadow = true;
++  chassis.receiveShadow = true;
++  group.add(chassis);
++
++  const wheelMaterial = new THREE.MeshStandardMaterial({ color: wheelColor });
++  const leftWheel = new THREE.Mesh(
++    new THREE.SphereGeometry(0.3, 16, 16),
++    wheelMaterial,
++  );
++  leftWheel.position.set(0.554283, -0.025, -0.625029);
++  leftWheel.castShadow = true;
++  group.add(leftWheel);
++
++  const rightWheel = new THREE.Mesh(
++    new THREE.SphereGeometry(0.3, 16, 16),
++    wheelMaterial,
++  );
++  rightWheel.position.set(0.554282, -0.025, 0.625029);
++  rightWheel.castShadow = true;
++  group.add(rightWheel);
++
++  const caster = new THREE.Mesh(
++    new THREE.SphereGeometry(0.2, 16, 16),
++    new THREE.MeshStandardMaterial({ color: wheelColor }),
++  );
++  caster.position.set(-0.957138, -0.125, 0);
++  caster.castShadow = true;
++  group.add(caster);
++
++  return { group, updateJoints: () => undefined };
++}
++
++export default function RobotView({
++  descriptionContent,
++}: {
++  descriptionContent: string | null;
++}) {
+   const containerRef = useRef<HTMLDivElement>(null);
+-  const robotsRef = useRef<Record<string, THREE.Group>>({});
++  const robotsRef = useRef<Record<string, RobotInstance>>({});
++  const [robotDescription, setRobotDescription] =
++    useState<RobotDescription | null>(null);
++  const [descriptionError, setDescriptionError] = useState<string | null>(null);
 +
 +  useEffect(() => {
-+    if (!selectedRobot) {
-+      setRobotConfig(null);
++    if (!descriptionContent) {
++      setRobotDescription(null);
++      setDescriptionError(null);
 +      return;
 +    }
++
 +    let active = true;
-+    setConfigBusy(true);
-+    setConfigError(null);
-+    invoke<RobotMotionConfig>("get_robot_config", { topicName: selectedRobot })
-+      .then((config) => {
-+        if (active) setRobotConfig(config);
++    setRobotDescription(null);
++    setDescriptionError(null);
++    invoke<RobotDescription>("parse_robot_description", {
++      content: descriptionContent,
++    })
++      .then((description) => {
++        if (active) setRobotDescription(description);
 +      })
 +      .catch((error) => {
-+        if (active) setConfigError(String(error));
-+      })
-+      .finally(() => {
-+        if (active) setConfigBusy(false);
++        if (active) setDescriptionError(String(error));
 +      });
++
 +    return () => {
 +      active = false;
 +    };
-+  }, [selectedRobot]);
-+
-+  const saveConfig = async (reset = false) => {
-+    if (!selectedRobot || !robotConfig || configBusy) return;
-+    setConfigBusy(true);
-+    setConfigError(null);
-+    try {
-+      const saved = reset
-+        ? await invoke<RobotMotionConfig>("reset_robot_config", {
-+            topicName: selectedRobot,
-+          })
-+        : await invoke<RobotMotionConfig>("save_robot_config", {
-+            config: robotConfig,
-+          });
-+      setRobotConfig(saved);
-+    } catch (error) {
-+      setConfigError(String(error));
-+    } finally {
-+      setConfigBusy(false);
++  }, [descriptionContent]);
+
+   useEffect(() => {
+     if (!containerRef.current) return;
+@@ -93,6 +175,12 @@ export default function RobotView() {
+     scene.add(light);
+     scene.add(new THREE.AmbientLight(0x404040));
+
++    if (robotDescription) {
++      const preview = buildRobotInstance(robotDescription);
++      scene.add(preview.group);
++      robotsRef.current["__description_preview__"] = preview;
 +    }
-+  };
- 
-   // Keep selection valid as the available robot list changes (e.g., after
-   // switching worlds) — default to the first available robot if none is
-@@ -278,6 +337,50 @@ export function RobotControls({
-         </select>
-       )}
- 
-+      <div
-+        role="status"
-+        aria-live="polite"
-+        style={{
-+          margin: "8px 0",
-+          padding: 8,
-+          color: safetyState === "ACTIVE" || safetyState === "FAULT" ? "#ff8b82" : "#ccc",
-+          background: safetyState === "ACTIVE" || safetyState === "FAULT" ? "#421f1f" : "#252526",
-+        }}
-+      >
-+        Safety state: {safetyState}
-+        {safetyState === "ACTIVE" && (
-+          <div>Latched. Reset is explicit; motion will not resume automatically.</div>
-+        )}
-+      </div>
-+      {safetyError && <div role="alert" style={{ color: "#ff8b82" }}>{safetyError}</div>}
-+      {commandError && <div role="alert" style={{ color: "#ff8b82" }}>{commandError}</div>}
-+      {safetyState === "ACTIVE" || safetyState === "FAULT" ? (
-+        <button
-+          type="button"
-+          className="ide-btn primary"
-+          disabled={safetyPending || safetyState === "FAULT"}
-+          onClick={onResetEmergencyStop}
-+          style={{ width: "100%", marginBottom: 8 }}
-+        >
-+          {safetyPending ? "Applying..." : "Reset Emergency Stop"}
-+        </button>
-+      ) : (
-+        <button
-+          type="button"
-+          className="ide-btn"
-+          disabled={safetyPending || safetyState !== "READY"}
-+          onClick={onEmergencyStop}
++
+     const animate = () => {
+       if (!isActive) return;
+
+@@ -106,8 +194,15 @@ export default function RobotView() {
+     const unlistenClear = listen("clear-robots", () => {
+       if (!isActive) return;
+
+-      Object.values(robotsRef.current).forEach((mesh) => scene.remove(mesh));
++      Object.values(robotsRef.current).forEach((robot) =>
++        scene.remove(robot.group),
++      );
+       robotsRef.current = {};
++      if (robotDescription) {
++        const preview = buildRobotInstance(robotDescription);
++        scene.add(preview.group);
++        robotsRef.current["__description_preview__"] = preview;
++      }
+     });
+
+     const unlistenPromise = listen<OdometryUpdate>(
+@@ -117,59 +212,38 @@ export default function RobotView() {
+
+         const { node, x, y, z, qx, qy, qz, qw } = event.payload;
+
+-        let mesh = robotsRef.current[node];
+-
+-        if (!mesh) {
+-          const isBlue = node.includes("blue");
+-          const bodyColor = isBlue ? 0x8080ff : 0x80ff80;
+-          const wheelColor = 0x333333;
+-
+-          const group = new THREE.Group();
+-
+-          // Chassis — matches SDF: box 2.01142 x 1 x 0.568726,
+-          // offset -0.151427 0 0.175 relative to vehicle origin
+-          const chassisGeo = new THREE.BoxGeometry(2.01142, 0.568726, 1);
+-          const chassisMat = new THREE.MeshStandardMaterial({
+-            color: bodyColor,
+-          });
+-          const chassis = new THREE.Mesh(chassisGeo, chassisMat);
+-          chassis.position.set(-0.151427, 0.175, 0);
+-          chassis.castShadow = true;
+-          chassis.receiveShadow = true;
+-          group.add(chassis);
+-
+-          // Left wheel — sphere radius 0.3, offset 0.554283 0.625029 -0.025
+-          const wheelGeo = new THREE.SphereGeometry(0.3, 16, 16);
+-          const wheelMat = new THREE.MeshStandardMaterial({
+-            color: wheelColor,
+-          });
+-          const leftWheel = new THREE.Mesh(wheelGeo, wheelMat);
+-          leftWheel.position.set(0.554283, -0.025, -0.625029);
+-          leftWheel.castShadow = true;
+-          group.add(leftWheel);
+-
+-          // Right wheel — mirrored on y
+-          const rightWheel = new THREE.Mesh(wheelGeo.clone(), wheelMat);
+-          rightWheel.position.set(0.554282, -0.025, 0.625029);
+-          rightWheel.castShadow = true;
+-          group.add(rightWheel);
+-
+-          // Caster — sphere radius 0.2, offset -0.957138 0 -0.125
+-          const casterGeo = new THREE.SphereGeometry(0.2, 16, 16);
+-          const casterMat = new THREE.MeshStandardMaterial({
+-            color: wheelColor,
+-          });
+-          const caster = new THREE.Mesh(casterGeo, casterMat);
+-          caster.position.set(-0.957138, -0.125, 0);
+-          caster.castShadow = true;
+-          group.add(caster);
+-
+-          scene.add(group);
+-          robotsRef.current[node] = group;
++        let robot = robotsRef.current[node];
++
++        if (!robot) {
++          robot =
++            robotsRef.current["__description_preview__"] ??
++            (robotDescription
++              ? buildRobotInstance(robotDescription)
++              : buildPlaceholderRobot(node));
++          if (robotsRef.current["__description_preview__"]) {
++            delete robotsRef.current["__description_preview__"];
++          } else {
++            scene.add(robot.group);
++          }
++          robotsRef.current[node] = robot;
+         }
+
+-        mesh.position.set(x, z, -y);
+-        mesh.quaternion.set(qx, qz, -qy, qw);
++        robot.group.position.set(x, z, -y);
++        robot.group.quaternion.set(qx, qz, -qy, qw);
++      },
++    );
++    const unlistenJointState = listen<JointStateUpdate>(
++      "joint-state-update",
++      (event) => {
++        if (!isActive) return;
++        const { names, positions } = event.payload;
++        const jointPositions = new Map<string, number>();
++        for (let index = 0; index < Math.min(names.length, positions.length); index += 1) {
++          jointPositions.set(names[index], positions[index]);
++        }
++        Object.values(robotsRef.current).forEach((robot) =>
++          robot.updateJoints(jointPositions),
++        );
+       },
+     );
+
+@@ -182,10 +256,11 @@ export default function RobotView() {
+
+       unlistenPromise.then((f) => f()).catch(() => {});
+       unlistenClear.then((f) => f()).catch(() => {});
++      unlistenJointState.then((f) => f()).catch(() => {});
+
+-      Object.values(robotsRef.current).forEach((group) => {
+-        scene.remove(group);
+-        group.traverse((child) => {
++      Object.values(robotsRef.current).forEach((robot) => {
++        scene.remove(robot.group);
++        robot.group.traverse((child) => {
+           if (child instanceof THREE.Mesh) {
+             child.geometry.dispose();
+             if (Array.isArray(child.material)) {
+@@ -207,7 +282,7 @@ export default function RobotView() {
+         containerRef.current.innerHTML = "";
+       }
+     };
+-  }, []);
++  }, [robotDescription]);
+
+   return (
+     <div
+@@ -216,8 +291,61 @@ export default function RobotView() {
+         width: "100%",
+         height: "100%",
+         overflow: "hidden",
++        position: "relative",
+       }}
+-    />
++    >
++      {(descriptionError || robotDescription?.warnings.length) && (
++        <div
++          role={descriptionError ? "alert" : "status"}
 +          style={{
-+            width: "100%",
-+            marginBottom: 8,
-+            color: "#fff",
-+            background: "#a32323",
++            position: "absolute",
++            zIndex: 1,
++            top: 8,
++            left: 8,
++            maxWidth: 420,
++            padding: 8,
++            background: "rgba(25,25,25,0.92)",
++            color: descriptionError ? "#ff8b82" : "#e0b060",
++            fontSize: 12,
++            whiteSpace: "pre-wrap",
 +          }}
 +        >
-+          {safetyPending ? "Applying..." : "EMERGENCY STOP"}
-+        </button>
++          {descriptionError ?? robotDescription?.warnings.join("\n")}
++        </div>
 +      )}
-+
-       <div
-         style={{
-           marginBottom: "var(--spacing-sm)",
-@@ -285,8 +388,10 @@ export function RobotControls({
-           opacity: 0.75,
-         }}
-       >
--        Speed magnitude limits: 0.5 m/s linear, 1 rad/s angular. Commands time
--        out after 0.5 s; this is not a safety-rated emergency stop.
-+        {robotConfig
-+          ? `Limits: ${robotConfig.maxLinearVelocity} m/s linear, ${robotConfig.maxAngularVelocity} rad/s angular; ${robotConfig.commandLeaseMs} ms command lease.`
-+          : "Per-robot motion limits are enforced by the ROS service."}{" "}
-+        Software stop only; not safety-rated.
-       </div>
- 
-       <div
-@@ -294,12 +399,13 @@ export function RobotControls({
-           display: "grid",
-           gridTemplateColumns: "repeat(3, 48px)",
-           justifyContent: "center",
--          opacity: selectedRobot ? 1 : 0.4,
--          pointerEvents: selectedRobot ? "auto" : "none",
-+          opacity: selectedRobot && safetyState === "READY" && !safetyPending ? 1 : 0.4,
-+          pointerEvents: selectedRobot && safetyState === "READY" && !safetyPending ? "auto" : "none",
-         }}
-       >
-         <div />
-         <button
-+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
-           style={btnStyle}
-           onClick={() => onCommand(selectedRobot!, 0.3, 0)}
-         >
-@@ -309,6 +415,7 @@ export function RobotControls({
-         </button>
-         <div />
-         <button
-+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
-           style={btnStyle}
-           onClick={() => onCommand(selectedRobot!, 0, 0.5)}
-         >
-@@ -317,6 +424,7 @@ export function RobotControls({
-           />
-         </button>
-         <button
-+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
-           style={btnStyle}
-           onClick={() => onCommand(selectedRobot!, 0, 0)}
-         >
-@@ -325,6 +433,7 @@ export function RobotControls({
-           />
-         </button>
-         <button
-+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
-           style={btnStyle}
-           onClick={() => onCommand(selectedRobot!, 0, -0.5)}
-         >
-@@ -334,6 +443,7 @@ export function RobotControls({
-         </button>
-         <div />
-         <button
-+          disabled={!selectedRobot || safetyState !== "READY" || safetyPending}
-           style={btnStyle}
-           onClick={() => onCommand(selectedRobot!, -0.3, 0)}
-         >
-@@ -343,6 +453,73 @@ export function RobotControls({
-         </button>
-         <div />
-       </div>
-+      {selectedRobot && robotConfig && (
-+        <fieldset
-+          disabled={configBusy}
-+          style={{ marginTop: 12, border: "1px solid #444", padding: 8 }}
++      {descriptionContent && !robotDescription && !descriptionError && (
++        <div
++          role="status"
++          style={{
++            position: "absolute",
++            zIndex: 1,
++            top: 8,
++            left: 8,
++            padding: 8,
++            background: "rgba(25,25,25,0.92)",
++            fontSize: 12,
++          }}
 +        >
-+          <legend>Robot motion limits</legend>
-+          {([
-+            ["maxLinearVelocity", "Linear velocity (m/s)"],
-+            ["maxAngularVelocity", "Angular velocity (rad/s)"],
-+            ["maxLinearAcceleration", "Linear acceleration (m/s²)"],
-+            ["maxAngularAcceleration", "Angular acceleration (rad/s²)"],
-+            ["commandLeaseMs", "Command lease (ms)"],
-+            ["commandTimeoutMs", "Command timeout (ms)"],
-+          ] as const).map(([field, label]) => (
-+            <label key={field} style={{ display: "block", fontSize: 11, margin: "6px 0" }}>
-+              {label}
-+              <input
-+                type="number"
-+                min={field.endsWith("Ms") ? 100 : 0.01}
-+                step={field.endsWith("Ms") ? 50 : 0.05}
-+                value={robotConfig[field]}
-+                onChange={(event) => {
-+                  const value = Number(event.target.value);
-+                  setRobotConfig((current) => current && { ...current, [field]: value });
-+                }}
-+                style={{ width: "100%" }}
-+              />
-+            </label>
++          Validating robot description...
++        </div>
++      )}
++      {!descriptionContent && !descriptionError && (
++        <div
++          role="status"
++          style={{
++            position: "absolute",
++            zIndex: 1,
++            top: 8,
++            left: 8,
++            padding: 8,
++            background: "rgba(25,25,25,0.92)",
++            fontSize: 12,
++          }}
++        >
++          Open a URDF file to preview its geometry; a placeholder robot is shown.
++        </div>
++      )}
++    </div>
+   );
+ }
+
+diff --git a/src/components/TFTree.tsx b/src/components/TFTree.tsx
+index 959fb26..84e7fb7 100644
+--- a/src/components/TFTree.tsx
++++ b/src/components/TFTree.tsx
+@@ -1,89 +1,164 @@
+-import { useEffect, useState, useRef } from "react";
++import { useEffect, useMemo, useRef, useState } from "react";
+ import { listen } from "@tauri-apps/api/event";
+ import { AlertTriangle, Sparkles } from "lucide-react";
++import {
++  buildTfGraph,
++  tfEdgeKey,
++  type TfTransform,
++  type TfTreeNode,
++} from "../tfGraph";
+
+-interface TfUpdate {
+-  parent_frame: string;
+-  child_frame: string;
+-  x: number;
+-  y: number;
+-  z: number;
+-  qx: number;
+-  qy: number;
+-  qz: number;
+-  qw: number;
+-}
+-
+-type TfUpdateWithValidation = TfUpdate & {
+-  validationIssues?: string[];
++type TfUpdateWithValidation = TfTransform & {
++  validationIssues: string[];
+ };
+
++interface TfEvent extends Omit<TfTransform, "receivedAtMs"> {}
++
+ interface Props {
+   onExplain?: (tf: TfUpdateWithValidation) => void;
+ }
+
+-const QUATERNION_TOLERANCE = 0.01;
+-const TRANSLATION_WARNING_THRESHOLD = 1000;
+-
+-function validateTfUpdate(tf: TfUpdate): string[] {
+-  const issues: string[] = [];
+-  const values = [tf.x, tf.y, tf.z, tf.qx, tf.qy, tf.qz, tf.qw];
+-
+-  if (values.some((value) => !Number.isFinite(value))) {
+-    issues.push("Contains NaN/Infinity");
+-  }
+-
+-  const quaternionNorm =
+-    tf.qx * tf.qx + tf.qy * tf.qy + tf.qz * tf.qz + tf.qw * tf.qw;
+-
+-  if (Math.abs(quaternionNorm) < 1e-12) {
+-    issues.push("Zero quaternion — likely uninitialized");
+-  } else if (Math.abs(quaternionNorm - 1) > QUATERNION_TOLERANCE) {
+-    issues.push("Non-normalized quaternion");
+-  }
+-
+-  if (
+-    Math.abs(tf.x) > TRANSLATION_WARNING_THRESHOLD ||
+-    Math.abs(tf.y) > TRANSLATION_WARNING_THRESHOLD ||
+-    Math.abs(tf.z) > TRANSLATION_WARNING_THRESHOLD
+-  ) {
+-    issues.push("Large translation magnitude");
+-  }
++function TreeBranch({
++  node,
++  depth,
++  selectedEdgeKey,
++  onSelect,
++}: {
++  node: TfTreeNode;
++  depth: number;
++  selectedEdgeKey: string | null;
++  onSelect: (key: string) => void;
++}) {
++  const issues = node.edge?.issues ?? [];
++  return (
++    <div key={node.edge?.key ?? node.frame}>
++      <div
++        style={{
++          display: "flex",
++          alignItems: "center",
++          gap: 5,
++          paddingLeft: depth * 14,
++          minHeight: 24,
++        }}
++      >
++        {depth > 0 && <span style={{ opacity: 0.45 }}>└─</span>}
++        {node.edge ? (
++          <button
++            type="button"
++            onClick={() => onSelect(node.edge!.key)}
++            aria-pressed={selectedEdgeKey === node.edge.key}
++            style={{
++              textAlign: "left",
++              padding: "2px 4px",
++              border: 0,
++              borderRadius: 3,
++              color: issues.length ? "#e0b060" : "#7cd992",
++              background:
++                selectedEdgeKey === node.edge.key
++                  ? "rgba(79,195,247,0.12)"
++                  : "transparent",
++              fontFamily: "inherit",
++              fontSize: "inherit",
++              cursor: "pointer",
++            }}
++          >
++            {node.frame}
++          </button>
++        ) : (
++          <span style={{ color: "#4fc3f7", fontWeight: 600 }}>
++            {node.frame}
++          </span>
++        )}
++        {issues.length > 0 && (
++          <span title={issues.join("; ")}>
++            <AlertTriangle
++              aria-label={issues.join("; ")}
++              size={13}
++              color="#e0b060"
++            />
++          </span>
++        )}
++      </div>
++      {node.children.map((child) => (
++        <TreeBranch
++          key={child.edge?.key ?? child.frame}
++          node={child}
++          depth={depth + 1}
++          selectedEdgeKey={selectedEdgeKey}
++          onSelect={onSelect}
++        />
++      ))}
++    </div>
++  );
++}
+
+-  return issues;
++function quaternionEulerDegrees(transform: TfTransform) {
++  const { qx, qy, qz, qw } = transform;
++  if (![qx, qy, qz, qw].every(Number.isFinite)) return null;
++  const norm = Math.hypot(qx, qy, qz, qw);
++  if (norm < 1e-12) return null;
++  const x = qx / norm;
++  const y = qy / norm;
++  const z = qz / norm;
++  const w = qw / norm;
++  const sinRoll = 2 * (w * x + y * z);
++  const cosRoll = 1 - 2 * (x * x + y * y);
++  const sinPitch = 2 * (w * y - z * x);
++  const sinYaw = 2 * (w * z + x * y);
++  const cosYaw = 1 - 2 * (y * y + z * z);
++  const degrees = 180 / Math.PI;
++  return {
++    roll: Math.atan2(sinRoll, cosRoll) * degrees,
++    pitch: Math.asin(Math.max(-1, Math.min(1, sinPitch))) * degrees,
++    yaw: Math.atan2(sinYaw, cosYaw) * degrees,
++  };
+ }
+
+ export default function TFTree({ onExplain }: Props) {
+-  const [transforms, setTransforms] = useState<Record<string, TfUpdate>>({});
+-  const isActiveRef = useRef(true);
++  const [transforms, setTransforms] = useState<Record<string, TfTransform>>(
++    {},
++  );
++  const transformsRef = useRef<Record<string, TfTransform>>({});
++  const [selectedEdgeKey, setSelectedEdgeKey] = useState<string | null>(null);
++  const [nowMs, setNowMs] = useState(() => Date.now());
+
+   useEffect(() => {
+-    isActiveRef.current = true;
+-    const unlisten = listen<TfUpdate>("tf-update", (event) => {
+-      if (!isActiveRef.current) return;
+-      const key = `${event.payload.parent_frame}->${event.payload.child_frame}`;
+-      setTransforms((prev) => ({ ...prev, [key]: event.payload }));
++    let active = true;
++    let updateFrame: number | null = null;
++    const listener = listen<TfEvent>("tf-update", (event) => {
++      if (!active) return;
++      const transform: TfTransform = {
++        ...event.payload,
++        receivedAtMs: Date.now(),
++      };
++      const key = tfEdgeKey(transform.parent_frame, transform.child_frame);
++      transformsRef.current[key] = transform;
++      if (updateFrame === null) {
++        updateFrame = window.requestAnimationFrame(() => {
++          updateFrame = null;
++          if (active) setTransforms({ ...transformsRef.current });
++        });
++      }
+     });
++    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
+
+     return () => {
+-      isActiveRef.current = false;
+-      unlisten.then((f) => f());
++      active = false;
++      window.clearInterval(timer);
++      if (updateFrame !== null) {
++        window.cancelAnimationFrame(updateFrame);
++      }
++      listener.then((unlisten) => unlisten()).catch(() => undefined);
+     };
+   }, []);
+
+-  // Group by parent frame, so we can render a simple indented tree
+-  const byParent: Record<string, TfUpdateWithValidation[]> = {};
+-  Object.values(transforms).forEach((t) => {
+-    const withValidation: TfUpdateWithValidation = {
+-      ...t,
+-      validationIssues: validateTfUpdate(t),
+-    };
+-
+-    if (!byParent[t.parent_frame]) byParent[t.parent_frame] = [];
+-    byParent[t.parent_frame].push(withValidation);
+-  });
+-
+-  const roots = Object.keys(byParent);
++  const graph = useMemo(
++    () => buildTfGraph(Object.values(transforms), nowMs),
++    [transforms, nowMs],
++  );
++  const selected =
++    graph.edges.find((edge) => edge.key === selectedEdgeKey) ?? graph.edges[0];
++  const euler = selected ? quaternionEulerDegrees(selected) : null;
+
+   return (
+     <div
+@@ -96,92 +171,117 @@ export default function TFTree({ onExplain }: Props) {
+         height: "100%",
+       }}
+     >
+-      {roots.length === 0 && (
++      <div style={{ opacity: 0.65, marginBottom: 8 }}>
++        {graph.edges.length} transform(s) · {graph.roots.length} root frame(s)
++      </div>
++      {graph.warnings.map((warning) => (
++        <div
++          key={warning}
++          role="status"
++          style={{
++            display: "flex",
++            alignItems: "center",
++            gap: 6,
++            color: "#e0b060",
++            marginBottom: 6,
++          }}
++        >
++          <AlertTriangle size={13} />
++          {warning}
++        </div>
++      ))}
++      {graph.edges.length === 0 && (
+         <div style={{ opacity: 0.5 }}>
+-          No transforms detected yet — start a ROS node that publishes to /tf.
++          No transforms detected yet — start a ROS node that publishes to /tf
++          or /tf_static.
+         </div>
+       )}
+-      {roots.map((parent) => (
+-        <div key={parent} style={{ marginBottom: 10 }}>
+-          <div style={{ color: "#4fc3f7", fontWeight: 600 }}>{parent}</div>
+-          {byParent[parent].map((t) => {
+-            const issues = t.validationIssues ?? [];
+-            const issueSummary = issues.length > 0 ? issues.join(" • ") : "";
+-
+-            return (
+-              <div
+-                key={t.child_frame}
+-                style={{ paddingLeft: 20, opacity: 0.9 }}
+-              >
+-                └─ <span style={{ color: "#7cd992" }}>{t.child_frame}</span>
+-                {issues.length > 0 && (
+-                  <span
+-                    title={issueSummary}
+-                    style={{
+-                      marginLeft: 8,
+-                      color: "#e08080",
+-                      display: "inline-flex",
+-                      alignItems: "center",
+-                      gap: 4,
+-                      cursor: "help",
+-                    }}
+-                  >
+-                    <AlertTriangle
+-                      style={{
+-                        width: "var(--icon-sm)",
+-                        height: "var(--icon-sm)",
+-                        verticalAlign: "middle",
+-                      }}
+-                    />
+-                    <span style={{ opacity: 0.9 }}>{issues[0]}</span>
+-                  </span>
+-                )}
+-                {onExplain && (
+-                  <span
+-                    onClick={() =>
+-                      onExplain({ ...t, validationIssues: issues })
+-                    }
+-                    title="Explain this frame with AI"
+-                    style={{
+-                      marginLeft: "var(--spacing-sm)",
+-                      fontSize: "var(--font-xs)",
+-                      color: "#4fc3f7",
+-                      opacity: 0.8,
+-                      cursor: "pointer",
+-                      transition: "opacity 0.12s ease",
+-                    }}
+-                    onMouseEnter={(e) => {
+-                      e.currentTarget.style.opacity = "1";
+-                    }}
+-                    onMouseLeave={(e) => {
+-                      e.currentTarget.style.opacity = "0.8";
+-                    }}
+-                  >
+-                    <Sparkles
+-                      style={{
+-                        width: "var(--icon-sm)",
+-                        height: "var(--icon-sm)",
+-                        marginRight: 4,
+-                        display: "inline",
+-                      }}
+-                    />{" "}
+-                    Explain
+-                  </span>
+-                )}
+-                <div
+-                  style={{
+-                    paddingLeft: 20,
+-                    opacity: 0.6,
+-                    fontSize: "var(--font-xs)",
+-                  }}
+-                >
+-                  pos: ({t.x.toFixed(3)}, {t.y.toFixed(3)}, {t.z.toFixed(3)})
+-                </div>
+-              </div>
+-            );
+-          })}
+-        </div>
++      {graph.roots.map((root) => (
++        <TreeBranch
++          key={root.frame}
++          node={root}
++          depth={0}
++          selectedEdgeKey={selected?.key ?? null}
++          onSelect={setSelectedEdgeKey}
++        />
+       ))}
++      {graph.unattachedFrames.length > 0 && (
++        <div style={{ marginTop: 10 }}>
++          <div style={{ color: "#e0b060", marginBottom: 4 }}>
++            Cyclic or unreachable frames
++          </div>
++          {graph.unattachedFrames.map((frame) => (
++            <div key={frame} style={{ color: "#e0b060", paddingLeft: 8 }}>
++              {frame}
++            </div>
 +          ))}
-+          <label style={{ display: "block", fontSize: 11 }}>
-+            Motion mode
-+            <select
-+              value={robotConfig.permittedMotionModes.includes("full_twist") ? "full_twist" : "planar"}
-+              onChange={(event) =>
-+                setRobotConfig((current) => current && {
-+                  ...current,
-+                  permittedMotionModes: [event.target.value],
++        </div>
++      )}
++      {selected && (
++        <section
++          aria-label="Transform inspector"
++          style={{
++            marginTop: 14,
++            padding: 10,
++            border: "1px solid rgba(255,255,255,0.12)",
++            borderRadius: 5,
++            background: "rgba(255,255,255,0.025)",
++          }}
++        >
++          <div style={{ fontWeight: 600, color: "#4fc3f7", marginBottom: 6 }}>
++            {selected.parent_frame} → {selected.child_frame}
++          </div>
++          <div style={{ opacity: 0.65, marginBottom: 6 }}>
++            Source: {selected.topic_name || "unknown topic"}
++            {selected.topic_name.endsWith("/tf_static")
++              ? " · static"
++              : ` · updated ${Math.max(
++                  0,
++                  Math.floor((nowMs - selected.receivedAtMs) / 1000),
++                )}s ago`}
++          </div>
++          <div>
++            Translation (m): ({selected.x.toFixed(4)}, {selected.y.toFixed(4)},{" "}
++            {selected.z.toFixed(4)})
++          </div>
++          <div>
++            Quaternion (x, y, z, w): ({selected.qx.toFixed(4)},{" "}
++            {selected.qy.toFixed(4)}, {selected.qz.toFixed(4)},{" "}
++            {selected.qw.toFixed(4)})
++          </div>
++          {euler && (
++            <div style={{ marginTop: 4 }}>
++              RPY (deg): ({euler.roll.toFixed(2)}, {euler.pitch.toFixed(2)},{" "}
++              {euler.yaw.toFixed(2)})
++            </div>
++          )}
++          {selected.issues.map((issue) => (
++            <div
++              key={issue}
++              role="alert"
++              style={{ color: "#e0b060", marginTop: 5 }}
++            >
++              {issue}
++            </div>
++          ))}
++          {onExplain && (
++            <button
++              type="button"
++              className="ide-btn"
++              onClick={() =>
++                onExplain({
++                  ...selected,
++                  validationIssues: selected.issues,
 +                })
 +              }
-+              style={{ width: "100%" }}
++              style={{ marginTop: 8 }}
 +            >
-+              <option value="planar">Planar</option>
-+              <option value="full_twist">Full Twist</option>
-+            </select>
-+          </label>
-+          {configError && <div role="alert" style={{ color: "#ff8b82" }}>{configError}</div>}
-+          <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-+            <button type="button" className="ide-btn primary" disabled={configBusy} onClick={() => void saveConfig()}>
-+              Save limits
++              <Sparkles size={13} style={{ marginRight: 4 }} />
++              Explain transform
 +            </button>
-+            <button type="button" className="ide-btn" disabled={configBusy} onClick={() => void saveConfig(true)}>
-+              Safe defaults
-+            </button>
-+          </div>
-+        </fieldset>
++          )}
++        </section>
 +      )}
      </div>
    );
  }
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..ab7e200
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,86 @@
++# Changelog
 +
-+interface RobotMotionConfig {
-+  topicName: string;
-+  maxLinearVelocity: number;
-+  maxAngularVelocity: number;
-+  maxLinearAcceleration: number;
-+  maxAngularAcceleration: number;
-+  commandLeaseMs: number;
-+  commandTimeoutMs: number;
-+  permittedMotionModes: string[];
++## [0.3.0] - Unreleased
++
++This version is still in development and is not release-ready. See
++[RELEASE_READINESS.md](./RELEASE_READINESS.md) for verified scope and blockers.
++
++### Added
++
++- Selected-workspace ROS package discovery with package build type, version,
++  description, dependencies, installed executables, launch/configuration file
++  paths, filtering, refresh, and approved-root package file browsing.
++- TF parent-child forest and transform inspector with multiple-root,
++  multiple-parent, cycle, stale dynamic-transform, quaternion, and finite-value
++  diagnostics.
++- Bounded read-only ROS graph snapshots with node namespaces, topic
++  publisher/subscriber identities and QoS, service types/endpoints, and action
++  server/client discovery.
++- Reliable transient-local subscription to `/tf_static`.
++- Bounded URDF parsing for primitive visuals and connected link trees, with
++  safe rejection of malformed or unsupported descriptions.
++- Three.js rendering for box, cylinder, and sphere visuals and supported
++  fixed/revolute/continuous/prismatic joints; live `/joint_states` updates are
++  streamed to the preview.
++- Dependency-free frontend unit tests for TF graph construction and robot
++  geometry/joint transforms.
++- Docker integration coverage for selected-workspace package discovery,
++  malformed package manifests, installed executables, workspace isolation,
++  live ROS graph endpoints, `/tf_static` and `/joint_states` delivery, and
++  valid/invalid SDFormat schema checks.
++
++### Security and reliability
++
++- Package discovery is restricted to package manifests and install outputs
++  within the selected workspace. Discovery bounds scan sizes, avoids symlinked
++  package directories, rejects DTD/entity declarations in package manifests,
++  and surfaces malformed metadata.
++- ROS package paths are returned as relative paths from the container and are
++  canonicalized and confined to the selected host workspace before the
++  frontend can inspect them.
++- ROS package discovery no longer interpolates the host workspace path into a
++  shell command.
++- Service calls and action goals are intentionally not exposed by the graph
++  explorer, avoiding a bypass of the backend's bounded motion/safety path.
++- Gazebo validates the selected SDF against the installed SDFormat schema
++  before startup; external model/mesh resource validation remains incomplete.
++- Existing v0.3.0 protections include TLS-pinned authenticated gRPC,
++  approved-root filesystem access, bounded motion commands, persistent
++  software stop state, critical event replay, and structural SDF checks.
++
++### Changed
++
++- The ROS sidebar distinguishes source packages in the selected workspace
++  from packages available in the ROS underlay.
++- The TF panel displays hierarchy and transform values instead of only a
++  flat/grouped edge list.
++- Documentation now identifies package, TF, cross-platform, and release
++  limitations based on the current verified implementation.
++
++### Fixed
++
++- Workspace package discovery no longer silently converts missing package
++  tooling or malformed overall command output into an empty package list.
++- Package file inspection uses the backend's approved-root file commands.
++
++### Breaking changes
++
++- No application-facing breaking change has been identified in this
++  development pass. New protobuf graph and joint-state event fields are
++  additive for protobuf readers; matching bundled protocol definitions must
++  still be deployed together.
++
++### Known limitations
++
++- Structured service/action invocation and monitoring are not implemented;
++  graph discovery remains read-only.
++- TF diagnostics are not a substitute for `tf2` authority validation; missing
++  frame authorities cannot be determined from received edges alone.
++- URDF support is a bounded subset: Xacro expansion, safe mesh/model
++  resolution, floating/planar joints, and full URDF semantics remain
++  outstanding. Coordinate-convention validation remains incomplete.
++- Build, simulation, and service processes do not yet share a complete
++  lifecycle manager.
++- Windows filesystem race resistance, full SDF schema/resource validation,
++  frontend workflow tests, cross-platform runtime testing, and verified
++  release artifacts remain outstanding.
+diff --git a/src-tauri/src/urdf.rs b/src-tauri/src/urdf.rs
+new file mode 100644
+index 0000000..ca4a186
+--- /dev/null
++++ b/src-tauri/src/urdf.rs
+@@ -0,0 +1,605 @@
++use serde::Serialize;
++use std::collections::{HashMap, HashSet};
++
++const MAX_DESCRIPTION_BYTES: usize = 2 * 1024 * 1024;
++const MAX_LINKS: usize = 512;
++const MAX_JOINTS: usize = 512;
++const MAX_VISUALS_PER_LINK: usize = 64;
++
++#[derive(Clone, Debug, Default, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RobotOrigin {
++    pub xyz: [f64; 3],
++    pub rpy: [f64; 3],
 +}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(tag = "kind", rename_all = "camelCase")]
++pub enum RobotGeometry {
++    Box { size: [f64; 3] },
++    Cylinder { radius: f64, length: f64 },
++    Sphere { radius: f64 },
++    Unsupported { description: String },
++}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RobotVisual {
++    pub origin: RobotOrigin,
++    pub geometry: RobotGeometry,
++    pub color: Option<[f64; 4]>,
++}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RobotLink {
++    pub name: String,
++    pub visuals: Vec<RobotVisual>,
++}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RobotJoint {
++    pub name: String,
++    pub joint_type: String,
++    pub parent: String,
++    pub child: String,
++    pub origin: RobotOrigin,
++    pub axis: [f64; 3],
++}
++
++#[derive(Clone, Debug, PartialEq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RobotDescription {
++    pub name: String,
++    pub root_link: String,
++    pub links: Vec<RobotLink>,
++    pub joints: Vec<RobotJoint>,
++    pub warnings: Vec<String>,
++}
++
++fn attribute_map(
++    element: &quick_xml::events::BytesStart<'_>,
++    decoder: quick_xml::encoding::Decoder,
++) -> Result<HashMap<String, String>, String> {
++    let mut result = HashMap::new();
++    for attribute in element.attributes().with_checks(true) {
++        let attribute = attribute.map_err(|error| format!("Malformed URDF attribute: {error}"))?;
++        let name = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
++        let value = attribute
++            .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, decoder)
++            .map_err(|error| format!("Malformed URDF attribute value: {error}"))?
++            .into_owned();
++        result.insert(name, value);
++    }
++    Ok(result)
++}
++
++fn required_attribute<'a>(
++    attributes: &'a HashMap<String, String>,
++    name: &str,
++) -> Result<&'a str, String> {
++    attributes
++        .get(name)
++        .map(String::as_str)
++        .filter(|value| !value.trim().is_empty())
++        .ok_or_else(|| format!("URDF element is missing its '{name}' attribute"))
++}
++
++fn parse_number(value: &str, description: &str) -> Result<f64, String> {
++    let number = value
++        .parse::<f64>()
++        .map_err(|_| format!("Invalid {description}: expected a number"))?;
++    if !number.is_finite() {
++        return Err(format!("Invalid {description}: value must be finite"));
++    }
++    Ok(number)
++}
++
++fn parse_vector<const N: usize>(value: &str, description: &str) -> Result<[f64; N], String> {
++    let values = value
++        .split_whitespace()
++        .map(|part| parse_number(part, description))
++        .collect::<Result<Vec<_>, _>>()?;
++    values
++        .try_into()
++        .map_err(|_| format!("Invalid {description}: expected {N} values"))
++}
++
++fn parse_origin(attributes: &HashMap<String, String>) -> Result<RobotOrigin, String> {
++    Ok(RobotOrigin {
++        xyz: attributes
++            .get("xyz")
++            .map(|value| parse_vector(value, "origin xyz"))
++            .transpose()?
++            .unwrap_or([0.0; 3]),
++        rpy: attributes
++            .get("rpy")
++            .map(|value| parse_vector(value, "origin rpy"))
++            .transpose()?
++            .unwrap_or([0.0; 3]),
++    })
++}
++
++fn parse_color(value: &str) -> Result<[f64; 4], String> {
++    let color = parse_vector(value, "material rgba")?;
++    if color
++        .iter()
++        .any(|component| !(0.0..=1.0).contains(component))
++    {
++        return Err("Invalid material rgba: components must be between 0 and 1".to_string());
++    }
++    Ok(color)
++}
++
++fn element_name(element: &quick_xml::events::BytesStart<'_>) -> String {
++    String::from_utf8_lossy(element.local_name().as_ref()).into_owned()
++}
++
++fn parse_geometry(
++    element_name: &str,
++    attributes: &HashMap<String, String>,
++) -> Result<RobotGeometry, String> {
++    match element_name {
++        "box" => {
++            let size = parse_vector(required_attribute(attributes, "size")?, "box size")?;
++            if size.iter().any(|dimension| *dimension <= 0.0) {
++                return Err("URDF box dimensions must be positive".to_string());
++            }
++            Ok(RobotGeometry::Box { size })
++        }
++        "cylinder" => {
++            let radius =
++                parse_number(required_attribute(attributes, "radius")?, "cylinder radius")?;
++            let length =
++                parse_number(required_attribute(attributes, "length")?, "cylinder length")?;
++            if radius <= 0.0 || length <= 0.0 {
++                return Err("URDF cylinder dimensions must be positive".to_string());
++            }
++            Ok(RobotGeometry::Cylinder { radius, length })
++        }
++        "sphere" => {
++            let radius = parse_number(required_attribute(attributes, "radius")?, "sphere radius")?;
++            if radius <= 0.0 {
++                return Err("URDF sphere radius must be positive".to_string());
++            }
++            Ok(RobotGeometry::Sphere { radius })
++        }
++        "mesh" => Ok(RobotGeometry::Unsupported {
++            description: attributes
++                .get("filename")
++                .cloned()
++                .unwrap_or_else(|| "mesh with no filename".to_string()),
++        }),
++        _ => Err(format!("Unsupported URDF geometry element: {element_name}")),
++    }
++}
++
++fn validate_robot_tree(links: &[RobotLink], joints: &[RobotJoint]) -> Result<String, String> {
++    if links.is_empty() {
++        return Err("URDF must define at least one link".to_string());
++    }
++    let link_names = links
++        .iter()
++        .map(|link| link.name.as_str())
++        .collect::<HashSet<_>>();
++    if link_names.len() != links.len() {
++        return Err("URDF contains duplicate link names".to_string());
++    }
++    let joint_names = joints
++        .iter()
++        .map(|joint| joint.name.as_str())
++        .collect::<HashSet<_>>();
++    if joint_names.len() != joints.len() {
++        return Err("URDF contains duplicate joint names".to_string());
++    }
++
++    let mut child_links = HashSet::new();
++    let mut children_by_parent: HashMap<&str, Vec<&str>> = HashMap::new();
++    for joint in joints {
++        if !link_names.contains(joint.parent.as_str()) || !link_names.contains(joint.child.as_str())
++        {
++            return Err(format!(
++                "Joint '{}' refers to an undefined parent or child link",
++                joint.name
++            ));
++        }
++        if joint.parent == joint.child {
++            return Err(format!("Joint '{}' connects a link to itself", joint.name));
++        }
++        if !child_links.insert(joint.child.as_str()) {
++            return Err(format!(
++                "Link '{}' has more than one parent joint",
++                joint.child
++            ));
++        }
++        children_by_parent
++            .entry(&joint.parent)
++            .or_default()
++            .push(&joint.child);
++    }
++
++    let roots = links
++        .iter()
++        .filter(|link| !child_links.contains(link.name.as_str()))
++        .map(|link| link.name.as_str())
++        .collect::<Vec<_>>();
++    if roots.len() != 1 {
++        return Err("URDF links must form one connected tree with one root".to_string());
++    }
++
++    let mut visited = HashSet::new();
++    let mut pending = vec![roots[0]];
++    while let Some(link) = pending.pop() {
++        if !visited.insert(link) {
++            return Err("URDF joint graph contains a cycle".to_string());
++        }
++        if let Some(children) = children_by_parent.get(link) {
++            pending.extend(children.iter().copied());
++        }
++    }
++    if visited.len() != links.len() {
++        return Err("URDF joint graph is disconnected or cyclic".to_string());
++    }
++
++    Ok(roots[0].to_string())
++}
++
++pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String> {
++    if content.len() > MAX_DESCRIPTION_BYTES {
++        return Err(format!(
++            "URDF exceeds the {MAX_DESCRIPTION_BYTES}-byte limit"
++        ));
++    }
++    if content.contains('\0') {
++        return Err("URDF contains a NUL character".to_string());
++    }
++
++    let mut reader = quick_xml::Reader::from_str(content);
++    reader.config_mut().trim_text(true);
++    let mut stack = Vec::<String>::new();
++    let mut robot_name = None;
++    let mut root_seen = false;
++    let mut root_closed = false;
++    let mut current_link = None::<RobotLink>;
++    let mut current_joint = None::<RobotJoint>;
++    let mut current_visual = None::<RobotVisual>;
++    let mut links = Vec::new();
++    let mut joints = Vec::new();
++    let mut warnings = Vec::new();
++
++    loop {
++        match reader.read_event() {
++            Ok(
++                event @ (quick_xml::events::Event::Start(_) | quick_xml::events::Event::Empty(_)),
++            ) => {
++                let (element, is_empty) = match event {
++                    quick_xml::events::Event::Start(element) => (element, false),
++                    quick_xml::events::Event::Empty(element) => (element, true),
++                    _ => unreachable!(),
++                };
++                let name = element_name(&element);
++                let parent = stack.last().map(String::as_str);
++                if root_closed {
++                    return Err("URDF contains content after its root element".to_string());
++                }
++                let attributes = attribute_map(&element, reader.decoder())?;
++
++                match name.as_str() {
++                    "robot" if stack.is_empty() && !root_seen => {
++                        let name = required_attribute(&attributes, "name")?;
++                        if name.len() > 128 {
++                            return Err("URDF robot name exceeds 128 bytes".to_string());
++                        }
++                        robot_name = Some(name.to_string());
++                        root_seen = true;
++                    }
++                    "robot" => return Err("URDF must contain exactly one <robot> root".to_string()),
++                    "link" if parent == Some("robot") => {
++                        if current_link.is_some() {
++                            return Err("Nested URDF <link> elements are invalid".to_string());
++                        }
++                        current_link = Some(RobotLink {
++                            name: required_attribute(&attributes, "name")?.to_string(),
++                            visuals: Vec::new(),
++                        });
++                    }
++                    "joint" if parent == Some("robot") => {
++                        if current_joint.is_some() {
++                            return Err("Nested URDF <joint> elements are invalid".to_string());
++                        }
++                        current_joint = Some(RobotJoint {
++                            name: required_attribute(&attributes, "name")?.to_string(),
++                            joint_type: required_attribute(&attributes, "type")?.to_string(),
++                            parent: String::new(),
++                            child: String::new(),
++                            origin: RobotOrigin::default(),
++                            axis: [1.0, 0.0, 0.0],
++                        });
++                    }
++                    "visual" if parent == Some("link") => {
++                        if current_visual.is_some() {
++                            return Err("Nested URDF <visual> elements are invalid".to_string());
++                        }
++                        current_visual = Some(RobotVisual {
++                            origin: RobotOrigin::default(),
++                            geometry: RobotGeometry::Unsupported {
++                                description: String::new(),
++                            },
++                            color: None,
++                        });
++                    }
++                    "origin" if parent == Some("visual") => {
++                        if let Some(visual) = current_visual.as_mut() {
++                            visual.origin = parse_origin(&attributes)?;
++                        }
++                    }
++                    "origin" if parent == Some("joint") => {
++                        if let Some(joint) = current_joint.as_mut() {
++                            joint.origin = parse_origin(&attributes)?;
++                        }
++                    }
++                    "parent" if parent == Some("joint") => {
++                        if let Some(joint) = current_joint.as_mut() {
++                            joint.parent = required_attribute(&attributes, "link")?.to_string();
++                        }
++                    }
++                    "child" if parent == Some("joint") => {
++                        if let Some(joint) = current_joint.as_mut() {
++                            joint.child = required_attribute(&attributes, "link")?.to_string();
++                        }
++                    }
++                    "axis" if parent == Some("joint") => {
++                        if let Some(joint) = current_joint.as_mut() {
++                            if let Some(axis) = attributes.get("xyz") {
++                                joint.axis = parse_vector(axis, "joint axis")?;
++                            }
++                        }
++                    }
++                    "color" if parent == Some("material") => {
++                        if let (Some(visual), Some(color)) =
++                            (current_visual.as_mut(), attributes.get("rgba"))
++                        {
++                            visual.color = Some(parse_color(color)?);
++                        }
++                    }
++                    "box" | "cylinder" | "sphere" | "mesh" if parent == Some("geometry") => {
++                        if let Some(visual) = current_visual.as_mut() {
++                            if !matches!(
++                                visual.geometry,
++                                RobotGeometry::Unsupported { ref description }
++                                    if description.is_empty()
++                            ) {
++                                return Err(
++                                    "URDF visual must contain exactly one geometry".to_string()
++                                );
++                            }
++                            visual.geometry = parse_geometry(&name, &attributes)?;
++                        }
++                    }
++                    _ => {}
++                }
++
++                if is_empty {
++                    match name.as_str() {
++                        "robot" => root_closed = true,
++                        "link" => {
++                            if links.len() >= MAX_LINKS {
++                                return Err(format!("URDF contains more than {MAX_LINKS} links"));
++                            }
++                            links.push(
++                                current_link
++                                    .take()
++                                    .ok_or_else(|| "URDF link state is inconsistent".to_string())?,
++                            );
++                        }
++                        "visual" => {
++                            return Err("URDF visual is missing a geometry".to_string());
++                        }
++                        "joint" => {
++                            return Err("URDF joint must define parent and child links".to_string());
++                        }
++                        _ => {}
++                    }
++                } else {
++                    stack.push(name);
++                }
++            }
++            Ok(quick_xml::events::Event::End(element)) => {
++                let name = String::from_utf8_lossy(element.local_name().as_ref()).into_owned();
++                if stack.pop().as_deref() != Some(name.as_str()) {
++                    return Err("URDF XML elements are improperly nested".to_string());
++                }
++                match name.as_str() {
++                    "visual" => {
++                        let visual = current_visual
++                            .take()
++                            .ok_or_else(|| "URDF visual state is inconsistent".to_string())?;
++                        if matches!(
++                            visual.geometry,
++                            RobotGeometry::Unsupported { ref description }
++                                if description.is_empty()
++                        ) {
++                            return Err("URDF visual is missing a supported geometry".to_string());
++                        }
++                        if let RobotGeometry::Unsupported { description } = &visual.geometry {
++                            warnings.push(format!(
++                                "Mesh geometry '{description}' is not rendered in this preview"
++                            ));
++                        }
++                        let link = current_link
++                            .as_mut()
++                            .ok_or_else(|| "URDF visual is outside a link".to_string())?;
++                        if link.visuals.len() >= MAX_VISUALS_PER_LINK {
++                            return Err(format!(
++                                "Link '{}' contains too many visual elements",
++                                link.name
++                            ));
++                        }
++                        link.visuals.push(visual);
++                    }
++                    "link" => {
++                        if links.len() >= MAX_LINKS {
++                            return Err(format!("URDF contains more than {MAX_LINKS} links"));
++                        }
++                        links.push(
++                            current_link
++                                .take()
++                                .ok_or_else(|| "URDF link state is inconsistent".to_string())?,
++                        );
++                    }
++                    "joint" => {
++                        if joints.len() >= MAX_JOINTS {
++                            return Err(format!("URDF contains more than {MAX_JOINTS} joints"));
++                        }
++                        let mut joint = current_joint
++                            .take()
++                            .ok_or_else(|| "URDF joint state is inconsistent".to_string())?;
++                        if joint.parent.is_empty() || joint.child.is_empty() {
++                            return Err(format!(
++                                "Joint '{}' must define parent and child links",
++                                joint.name
++                            ));
++                        }
++                        match joint.joint_type.as_str() {
++                            "fixed" => {}
++                            "revolute" | "continuous" | "prismatic" => {
++                                let magnitude =
++                                    joint.axis[0].hypot(joint.axis[1]).hypot(joint.axis[2]);
++                                if magnitude <= f64::EPSILON {
++                                    return Err(format!(
++                                        "Joint '{}' axis must be non-zero",
++                                        joint.name
++                                    ));
++                                }
++                                joint.axis.iter_mut().for_each(|axis| *axis /= magnitude);
++                            }
++                            "floating" | "planar" => warnings.push(format!(
++                                "Joint '{}' uses unsupported '{}' motion and remains fixed",
++                                joint.name, joint.joint_type
++                            )),
++                            _ => {
++                                return Err(format!(
++                                    "Joint '{}' has unsupported type '{}'",
++                                    joint.name, joint.joint_type
++                                ));
++                            }
++                        }
++                        joints.push(joint);
++                    }
++                    "robot" => root_closed = true,
++                    _ => {}
++                }
++            }
++            Ok(quick_xml::events::Event::DocType(_)) => {
++                return Err("URDF documents must not contain a DTD".to_string());
++            }
++            Ok(quick_xml::events::Event::Text(text)) if stack.is_empty() => {
++                let text_bytes: &[u8] = text.as_ref();
++                if !text_bytes.iter().all(u8::is_ascii_whitespace) {
++                    return Err("URDF contains text outside its root element".to_string());
++                }
++            }
++            Ok(quick_xml::events::Event::Eof) => break,
++            Ok(_) => {}
++            Err(error) => return Err(format!("Malformed URDF XML: {error}")),
++        }
++    }
++
++    if !root_seen || !root_closed || !stack.is_empty() {
++        return Err("URDF document is incomplete".to_string());
++    }
++    let root_link = validate_robot_tree(&links, &joints)?;
++    let name = robot_name.ok_or_else(|| "URDF robot name is missing".to_string())?;
++    Ok(RobotDescription {
++        name,
++        root_link,
++        links,
++        joints,
++        warnings,
++    })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{parse_robot_description, RobotGeometry};
++
++    #[test]
++    fn parses_primitive_visuals_and_normalizes_joint_axes() {
++        let robot = parse_robot_description(
++            r#"<robot name="test_bot">
++                <link name="base">
++                    <visual>
++                        <origin xyz="1 2 3" rpy="0 0 1.5"/>
++                        <geometry><box size="1 2 3"/></geometry>
++                        <material name="blue"><color rgba="0.1 0.2 0.8 1"/></material>
++                    </visual>
++                </link>
++                <link name="wheel"/>
++                <joint name="base_to_wheel" type="continuous">
++                    <parent link="base"/><child link="wheel"/>
++                    <axis xyz="0 0 2"/>
++                </joint>
++            </robot>"#,
++        )
++        .unwrap();
++
++        assert_eq!(robot.name, "test_bot");
++        assert_eq!(robot.root_link, "base");
++        assert_eq!(robot.links[0].visuals[0].origin.xyz, [1.0, 2.0, 3.0]);
++        assert_eq!(
++            robot.links[0].visuals[0].geometry,
++            RobotGeometry::Box {
++                size: [1.0, 2.0, 3.0]
++            }
++        );
++        assert_eq!(robot.links[0].visuals[0].color, Some([0.1, 0.2, 0.8, 1.0]));
++        assert_eq!(robot.joints[0].axis, [0.0, 0.0, 1.0]);
++    }
++
++    #[test]
++    fn rejects_dtds_malformed_xml_and_invalid_geometry_dimensions() {
++        assert!(parse_robot_description(
++            "<!DOCTYPE robot><robot name=\"test\"><link name=\"base\"/></robot>"
++        )
++        .is_err());
++        assert!(
++            parse_robot_description("<robot name=\"test\"><link name=\"base\"></robot>").is_err()
++        );
++        assert!(parse_robot_description(
++            r#"<robot name="test"><link name="base"><visual><geometry><sphere radius="0"/></geometry></visual></link></robot>"#
++        )
++        .is_err());
++    }
++
++    #[test]
++    fn rejects_disconnected_links_cycles_and_multiple_parent_joints() {
++        assert!(parse_robot_description(
++            r#"<robot name="test"><link name="a"/><link name="b"/></robot>"#
++        )
++        .is_err());
++        assert!(parse_robot_description(
++            r#"<robot name="test"><link name="a"/><link name="b"/><joint name="ab" type="fixed"><parent link="a"/><child link="b"/></joint><joint name="ba" type="fixed"><parent link="b"/><child link="a"/></joint></robot>"#
++        )
++        .is_err());
++        assert!(parse_robot_description(
++            r#"<robot name="test"><link name="a"/><link name="b"/><link name="c"/><joint name="ab" type="fixed"><parent link="a"/><child link="b"/></joint><joint name="ac" type="fixed"><parent link="a"/><child link="b"/></joint></robot>"#
++        )
++        .is_err());
++    }
++
++    #[test]
++    fn reports_mesh_geometry_as_unsupported_instead_of_silently_rendering_it() {
++        let robot = parse_robot_description(
++            r#"<robot name="test"><link name="base"><visual><geometry><mesh filename="package://robot/meshes/base.stl"/></geometry></visual></link></robot>"#,
++        )
++        .unwrap();
++
++        assert!(matches!(
++            robot.links[0].visuals[0].geometry,
++            RobotGeometry::Unsupported { .. }
++        ));
++        assert_eq!(robot.warnings.len(), 1);
++        assert!(robot.warnings[0].contains("base.stl"));
++    }
++}
+diff --git a/src/components/RosGraphExplorer.tsx b/src/components/RosGraphExplorer.tsx
+new file mode 100644
+index 0000000..5c7d09e
+--- /dev/null
++++ b/src/components/RosGraphExplorer.tsx
+@@ -0,0 +1,235 @@
++export interface RosGraphEndpoint {
++  nodeName: string;
++  nodeNamespace: string;
++  topicType: string;
++  reliability: string;
++  durability: string;
++  history: string;
++  depth: number;
++}
++
++export interface RosGraphNode {
++  name: string;
++  namespace: string;
++}
++
++export interface RosGraphTopic {
++  name: string;
++  types: string[];
++  publishers: RosGraphEndpoint[];
++  subscribers: RosGraphEndpoint[];
++}
++
++export interface RosGraphService {
++  name: string;
++  types: string[];
++  serverNodes: string[];
++  clientNodes: string[];
++}
++
++export interface RosGraphAction {
++  name: string;
++  types: string[];
++  serverNodes: string[];
++  clientNodes: string[];
++}
++
++export interface RosGraphSnapshot {
++  nodes: RosGraphNode[];
++  topics: RosGraphTopic[];
++  services: RosGraphService[];
++  actions: RosGraphAction[];
++  truncated: boolean;
++}
++
++function nodePath(nodeName: string, nodeNamespace: string) {
++  return `${nodeNamespace === "/" ? "" : nodeNamespace}/${nodeName}`;
++}
++
++function TypeList({ types }: { types: string[] }) {
++  if (types.length === 0) return <span style={{ opacity: 0.6 }}>Unknown type</span>;
++  return (
++    <div style={{ color: "#b7d7f0", overflowWrap: "anywhere" }}>
++      {types.join(", ")}
++    </div>
++  );
++}
++
++function GraphSection({
++  title,
++  count,
++  children,
++}: {
++  title: string;
++  count: number;
++  children: React.ReactNode;
++}) {
++  return (
++    <details style={{ marginTop: 8 }} open>
++      <summary
++        style={{
++          cursor: "pointer",
++          padding: "6px 0",
++          borderTop: "1px solid rgba(255,255,255,0.08)",
++          fontWeight: 600,
++        }}
++      >
++        {title} ({count})
++      </summary>
++      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
++        {children}
++      </div>
++    </details>
++  );
++}
++
++function GraphCard({
++  name,
++  types,
++  details,
++}: {
++  name: string;
++  types: string[];
++  details?: React.ReactNode;
++}) {
++  return (
++    <details
++      style={{
++        padding: "5px 7px",
++        background: "rgba(255,255,255,0.025)",
++        border: "1px solid rgba(255,255,255,0.07)",
++        borderRadius: 4,
++      }}
++    >
++      <summary style={{ cursor: "pointer", overflowWrap: "anywhere" }}>
++        {name}
++      </summary>
++      <div style={{ padding: "6px 0 2px", display: "grid", gap: 5 }}>
++        <TypeList types={types} />
++        {details}
++      </div>
++    </details>
++  );
++}
++
++export default function RosGraphExplorer({
++  graph,
++  connected,
++}: {
++  graph: RosGraphSnapshot | null;
++  connected: boolean;
++}) {
++  if (!graph) {
++    return (
++      <div
++        role="status"
++        style={{ marginTop: 12, paddingTop: 8, opacity: 0.65 }}
++      >
++        {connected
++          ? "Waiting for ROS graph details..."
++          : "ROS graph details are unavailable while disconnected."}
++      </div>
++    );
++  }
++
++  const endpointList = (
++    title: string,
++    endpoints: RosGraphEndpoint[],
++  ) => (
++    <div>
++      <strong>{title} ({endpoints.length})</strong>
++      {endpoints.map((endpoint, index) => (
++        <div
++          key={`${endpoint.nodeNamespace}/${endpoint.nodeName}/${index}`}
++          style={{
++            marginTop: 3,
++            paddingLeft: 8,
++            borderLeft: "1px solid #444",
++            overflowWrap: "anywhere",
++          }}
++        >
++          <div>{nodePath(endpoint.nodeName, endpoint.nodeNamespace)}</div>
++          <div style={{ opacity: 0.7 }}>{endpoint.topicType}</div>
++          <div style={{ opacity: 0.65 }}>
++            {endpoint.reliability}, {endpoint.durability}, {endpoint.history}
++            {endpoint.history === "KEEP_LAST" ? ` (${endpoint.depth})` : ""}
++          </div>
++        </div>
++      ))}
++    </div>
++  );
++
++  const endpointsFor = (servers: string[], clients: string[]) => (
++    <div style={{ display: "grid", gap: 4, overflowWrap: "anywhere" }}>
++      <div>
++        <strong>Servers:</strong> {servers.length ? servers.join(", ") : "none"}
++      </div>
++      <div>
++        <strong>Clients:</strong> {clients.length ? clients.join(", ") : "none"}
++      </div>
++    </div>
++  );
++
++  return (
++    <section
++      aria-label="Live ROS graph"
++      style={{ marginTop: 14, paddingTop: 6, borderTop: "1px solid #333" }}
++    >
++      <div style={{ fontWeight: 600, marginBottom: 4 }}>Live ROS Graph</div>
++      <div style={{ opacity: 0.65, fontSize: 11, marginBottom: 6 }}>
++        Read-only discovery. This panel does not call services or send action
++        goals.
++      </div>
++      {graph.truncated && (
++        <div role="status" style={{ color: "#e0b060", marginBottom: 6 }}>
++          Graph is large; the displayed snapshot is bounded.
++        </div>
++      )}
++      <GraphSection title="Nodes" count={graph.nodes.length}>
++        {graph.nodes.map((node) => (
++          <div
++            key={`${node.namespace}/${node.name}`}
++            style={{ overflowWrap: "anywhere", fontFamily: "monospace" }}
++          >
++            {nodePath(node.name, node.namespace)}
++          </div>
++        ))}
++      </GraphSection>
++      <GraphSection title="Topics" count={graph.topics.length}>
++        {graph.topics.map((topic) => (
++          <GraphCard
++            key={topic.name}
++            name={topic.name}
++            types={topic.types}
++            details={
++              <>
++                {endpointList("Publishers", topic.publishers)}
++                {endpointList("Subscribers", topic.subscribers)}
++              </>
++            }
++          />
++        ))}
++      </GraphSection>
++      <GraphSection title="Services" count={graph.services.length}>
++        {graph.services.map((service) => (
++          <GraphCard
++            key={service.name}
++            name={service.name}
++            types={service.types}
++            details={endpointsFor(service.serverNodes, service.clientNodes)}
++          />
++        ))}
++      </GraphSection>
++      <GraphSection title="Actions" count={graph.actions.length}>
++        {graph.actions.map((action) => (
++          <GraphCard
++            key={action.name}
++            name={action.name}
++            types={action.types}
++            details={endpointsFor(action.serverNodes, action.clientNodes)}
++          />
++        ))}
++      </GraphSection>
++    </section>
++  );
++}
+diff --git a/src/robotDescription.ts b/src/robotDescription.ts
+new file mode 100644
+index 0000000..820bb28
+--- /dev/null
++++ b/src/robotDescription.ts
+@@ -0,0 +1,162 @@
++import * as THREE from "three";
++
++export interface RobotOrigin {
++  xyz: [number, number, number];
++  rpy: [number, number, number];
++}
++
++export type RobotGeometry =
++  | { kind: "box"; size: [number, number, number] }
++  | { kind: "cylinder"; radius: number; length: number }
++  | { kind: "sphere"; radius: number }
++  | { kind: "unsupported"; description: string };
++
++export interface RobotVisual {
++  origin: RobotOrigin;
++  geometry: RobotGeometry;
++  color: [number, number, number, number] | null;
++}
++
++export interface RobotLink {
++  name: string;
++  visuals: RobotVisual[];
++}
++
++export interface RobotJoint {
++  name: string;
++  jointType: string;
++  parent: string;
++  child: string;
++  origin: RobotOrigin;
++  axis: [number, number, number];
++}
++
++export interface RobotDescription {
++  name: string;
++  rootLink: string;
++  links: RobotLink[];
++  joints: RobotJoint[];
++  warnings: string[];
++}
++
++export interface RobotInstance {
++  group: THREE.Group;
++  updateJoints: (positions: ReadonlyMap<string, number>) => void;
++}
++
++function createVisual(visual: RobotVisual) {
++  const { geometry, color } = visual;
++  let shape: THREE.BufferGeometry;
++  switch (geometry.kind) {
++    case "box":
++      shape = new THREE.BoxGeometry(...geometry.size);
++      break;
++    case "cylinder":
++      shape = new THREE.CylinderGeometry(
++        geometry.radius,
++        geometry.radius,
++        geometry.length,
++        24,
++      );
++      break;
++    case "sphere":
++      shape = new THREE.SphereGeometry(geometry.radius, 24, 16);
++      break;
++    case "unsupported":
++      return null;
++  }
++
++  const material = new THREE.MeshStandardMaterial({
++    color: color
++      ? new THREE.Color(color[0], color[1], color[2])
++      : new THREE.Color(0x80aaff),
++    opacity: color?.[3] ?? 1,
++    transparent: (color?.[3] ?? 1) < 1,
++  });
++  const mesh = new THREE.Mesh(shape, material);
++  if (geometry.kind === "cylinder") mesh.rotation.x = Math.PI / 2;
++  mesh.castShadow = true;
++  mesh.receiveShadow = true;
++
++  const visualGroup = new THREE.Group();
++  visualGroup.position.set(...visual.origin.xyz);
++  visualGroup.rotation.set(...visual.origin.rpy, "XYZ");
++  visualGroup.add(mesh);
++  return visualGroup;
++}
++
++export function buildRobotInstance(
++  description: RobotDescription,
++): RobotInstance {
++  const links = new Map(description.links.map((link) => [link.name, link]));
++  const jointsByParent = new Map<string, RobotJoint[]>();
++  for (const joint of description.joints) {
++    const siblings = jointsByParent.get(joint.parent) ?? [];
++    siblings.push(joint);
++    jointsByParent.set(joint.parent, siblings);
++  }
++
++  const jointTransforms = new Map<
++    string,
++    { joint: RobotJoint; motion: THREE.Group }
++  >();
++
++  const buildLink = (name: string): THREE.Group => {
++    const definition = links.get(name);
++    if (!definition) {
++      throw new Error(`Robot description refers to missing link '${name}'`);
++    }
++    const link = new THREE.Group();
++    link.name = name;
++    for (const visual of definition.visuals) {
++      const mesh = createVisual(visual);
++      if (mesh) link.add(mesh);
++    }
++
++    for (const joint of jointsByParent.get(name) ?? []) {
++      const origin = new THREE.Group();
++      origin.name = `${joint.name}:origin`;
++      origin.position.set(...joint.origin.xyz);
++      origin.rotation.set(...joint.origin.rpy, "XYZ");
++      const motion = new THREE.Group();
++      motion.name = `${joint.name}:motion`;
++      origin.add(motion);
++      motion.add(buildLink(joint.child));
++      link.add(origin);
++      jointTransforms.set(joint.name, { joint, motion });
++    }
++    return link;
++  };
++
++  const group = new THREE.Group();
++  group.name = description.name;
++  const rosCoordinates = new THREE.Group();
++  rosCoordinates.name = "ros-coordinate-frame";
++  rosCoordinates.rotation.x = -Math.PI / 2;
++  rosCoordinates.add(buildLink(description.rootLink));
++  group.add(rosCoordinates);
++
++  return {
++    group,
++    updateJoints(positions) {
++      for (const [name, position] of positions) {
++        if (!Number.isFinite(position)) continue;
++        const transform = jointTransforms.get(name);
++        if (!transform) continue;
++        const { joint, motion } = transform;
++        if (joint.jointType === "revolute" || joint.jointType === "continuous") {
++          motion.quaternion.setFromAxisAngle(
++            new THREE.Vector3(...joint.axis),
++            position,
++          );
++        } else if (joint.jointType === "prismatic") {
++          motion.position.set(
++            joint.axis[0] * position,
++            joint.axis[1] * position,
++            joint.axis[2] * position,
++          );
++        }
++      }
++    },
++  };
++}
+diff --git a/src/tfGraph.ts b/src/tfGraph.ts
+new file mode 100644
+index 0000000..68f5709
+--- /dev/null
++++ b/src/tfGraph.ts
+@@ -0,0 +1,182 @@
++export interface TfTransform {
++  parent_frame: string;
++  child_frame: string;
++  topic_name: string;
++  x: number;
++  y: number;
++  z: number;
++  qx: number;
++  qy: number;
++  qz: number;
++  qw: number;
++  receivedAtMs: number;
++}
++
++export interface TfGraphEdge extends TfTransform {
++  key: string;
++  issues: string[];
++}
++
++export interface TfTreeNode {
++  frame: string;
++  edge?: TfGraphEdge;
++  children: TfTreeNode[];
++}
++
++export interface TfGraph {
++  roots: TfTreeNode[];
++  unattachedFrames: string[];
++  edges: TfGraphEdge[];
++  warnings: string[];
++}
++
++const QUATERNION_TOLERANCE = 0.01;
++const TRANSLATION_WARNING_THRESHOLD = 1000;
++
++export function tfEdgeKey(parentFrame: string, childFrame: string) {
++  return JSON.stringify([parentFrame, childFrame]);
++}
++
++export function buildTfGraph(
++  transforms: TfTransform[],
++  nowMs = Date.now(),
++  staleAfterMs = 5000,
++): TfGraph {
++  const edges = transforms.map((transform): TfGraphEdge => {
++    const key = tfEdgeKey(transform.parent_frame, transform.child_frame);
++    const issues: string[] = [];
++    const values = [
++      transform.x,
++      transform.y,
++      transform.z,
++      transform.qx,
++      transform.qy,
++      transform.qz,
++      transform.qw,
++    ];
++
++    if (!transform.parent_frame || !transform.child_frame) {
++      issues.push("Parent or child frame is empty");
++    }
++    if (values.some((value) => !Number.isFinite(value))) {
++      issues.push("Contains NaN or Infinity");
++    }
++
++    const quaternionNorm = Math.hypot(
++      transform.qx,
++      transform.qy,
++      transform.qz,
++      transform.qw,
++    );
++    if (quaternionNorm < 1e-12) {
++      issues.push("Zero quaternion — likely uninitialized");
++    } else if (Math.abs(quaternionNorm - 1) > QUATERNION_TOLERANCE) {
++      issues.push("Non-normalized quaternion");
++    }
++
++    if (
++      Math.abs(transform.x) > TRANSLATION_WARNING_THRESHOLD ||
++      Math.abs(transform.y) > TRANSLATION_WARNING_THRESHOLD ||
++      Math.abs(transform.z) > TRANSLATION_WARNING_THRESHOLD
++    ) {
++      issues.push("Large translation magnitude");
++    }
++
++    if (
++      !transform.topic_name.endsWith("/tf_static") &&
++      nowMs - transform.receivedAtMs > staleAfterMs
++    ) {
++      issues.push("Transform is stale");
++    }
++
++    return { ...transform, key, issues };
++  });
++
++  const frameNames = new Set<string>();
++  const parentsByChild = new Map<string, Set<string>>();
++  const childrenByParent = new Map<string, TfGraphEdge[]>();
++  for (const edge of edges) {
++    if (!edge.parent_frame || !edge.child_frame) continue;
++    frameNames.add(edge.parent_frame);
++    frameNames.add(edge.child_frame);
++    const parents = parentsByChild.get(edge.child_frame) ?? new Set<string>();
++    parents.add(edge.parent_frame);
++    parentsByChild.set(edge.child_frame, parents);
++    const children = childrenByParent.get(edge.parent_frame) ?? [];
++    children.push(edge);
++    childrenByParent.set(edge.parent_frame, children);
++  }
++
++  for (const edge of edges) {
++    const parents = parentsByChild.get(edge.child_frame);
++    if (parents && parents.size > 1) {
++      edge.issues.push("Frame has multiple parents");
++    }
++  }
++
++  const visitState = new Map<string, "visiting" | "visited">();
++  const stack: string[] = [];
++  const cycleEdges = new Set<string>();
++  const cycleFrames = new Set<string>();
++  const visit = (frame: string) => {
++    visitState.set(frame, "visiting");
++    stack.push(frame);
++    for (const edge of childrenByParent.get(frame) ?? []) {
++      if (visitState.get(edge.child_frame) === "visiting") {
++        cycleEdges.add(edge.key);
++        const cycleStart = stack.lastIndexOf(edge.child_frame);
++        for (const cycleFrame of stack.slice(cycleStart)) {
++          cycleFrames.add(cycleFrame);
++        }
++      } else if (!visitState.has(edge.child_frame)) {
++        visit(edge.child_frame);
++      }
++    }
++    stack.pop();
++    visitState.set(frame, "visited");
++  };
++  for (const frame of [...frameNames].sort()) {
++    if (!visitState.has(frame)) visit(frame);
++  }
++  for (const edge of edges) {
++    if (cycleEdges.has(edge.key)) {
++      edge.issues.push("Cycle detected in transform graph");
++    }
++  }
++
++  const roots = [...frameNames]
++    .filter((frame) => !parentsByChild.has(frame))
++    .sort();
++  const visitedFrames = new Set<string>();
++  const buildTree = (frame: string, ancestors: Set<string>): TfTreeNode => {
++    visitedFrames.add(frame);
++    const nextAncestors = new Set(ancestors);
++    nextAncestors.add(frame);
++    const children = (childrenByParent.get(frame) ?? [])
++      .filter((edge) => !nextAncestors.has(edge.child_frame))
++      .map((edge) => ({
++        frame: edge.child_frame,
++        edge,
++        children: buildTree(edge.child_frame, nextAncestors).children,
++      }));
++    return { frame, children };
++  };
++  const treeRoots = roots.map((root) => buildTree(root, new Set()));
++  const unattachedFrames = [...frameNames]
++    .filter((frame) => !visitedFrames.has(frame))
++    .sort();
++  const warnings: string[] = [];
++  if (treeRoots.length > 1) {
++    warnings.push(`TF contains ${treeRoots.length} disconnected root frames`);
++  }
++  if (cycleFrames.size > 0) {
++    warnings.push(
++      `TF contains a cycle involving: ${[...cycleFrames].sort().join(", ")}`,
++    );
++  }
++  if (edges.some((edge) => edge.issues.includes("Frame has multiple parents"))) {
++    warnings.push("One or more frames have multiple parents");
++  }
++
++  return { roots: treeRoots, unattachedFrames, edges, warnings };
++}
+diff --git a/tests/robotDescription.test.mjs b/tests/robotDescription.test.mjs
+new file mode 100644
+index 0000000..a8a4d3d
+--- /dev/null
++++ b/tests/robotDescription.test.mjs
+@@ -0,0 +1,90 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { buildRobotInstance } from "../src/robotDescription.ts";
++
++const origin = { xyz: [0, 0, 0], rpy: [0, 0, 0] };
++
++test("builds primitive robot links and applies revolute and prismatic joint states", () => {
++  const instance = buildRobotInstance({
++    name: "test_robot",
++    rootLink: "base_link",
++    warnings: [],
++    links: [
++      {
++        name: "base_link",
++        visuals: [
++          {
++            origin,
++            geometry: { kind: "box", size: [1, 0.5, 0.25] },
++            color: [0.2, 0.4, 0.8, 1],
++          },
++        ],
++      },
++      { name: "arm_link", visuals: [] },
++      { name: "slider_link", visuals: [] },
++    ],
++    joints: [
++      {
++        name: "shoulder",
++        jointType: "revolute",
++        parent: "base_link",
++        child: "arm_link",
++        origin: { xyz: [0, 0, 0.5], rpy: [0, 0, 0] },
++        axis: [0, 0, 1],
++      },
++      {
++        name: "slider",
++        jointType: "prismatic",
++        parent: "arm_link",
++        child: "slider_link",
++        origin,
++        axis: [1, 0, 0],
++      },
++    ],
++  });
++
++  const arm = instance.group.getObjectByName("arm_link");
++  const shoulder = instance.group.getObjectByName("shoulder:motion");
++  const slider = instance.group.getObjectByName("slider:motion");
++  assert.ok(arm);
++  assert.ok(shoulder);
++  assert.ok(slider);
++
++  instance.updateJoints(
++    new Map([
++      ["shoulder", Math.PI / 2],
++      ["slider", 0.25],
++    ]),
++  );
++
++  assert.ok(Math.abs(shoulder.rotation.z - Math.PI / 2) < 1e-8);
++  assert.equal(slider.position.x, 0.25);
++  assert.equal(instance.group.getObjectByName("base_link").children.length, 2);
++});
++
++test("skips unsupported mesh visuals without failing the whole model", () => {
++  const instance = buildRobotInstance({
++    name: "mesh_robot",
++    rootLink: "base_link",
++    warnings: ["Mesh geometry 'package://robot/meshes/base.stl' is not rendered"],
++    links: [
++      {
++        name: "base_link",
++        visuals: [
++          {
++            origin,
++            geometry: {
++              kind: "unsupported",
++              description: "package://robot/meshes/base.stl",
++            },
++            color: null,
++          },
++        ],
++      },
++    ],
++    joints: [],
++  });
++
++  assert.ok(instance.group.getObjectByName("base_link"));
++  assert.equal(instance.group.getObjectByName("base_link").children.length, 0);
++});
+diff --git a/tests/tfGraph.test.mjs b/tests/tfGraph.test.mjs
+new file mode 100644
+index 0000000..2d8d95c
+--- /dev/null
++++ b/tests/tfGraph.test.mjs
+@@ -0,0 +1,84 @@
++import assert from "node:assert/strict";
++import test from "node:test";
++import { buildTfGraph } from "../src/tfGraph.ts";
++
++function transform(parent, child, overrides = {}) {
++  return {
++    parent_frame: parent,
++    child_frame: child,
++    topic_name: "/tf",
++    x: 0,
++    y: 0,
++    z: 0,
++    qx: 0,
++    qy: 0,
++    qz: 0,
++    qw: 1,
++    receivedAtMs: 10000,
++    ...overrides,
++  };
++}
++
++test("builds a rooted parent-child hierarchy", () => {
++  const graph = buildTfGraph(
++    [transform("map", "base_link"), transform("base_link", "laser")],
++    10000,
++  );
++  assert.equal(graph.roots.length, 1);
++  assert.equal(graph.roots[0].frame, "map");
++  assert.equal(graph.roots[0].children[0].frame, "base_link");
++  assert.equal(graph.roots[0].children[0].children[0].frame, "laser");
++  assert.deepEqual(graph.warnings, []);
++});
++
++test("reports multiple disconnected roots and multiple parents", () => {
++  const graph = buildTfGraph(
++    [
++      transform("map_a", "base_link"),
++      transform("map_b", "base_link"),
++      transform("map_c", "camera"),
++    ],
++    10000,
++  );
++  assert.equal(graph.roots.length, 3);
++  assert.ok(graph.warnings.some((warning) => warning.includes("disconnected")));
++  assert.ok(graph.edges[0].issues.includes("Frame has multiple parents"));
++  assert.ok(graph.edges[1].issues.includes("Frame has multiple parents"));
++});
++
++test("detects cycles and keeps cyclic frames visible as unattached", () => {
++  const graph = buildTfGraph(
++    [transform("a", "b"), transform("b", "c"), transform("c", "a")],
++    10000,
++  );
++  assert.ok(graph.warnings.some((warning) => warning.includes("cycle")));
++  assert.ok(graph.edges.some((edge) => edge.issues.includes("Cycle detected in transform graph")));
++  assert.deepEqual(graph.unattachedFrames, ["a", "b", "c"]);
++});
++
++test("marks old dynamic transforms stale but exempts static transforms", () => {
++  const graph = buildTfGraph(
++    [
++      transform("map", "dynamic", { receivedAtMs: 0 }),
++      transform("map", "fixed", {
++        topic_name: "/tf_static",
++        receivedAtMs: 0,
++      }),
++    ],
++    10000,
++  );
++  assert.ok(graph.edges[0].issues.includes("Transform is stale"));
++  assert.ok(!graph.edges[1].issues.includes("Transform is stale"));
++});
++
++test("reports invalid quaternions and non-finite transforms", () => {
++  const graph = buildTfGraph(
++    [
++      transform("map", "zero", { qx: 0, qy: 0, qz: 0, qw: 0 }),
++      transform("map", "invalid", { x: Number.NaN }),
++    ],
++    10000,
++  );
++  assert.ok(graph.edges[0].issues.includes("Zero quaternion — likely uninitialized"));
++  assert.ok(graph.edges[1].issues.includes("Contains NaN or Infinity"));
++});
 ````

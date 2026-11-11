@@ -4,6 +4,8 @@ import { listen } from "@tauri-apps/api/event";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowUp, ArrowDown, RotateCcw, RotateCw, Square } from "lucide-react";
+import { buildRobotInstance } from "../robotDescription";
+import type { RobotDescription, RobotInstance } from "../robotDescription";
 
 interface OdometryUpdate {
   node: string;
@@ -16,9 +18,89 @@ interface OdometryUpdate {
   qw: number;
 }
 
-export default function RobotView() {
+interface JointStateUpdate {
+  names: string[];
+  positions: number[];
+}
+
+function buildPlaceholderRobot(node: string): RobotInstance {
+  const isBlue = node.includes("blue");
+  const bodyColor = isBlue ? 0x8080ff : 0x80ff80;
+  const wheelColor = 0x333333;
+  const group = new THREE.Group();
+
+  const chassis = new THREE.Mesh(
+    new THREE.BoxGeometry(2.01142, 0.568726, 1),
+    new THREE.MeshStandardMaterial({ color: bodyColor }),
+  );
+  chassis.position.set(-0.151427, 0.175, 0);
+  chassis.castShadow = true;
+  chassis.receiveShadow = true;
+  group.add(chassis);
+
+  const wheelMaterial = new THREE.MeshStandardMaterial({ color: wheelColor });
+  const leftWheel = new THREE.Mesh(
+    new THREE.SphereGeometry(0.3, 16, 16),
+    wheelMaterial,
+  );
+  leftWheel.position.set(0.554283, -0.025, -0.625029);
+  leftWheel.castShadow = true;
+  group.add(leftWheel);
+
+  const rightWheel = new THREE.Mesh(
+    new THREE.SphereGeometry(0.3, 16, 16),
+    wheelMaterial,
+  );
+  rightWheel.position.set(0.554282, -0.025, 0.625029);
+  rightWheel.castShadow = true;
+  group.add(rightWheel);
+
+  const caster = new THREE.Mesh(
+    new THREE.SphereGeometry(0.2, 16, 16),
+    new THREE.MeshStandardMaterial({ color: wheelColor }),
+  );
+  caster.position.set(-0.957138, -0.125, 0);
+  caster.castShadow = true;
+  group.add(caster);
+
+  return { group, updateJoints: () => undefined };
+}
+
+export default function RobotView({
+  descriptionContent,
+}: {
+  descriptionContent: string | null;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const robotsRef = useRef<Record<string, THREE.Group>>({});
+  const robotsRef = useRef<Record<string, RobotInstance>>({});
+  const [robotDescription, setRobotDescription] =
+    useState<RobotDescription | null>(null);
+  const [descriptionError, setDescriptionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!descriptionContent) {
+      setRobotDescription(null);
+      setDescriptionError(null);
+      return;
+    }
+
+    let active = true;
+    setRobotDescription(null);
+    setDescriptionError(null);
+    invoke<RobotDescription>("parse_robot_description", {
+      content: descriptionContent,
+    })
+      .then((description) => {
+        if (active) setRobotDescription(description);
+      })
+      .catch((error) => {
+        if (active) setDescriptionError(String(error));
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [descriptionContent]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -93,6 +175,12 @@ export default function RobotView() {
     scene.add(light);
     scene.add(new THREE.AmbientLight(0x404040));
 
+    if (robotDescription) {
+      const preview = buildRobotInstance(robotDescription);
+      scene.add(preview.group);
+      robotsRef.current["__description_preview__"] = preview;
+    }
+
     const animate = () => {
       if (!isActive) return;
 
@@ -106,8 +194,15 @@ export default function RobotView() {
     const unlistenClear = listen("clear-robots", () => {
       if (!isActive) return;
 
-      Object.values(robotsRef.current).forEach((mesh) => scene.remove(mesh));
+      Object.values(robotsRef.current).forEach((robot) =>
+        scene.remove(robot.group),
+      );
       robotsRef.current = {};
+      if (robotDescription) {
+        const preview = buildRobotInstance(robotDescription);
+        scene.add(preview.group);
+        robotsRef.current["__description_preview__"] = preview;
+      }
     });
 
     const unlistenPromise = listen<OdometryUpdate>(
@@ -117,59 +212,38 @@ export default function RobotView() {
 
         const { node, x, y, z, qx, qy, qz, qw } = event.payload;
 
-        let mesh = robotsRef.current[node];
+        let robot = robotsRef.current[node];
 
-        if (!mesh) {
-          const isBlue = node.includes("blue");
-          const bodyColor = isBlue ? 0x8080ff : 0x80ff80;
-          const wheelColor = 0x333333;
-
-          const group = new THREE.Group();
-
-          // Chassis — matches SDF: box 2.01142 x 1 x 0.568726,
-          // offset -0.151427 0 0.175 relative to vehicle origin
-          const chassisGeo = new THREE.BoxGeometry(2.01142, 0.568726, 1);
-          const chassisMat = new THREE.MeshStandardMaterial({
-            color: bodyColor,
-          });
-          const chassis = new THREE.Mesh(chassisGeo, chassisMat);
-          chassis.position.set(-0.151427, 0.175, 0);
-          chassis.castShadow = true;
-          chassis.receiveShadow = true;
-          group.add(chassis);
-
-          // Left wheel — sphere radius 0.3, offset 0.554283 0.625029 -0.025
-          const wheelGeo = new THREE.SphereGeometry(0.3, 16, 16);
-          const wheelMat = new THREE.MeshStandardMaterial({
-            color: wheelColor,
-          });
-          const leftWheel = new THREE.Mesh(wheelGeo, wheelMat);
-          leftWheel.position.set(0.554283, -0.025, -0.625029);
-          leftWheel.castShadow = true;
-          group.add(leftWheel);
-
-          // Right wheel — mirrored on y
-          const rightWheel = new THREE.Mesh(wheelGeo.clone(), wheelMat);
-          rightWheel.position.set(0.554282, -0.025, 0.625029);
-          rightWheel.castShadow = true;
-          group.add(rightWheel);
-
-          // Caster — sphere radius 0.2, offset -0.957138 0 -0.125
-          const casterGeo = new THREE.SphereGeometry(0.2, 16, 16);
-          const casterMat = new THREE.MeshStandardMaterial({
-            color: wheelColor,
-          });
-          const caster = new THREE.Mesh(casterGeo, casterMat);
-          caster.position.set(-0.957138, -0.125, 0);
-          caster.castShadow = true;
-          group.add(caster);
-
-          scene.add(group);
-          robotsRef.current[node] = group;
+        if (!robot) {
+          robot =
+            robotsRef.current["__description_preview__"] ??
+            (robotDescription
+              ? buildRobotInstance(robotDescription)
+              : buildPlaceholderRobot(node));
+          if (robotsRef.current["__description_preview__"]) {
+            delete robotsRef.current["__description_preview__"];
+          } else {
+            scene.add(robot.group);
+          }
+          robotsRef.current[node] = robot;
         }
 
-        mesh.position.set(x, z, -y);
-        mesh.quaternion.set(qx, qz, -qy, qw);
+        robot.group.position.set(x, z, -y);
+        robot.group.quaternion.set(qx, qz, -qy, qw);
+      },
+    );
+    const unlistenJointState = listen<JointStateUpdate>(
+      "joint-state-update",
+      (event) => {
+        if (!isActive) return;
+        const { names, positions } = event.payload;
+        const jointPositions = new Map<string, number>();
+        for (let index = 0; index < Math.min(names.length, positions.length); index += 1) {
+          jointPositions.set(names[index], positions[index]);
+        }
+        Object.values(robotsRef.current).forEach((robot) =>
+          robot.updateJoints(jointPositions),
+        );
       },
     );
 
@@ -182,10 +256,11 @@ export default function RobotView() {
 
       unlistenPromise.then((f) => f()).catch(() => {});
       unlistenClear.then((f) => f()).catch(() => {});
+      unlistenJointState.then((f) => f()).catch(() => {});
 
-      Object.values(robotsRef.current).forEach((group) => {
-        scene.remove(group);
-        group.traverse((child) => {
+      Object.values(robotsRef.current).forEach((robot) => {
+        scene.remove(robot.group);
+        robot.group.traverse((child) => {
           if (child instanceof THREE.Mesh) {
             child.geometry.dispose();
             if (Array.isArray(child.material)) {
@@ -207,7 +282,7 @@ export default function RobotView() {
         containerRef.current.innerHTML = "";
       }
     };
-  }, []);
+  }, [robotDescription]);
 
   return (
     <div
@@ -216,8 +291,61 @@ export default function RobotView() {
         width: "100%",
         height: "100%",
         overflow: "hidden",
+        position: "relative",
       }}
-    />
+    >
+      {(descriptionError || robotDescription?.warnings.length) && (
+        <div
+          role={descriptionError ? "alert" : "status"}
+          style={{
+            position: "absolute",
+            zIndex: 1,
+            top: 8,
+            left: 8,
+            maxWidth: 420,
+            padding: 8,
+            background: "rgba(25,25,25,0.92)",
+            color: descriptionError ? "#ff8b82" : "#e0b060",
+            fontSize: 12,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {descriptionError ?? robotDescription?.warnings.join("\n")}
+        </div>
+      )}
+      {descriptionContent && !robotDescription && !descriptionError && (
+        <div
+          role="status"
+          style={{
+            position: "absolute",
+            zIndex: 1,
+            top: 8,
+            left: 8,
+            padding: 8,
+            background: "rgba(25,25,25,0.92)",
+            fontSize: 12,
+          }}
+        >
+          Validating robot description...
+        </div>
+      )}
+      {!descriptionContent && !descriptionError && (
+        <div
+          role="status"
+          style={{
+            position: "absolute",
+            zIndex: 1,
+            top: 8,
+            left: 8,
+            padding: 8,
+            background: "rgba(25,25,25,0.92)",
+            fontSize: 12,
+          }}
+        >
+          Open a URDF file to preview its geometry; a placeholder robot is shown.
+        </div>
+      )}
+    </div>
   );
 }
 

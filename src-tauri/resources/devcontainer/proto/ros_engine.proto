@@ -94,9 +94,62 @@ message WorkspaceEvent {
     SafetyState safety_state = 7;
     EventHealth event_health = 8;
     EventRecovery event_recovery = 9;
+    RosGraphSnapshot ros_graph_snapshot = 12;
+    JointStateUpdate joint_state_update = 13;
   }
   int64 timestamp_ns = 10;
   uint64 sequence = 11;
+}
+
+message JointStateUpdate {
+  string topic_name = 1;
+  repeated string names = 2;
+  repeated double positions = 3;
+  bool truncated = 4;
+}
+
+message RosGraphSnapshot {
+  repeated GraphNode nodes = 1;
+  repeated GraphTopic topics = 2;
+  repeated GraphService services = 3;
+  repeated GraphAction actions = 4;
+  bool truncated = 5;
+}
+
+message GraphNode {
+  string name = 1;
+  string namespace = 2;
+}
+
+message GraphEndpoint {
+  string node_name = 1;
+  string node_namespace = 2;
+  string topic_type = 3;
+  string reliability = 4;
+  string durability = 5;
+  string history = 6;
+  uint32 depth = 7;
+}
+
+message GraphTopic {
+  string name = 1;
+  repeated string types = 2;
+  repeated GraphEndpoint publishers = 3;
+  repeated GraphEndpoint subscribers = 4;
+}
+
+message GraphService {
+  string name = 1;
+  repeated string types = 2;
+  repeated string server_nodes = 3;
+  repeated string client_nodes = 4;
+}
+
+message GraphAction {
+  string name = 1;
+  repeated string types = 2;
+  repeated string server_nodes = 3;
+  repeated string client_nodes = 4;
 }
 
 message EventRecovery {
@@ -121,6 +174,7 @@ message TFUpdate {
   double qy = 7;
   double qz = 8;
   double qw = 9;
+  string topic_name = 10;
 }
 
 message NodeStarted {

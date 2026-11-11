@@ -15,6 +15,8 @@ from server_core import (
     RobotConfigRegistry,
     RobotMotionConfig,
     SafetyController,
+    action_from_send_goal_service,
+    discover_workspace_packages,
     is_valid_auth_token,
     load_auth_credentials,
     validate_twist_request,
@@ -33,6 +35,139 @@ def request(topic="/robot/cmd_vel", value=0.0, timestamp_ns=None, linear_y=0.0,
         angular_z=angular_z,
         timestamp_ns=time.time_ns() if timestamp_ns is None else timestamp_ns,
     )
+
+
+class RosGraphDiscoveryTests(unittest.TestCase):
+    def test_extracts_canonical_ros_action_from_send_goal_service(self):
+        self.assertEqual(
+            action_from_send_goal_service(
+                "/fibonacci/_action/send_goal",
+                "example_interfaces/action/Fibonacci_SendGoal",
+            ),
+            ("/fibonacci", "example_interfaces/action/Fibonacci"),
+        )
+
+    def test_ignores_non_action_or_malformed_send_goal_services(self):
+        self.assertIsNone(
+            action_from_send_goal_service(
+                "/fibonacci/send_goal",
+                "example_interfaces/action/Fibonacci_SendGoal",
+            )
+        )
+        self.assertIsNone(
+            action_from_send_goal_service(
+                "/fibonacci/_action/send_goal",
+                "example_interfaces/srv/SendGoal",
+            )
+        )
+
+
+class WorkspacePackageDiscoveryTests(unittest.TestCase):
+    @staticmethod
+    def create_package(workspace, package_path, manifest):
+        package = os.path.join(workspace, package_path)
+        os.makedirs(package, exist_ok=True)
+        with open(os.path.join(package, "package.xml"), "w", encoding="utf-8") as file:
+            file.write(manifest)
+        return package
+
+    def test_discovers_source_package_metadata_and_workspace_executables(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            package = self.create_package(
+                workspace,
+                "src/robot_app",
+                """<package format="3">
+                  <name>robot_app</name><version>1.2.3</version>
+                  <description>Robot runtime package</description>
+                  <buildtool_depend>ament_cmake</buildtool_depend>
+                  <depend>rclpy</depend><exec_depend>geometry_msgs</exec_depend>
+                </package>""",
+            )
+            os.makedirs(os.path.join(package, "launch"))
+            os.makedirs(os.path.join(package, "config"))
+            with open(os.path.join(package, "launch", "start.launch.py"), "w") as file:
+                file.write("pass\n")
+            with open(os.path.join(package, "config", "robot.yaml"), "w") as file:
+                file.write("name: robot\n")
+            executable = os.path.join(workspace, "install", "lib", "robot_app", "driver")
+            os.makedirs(os.path.dirname(executable))
+            with open(executable, "w") as file:
+                file.write("#!/bin/sh\n")
+            os.chmod(executable, 0o755)
+
+            packages = discover_workspace_packages(workspace)
+
+            self.assertEqual(len(packages), 1)
+            self.assertEqual(
+                packages[0],
+                {
+                    "name": "robot_app",
+                    "version": "1.2.3",
+                    "description": "Robot runtime package",
+                    "package_type": "ament_cmake",
+                    "dependencies": ["ament_cmake", "geometry_msgs", "rclpy"],
+                    "metadata_error": None,
+                    "path": "src/robot_app",
+                    "executables": ["driver"],
+                    "launch_files": ["launch/start.launch.py"],
+                    "config_files": ["config/robot.yaml"],
+                },
+            )
+
+    def test_detects_ament_python_and_malformed_package_metadata(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            self.create_package(
+                workspace,
+                "src/python_node",
+                """<package format="3"><name>python_node</name>
+                  <version>0.1.0</version><description>Python node package</description>
+                  <buildtool_depend>ament_python</buildtool_depend></package>""",
+            )
+            self.create_package(workspace, "src/broken_node", "<package>")
+
+            packages = {
+                package["name"]: package
+                for package in discover_workspace_packages(workspace)
+            }
+
+            self.assertEqual(packages["python_node"]["package_type"], "ament_python")
+            self.assertEqual(packages["python_node"]["version"], "0.1.0")
+            self.assertIsNone(packages["python_node"]["metadata_error"])
+            self.assertEqual(packages["broken_node"]["package_type"], "unknown")
+            self.assertTrue(packages["broken_node"]["metadata_error"])
+
+    def test_rejects_missing_workspace_and_isolates_selected_workspace(self):
+        with tempfile.TemporaryDirectory() as parent:
+            first = os.path.join(parent, "first")
+            second = os.path.join(parent, "second")
+            os.makedirs(first)
+            os.makedirs(second)
+            self.create_package(
+                first, "src/first_pkg", "<package><name>first_pkg</name></package>"
+            )
+            self.create_package(
+                second, "src/second_pkg", "<package><name>second_pkg</name></package>"
+            )
+
+            self.assertEqual(
+                [package["name"] for package in discover_workspace_packages(first)],
+                ["first_pkg"],
+            )
+            with self.assertRaisesRegex(ValueError, "missing or is not a directory"):
+                discover_workspace_packages(os.path.join(parent, "missing"))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks are unavailable")
+    def test_does_not_follow_symlinked_package_directories(self):
+        with tempfile.TemporaryDirectory() as parent:
+            workspace = os.path.join(parent, "workspace")
+            outside = os.path.join(parent, "outside")
+            os.makedirs(os.path.join(workspace, "src"))
+            self.create_package(
+                parent, "outside/escaped", "<package><name>escaped</name></package>"
+            )
+            os.symlink(outside, os.path.join(workspace, "src", "linked"))
+
+            self.assertEqual(discover_workspace_packages(workspace), [])
 
 
 class EventHubTests(unittest.TestCase):

@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+import xml.etree.ElementTree as ET
 
 AUTH_PROTOCOL_VERSION = 1
 MAX_EVENT_QUEUE_SIZE = 256
@@ -27,6 +28,284 @@ MAX_CONFIG_ANGULAR_VELOCITY = 1.0
 MAX_CONFIG_LINEAR_ACCELERATION = 2.0
 MAX_CONFIG_ANGULAR_ACCELERATION = 4.0
 ALLOWED_MOTION_MODES = frozenset(("planar", "full_twist"))
+MAX_WORKSPACE_PACKAGES = 1000
+MAX_PACKAGE_SCAN_FILES = 5000
+MAX_PACKAGE_DISCOVERY_FILES = 250
+ACTION_SEND_GOAL_SUFFIX = "/_action/send_goal"
+PACKAGE_METADATA_LIMIT = 1024 * 1024
+_PACKAGE_PRUNED_DIRECTORIES = frozenset(
+    (".git", ".robotics-studio", "__pycache__", "build", "install", "log", "node_modules")
+)
+
+
+def _package_directory_is_within(root, path):
+    try:
+        path.resolve(strict=True).relative_to(root)
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _workspace_package_directories(workspace):
+    root = Path(workspace)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("Selected ROS workspace is missing or is not a directory")
+    root = root.resolve(strict=True)
+    found = []
+
+    root_manifest = root / "package.xml"
+    if root_manifest.is_file() and not root_manifest.is_symlink():
+        found.append(root)
+
+    source = root / "src"
+    if source.is_dir() and not source.is_symlink():
+        def on_error(error):
+            raise error
+
+        for current, directories, files in os.walk(
+            source, topdown=True, followlinks=False, onerror=on_error
+        ):
+            current_path = Path(current)
+            directories[:] = sorted(
+                name
+                for name in directories
+                if name not in _PACKAGE_PRUNED_DIRECTORIES
+                and not (current_path / name).is_symlink()
+            )
+            if "package.xml" in files:
+                manifest = current_path / "package.xml"
+                if not manifest.is_symlink() and _package_directory_is_within(root, current_path):
+                    found.append(current_path)
+                    directories[:] = []
+                    if len(found) > MAX_WORKSPACE_PACKAGES:
+                        raise ValueError("ROS workspace contains too many packages")
+
+    install = root / "install"
+    if install.is_dir() and not install.is_symlink():
+        share_roots = [install / "share"]
+        try:
+            prefixes = sorted(
+                child
+                for child in install.iterdir()
+                if child.is_dir()
+                and not child.is_symlink()
+                and child.name not in _PACKAGE_PRUNED_DIRECTORIES
+            )
+        except OSError as error:
+            raise ValueError(f"Could not inspect ROS workspace install directory: {error}") from error
+        share_roots.extend(prefix / "share" for prefix in prefixes)
+        for share_root in share_roots:
+            if not share_root.is_dir() or share_root.is_symlink():
+                continue
+            try:
+                packages = sorted(share_root.iterdir())
+            except OSError as error:
+                raise ValueError(f"Could not inspect ROS package index directory: {error}") from error
+            for package_share in packages:
+                if (
+                    package_share.is_dir()
+                    and not package_share.is_symlink()
+                    and (package_share / "package.xml").is_file()
+                    and not (package_share / "package.xml").is_symlink()
+                    and _package_directory_is_within(root, package_share)
+                ):
+                    found.append(package_share)
+                    if len(found) > MAX_WORKSPACE_PACKAGES:
+                        raise ValueError("ROS workspace contains too many packages")
+
+    return root, found
+
+
+def _parse_package_manifest(package_directory):
+    manifest_path = package_directory / "package.xml"
+    package = {
+        "name": package_directory.name,
+        "version": None,
+        "description": None,
+        "package_type": "unknown",
+        "dependencies": [],
+        "metadata_error": None,
+    }
+    try:
+        if manifest_path.stat().st_size > PACKAGE_METADATA_LIMIT:
+            raise ValueError("package.xml exceeds the metadata size limit")
+        contents = manifest_path.read_bytes()
+        if b"<!DOCTYPE" in contents.upper() or b"<!ENTITY" in contents.upper():
+            raise ValueError("package.xml must not declare a DTD or entities")
+        root = ET.fromstring(contents)
+        if root.tag.rsplit("}", 1)[-1] != "package":
+            raise ValueError("package.xml root element must be <package>")
+
+        name = (root.findtext("name") or "").strip()
+        if name:
+            package["name"] = name
+        package["version"] = (root.findtext("version") or "").strip() or None
+        package["description"] = (root.findtext("description") or "").strip() or None
+        missing_fields = [
+            field
+            for field, value in (
+                ("name", name),
+                ("version", package["version"]),
+                ("description", package["description"]),
+            )
+            if not value
+        ]
+        if missing_fields:
+            package["metadata_error"] = (
+                "package.xml is missing required fields: " + ", ".join(missing_fields)
+            )[:256]
+
+        build_type = (root.findtext("export/build_type") or "").strip()
+        build_tools = {
+            (element.text or "").strip()
+            for tag in ("buildtool_depend", "buildtool_export_depend")
+            for element in root.findall(tag)
+            if (element.text or "").strip()
+        }
+        if build_type in ("ament_cmake", "ament_python", "cmake"):
+            package["package_type"] = build_type
+        elif "ament_cmake" in build_tools:
+            package["package_type"] = "ament_cmake"
+        elif "ament_python" in build_tools:
+            package["package_type"] = "ament_python"
+
+        dependencies = {
+            (element.text or "").strip()
+            for tag in (
+                "depend",
+                "build_depend",
+                "buildtool_depend",
+                "buildtool_export_depend",
+                "exec_depend",
+                "test_depend",
+                "build_export_depend",
+                "doc_depend",
+                "group_depend",
+            )
+            for element in root.findall(tag)
+            if (element.text or "").strip()
+        }
+        package["dependencies"] = sorted(dependencies)
+    except (OSError, ET.ParseError, ValueError) as error:
+        package["metadata_error"] = str(error)[:256]
+    return package
+
+
+def _package_files(package_directory):
+    launch_files = []
+    config_files = []
+    files_seen = 0
+
+    def on_error(error):
+        raise error
+
+    for current, directories, files in os.walk(
+        package_directory, topdown=True, followlinks=False, onerror=on_error
+    ):
+        current_path = Path(current)
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name not in _PACKAGE_PRUNED_DIRECTORIES
+            and not (current_path / name).is_symlink()
+        )
+        for name in sorted(files):
+            candidate = current_path / name
+            if candidate.is_symlink() or not candidate.is_file():
+                continue
+            files_seen += 1
+            if files_seen > MAX_PACKAGE_SCAN_FILES:
+                raise ValueError("ROS package contains too many files to inspect")
+            relative = candidate.relative_to(package_directory).as_posix()
+            if name.endswith((".launch.py", ".launch.xml")) or name.endswith(".launch"):
+                if len(launch_files) < MAX_PACKAGE_DISCOVERY_FILES:
+                    launch_files.append(relative)
+            if candidate.suffix.lower() in (".yaml", ".yml", ".json", ".config", ".ini"):
+                if len(config_files) < MAX_PACKAGE_DISCOVERY_FILES:
+                    config_files.append(relative)
+
+    return sorted(launch_files), sorted(config_files)
+
+
+def _package_executables(workspace, package_name):
+    install = workspace / "install"
+    if install.is_symlink() or not install.is_dir():
+        return []
+    candidates = (install / "lib" / package_name,)
+    try:
+        prefixes = sorted(
+            child
+            for child in install.iterdir()
+            if child.is_dir()
+            and not child.is_symlink()
+            and child.name not in _PACKAGE_PRUNED_DIRECTORIES
+        )
+    except (FileNotFoundError, NotADirectoryError):
+        prefixes = ()
+    candidates += tuple(prefix / "lib" / package_name for prefix in prefixes)
+
+    executables = set()
+    for directory in candidates:
+        if (
+            not directory.is_dir()
+            or directory.is_symlink()
+            or directory.parent.is_symlink()
+            or not _package_directory_is_within(workspace, directory)
+        ):
+            continue
+        try:
+            entries = sorted(directory.iterdir())
+        except OSError as error:
+            raise ValueError(f"Could not inspect executables for package {package_name}: {error}") from error
+        for entry in entries:
+            if (
+                not entry.is_symlink()
+                and entry.is_file()
+                and os.access(entry, os.X_OK)
+            ):
+                executables.add(entry.name)
+    return sorted(executables)[:MAX_PACKAGE_DISCOVERY_FILES]
+
+
+def discover_workspace_packages(workspace="/workspace"):
+    """Return bounded package metadata found only inside the selected workspace."""
+    root, package_directories = _workspace_package_directories(workspace)
+    result_by_name = {}
+    for package_directory in package_directories:
+        package = _parse_package_manifest(package_directory)
+        name = package["name"]
+        existing = result_by_name.get(name)
+        relative_directory = package_directory.relative_to(root)
+        is_source_package = not relative_directory.parts or relative_directory.parts[0] == "src"
+        if existing and (not is_source_package or existing["is_source"]):
+            continue
+
+        launch_files, config_files = _package_files(package_directory)
+        package.update(
+            {
+                "path": relative_directory.as_posix(),
+                "executables": _package_executables(root, name),
+                "launch_files": launch_files,
+                "config_files": config_files,
+                "is_source": is_source_package,
+            }
+        )
+        result_by_name[name] = package
+
+    return [
+        {key: value for key, value in package.items() if key != "is_source"}
+        for _, package in sorted(result_by_name.items())
+    ]
+
+
+def action_from_send_goal_service(service_name, service_type):
+    """Return an action name/type only for canonical ROS 2 send-goal endpoints."""
+    if not service_name.endswith(ACTION_SEND_GOAL_SUFFIX):
+        return None
+    action_type, separator, suffix = service_type.rpartition("_SendGoal")
+    if not separator or suffix or not action_type:
+        return None
+    return service_name[: -len(ACTION_SEND_GOAL_SUFFIX)], action_type
 
 
 class EventOverflow(Exception):

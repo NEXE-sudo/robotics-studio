@@ -18,6 +18,7 @@ jobs:
       - run: npm ci
       - run: npm audit --audit-level=moderate
       - run: npm run build
+      - run: npm run test:frontend
 
   rust:
     name: Rust tests and lint

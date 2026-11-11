@@ -85,23 +85,45 @@ coverage remain incomplete.
 
 ## Supported ROS surface
 
-The current service streams node and topic snapshots, transform and odometry
-updates, safety state, and event-recovery metadata. It is not a full ROS graph
-explorer: detailed publisher/subscriber endpoints, services, and actions are
-not exposed. TF updates are visualized as received edges but are not yet
-validated as a complete hierarchy with stale-frame expiry and cycle detection.
-The 3D view uses placeholder geometry; URDF parsing, Xacro processing, mesh
-resource resolution, and description-based robot rendering are not implemented.
+The current service streams bounded node, topic endpoint/QoS, service, and
+action snapshots alongside transform and odometry updates, safety state, and
+event-recovery metadata. The package explorer scans package manifests in the
+selected workspace's source and install trees rather than treating ROS
+underlay packages as workspace packages. It reports bounded metadata,
+installed executables, launch/configuration files, and allows the frontend to
+browse package files through approved-root file commands. The graph explorer
+is read-only: it does not invoke arbitrary ROS services or submit action goals,
+which could otherwise bypass the application's motion safety path.
+
+TF updates include their source topic. `/tf_static` uses transient-local
+reliable QoS so late subscribers receive latched static transforms. The
+frontend constructs a transform forest, warns on multiple roots, cycles,
+multiple parents, stale dynamic transforms, non-finite values, and invalid
+quaternions, and provides translation/quaternion/RPY inspection. It cannot
+infer missing transform authorities from edge data alone, and is diagnostic
+validation rather than a replacement for `tf2`.
+
+When an active editor file is a `.urdf`, the native backend parses a bounded
+URDF subset and the frontend renders box, cylinder, and sphere visuals with a
+connected link tree. Fixed, revolute, continuous, and prismatic joint states
+are updated from bounded `/joint_states` telemetry. Mesh visuals are surfaced
+as warnings and skipped. Xacro expansion, mesh/package resource resolution,
+floating/planar joints, and full URDF semantics are not implemented. The
+ROS-to-three.js coordinate mapping still needs broader convention validation.
 
 SDF import checks XML well-formedness, an SDF root, a world element, supported
-declared versions, and rejects DTDs. It does not perform full SDFormat schema
-validation or resolve and validate all external model and mesh resources.
+declared versions, and rejects DTDs. Before launching Gazebo, the container's
+`gz sdf --check` validates the selected world against the installed SDFormat
+schema. External model and mesh resources are not comprehensively resolved or
+validated.
 
 ## Validation boundary
 
 Run unit/build checks with the commands in the README. The live integration
 script `scripts/docker-integration.sh` builds the container image and exercises
-the real ROS service, pinned TLS, event replay after restart, Gazebo world
-readiness/reset, and ROS-Gazebo topic bridging. This does not substitute for
-testing the desktop UI on every target operating system or testing a physical
-robot.
+the real ROS service, selected-workspace package discovery, pinned TLS, event
+replay after restart, live `/tf_static` and `/joint_states` delivery, Gazebo
+world readiness/reset, and ROS-Gazebo topic bridging. Unit tests cover TF graph
+validation, URDF parsing, primitive/joint rendering, and package metadata
+discovery. This does not substitute for visual desktop validation on every
+target operating system or testing a physical robot.

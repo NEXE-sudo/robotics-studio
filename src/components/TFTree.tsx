@@ -1,89 +1,164 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { AlertTriangle, Sparkles } from "lucide-react";
+import {
+  buildTfGraph,
+  tfEdgeKey,
+  type TfTransform,
+  type TfTreeNode,
+} from "../tfGraph";
 
-interface TfUpdate {
-  parent_frame: string;
-  child_frame: string;
-  x: number;
-  y: number;
-  z: number;
-  qx: number;
-  qy: number;
-  qz: number;
-  qw: number;
-}
-
-type TfUpdateWithValidation = TfUpdate & {
-  validationIssues?: string[];
+type TfUpdateWithValidation = TfTransform & {
+  validationIssues: string[];
 };
+
+interface TfEvent extends Omit<TfTransform, "receivedAtMs"> {}
 
 interface Props {
   onExplain?: (tf: TfUpdateWithValidation) => void;
 }
 
-const QUATERNION_TOLERANCE = 0.01;
-const TRANSLATION_WARNING_THRESHOLD = 1000;
+function TreeBranch({
+  node,
+  depth,
+  selectedEdgeKey,
+  onSelect,
+}: {
+  node: TfTreeNode;
+  depth: number;
+  selectedEdgeKey: string | null;
+  onSelect: (key: string) => void;
+}) {
+  const issues = node.edge?.issues ?? [];
+  return (
+    <div key={node.edge?.key ?? node.frame}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          paddingLeft: depth * 14,
+          minHeight: 24,
+        }}
+      >
+        {depth > 0 && <span style={{ opacity: 0.45 }}>└─</span>}
+        {node.edge ? (
+          <button
+            type="button"
+            onClick={() => onSelect(node.edge!.key)}
+            aria-pressed={selectedEdgeKey === node.edge.key}
+            style={{
+              textAlign: "left",
+              padding: "2px 4px",
+              border: 0,
+              borderRadius: 3,
+              color: issues.length ? "#e0b060" : "#7cd992",
+              background:
+                selectedEdgeKey === node.edge.key
+                  ? "rgba(79,195,247,0.12)"
+                  : "transparent",
+              fontFamily: "inherit",
+              fontSize: "inherit",
+              cursor: "pointer",
+            }}
+          >
+            {node.frame}
+          </button>
+        ) : (
+          <span style={{ color: "#4fc3f7", fontWeight: 600 }}>
+            {node.frame}
+          </span>
+        )}
+        {issues.length > 0 && (
+          <span title={issues.join("; ")}>
+            <AlertTriangle
+              aria-label={issues.join("; ")}
+              size={13}
+              color="#e0b060"
+            />
+          </span>
+        )}
+      </div>
+      {node.children.map((child) => (
+        <TreeBranch
+          key={child.edge?.key ?? child.frame}
+          node={child}
+          depth={depth + 1}
+          selectedEdgeKey={selectedEdgeKey}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
 
-function validateTfUpdate(tf: TfUpdate): string[] {
-  const issues: string[] = [];
-  const values = [tf.x, tf.y, tf.z, tf.qx, tf.qy, tf.qz, tf.qw];
-
-  if (values.some((value) => !Number.isFinite(value))) {
-    issues.push("Contains NaN/Infinity");
-  }
-
-  const quaternionNorm =
-    tf.qx * tf.qx + tf.qy * tf.qy + tf.qz * tf.qz + tf.qw * tf.qw;
-
-  if (Math.abs(quaternionNorm) < 1e-12) {
-    issues.push("Zero quaternion — likely uninitialized");
-  } else if (Math.abs(quaternionNorm - 1) > QUATERNION_TOLERANCE) {
-    issues.push("Non-normalized quaternion");
-  }
-
-  if (
-    Math.abs(tf.x) > TRANSLATION_WARNING_THRESHOLD ||
-    Math.abs(tf.y) > TRANSLATION_WARNING_THRESHOLD ||
-    Math.abs(tf.z) > TRANSLATION_WARNING_THRESHOLD
-  ) {
-    issues.push("Large translation magnitude");
-  }
-
-  return issues;
+function quaternionEulerDegrees(transform: TfTransform) {
+  const { qx, qy, qz, qw } = transform;
+  if (![qx, qy, qz, qw].every(Number.isFinite)) return null;
+  const norm = Math.hypot(qx, qy, qz, qw);
+  if (norm < 1e-12) return null;
+  const x = qx / norm;
+  const y = qy / norm;
+  const z = qz / norm;
+  const w = qw / norm;
+  const sinRoll = 2 * (w * x + y * z);
+  const cosRoll = 1 - 2 * (x * x + y * y);
+  const sinPitch = 2 * (w * y - z * x);
+  const sinYaw = 2 * (w * z + x * y);
+  const cosYaw = 1 - 2 * (y * y + z * z);
+  const degrees = 180 / Math.PI;
+  return {
+    roll: Math.atan2(sinRoll, cosRoll) * degrees,
+    pitch: Math.asin(Math.max(-1, Math.min(1, sinPitch))) * degrees,
+    yaw: Math.atan2(sinYaw, cosYaw) * degrees,
+  };
 }
 
 export default function TFTree({ onExplain }: Props) {
-  const [transforms, setTransforms] = useState<Record<string, TfUpdate>>({});
-  const isActiveRef = useRef(true);
+  const [transforms, setTransforms] = useState<Record<string, TfTransform>>(
+    {},
+  );
+  const transformsRef = useRef<Record<string, TfTransform>>({});
+  const [selectedEdgeKey, setSelectedEdgeKey] = useState<string | null>(null);
+  const [nowMs, setNowMs] = useState(() => Date.now());
 
   useEffect(() => {
-    isActiveRef.current = true;
-    const unlisten = listen<TfUpdate>("tf-update", (event) => {
-      if (!isActiveRef.current) return;
-      const key = `${event.payload.parent_frame}->${event.payload.child_frame}`;
-      setTransforms((prev) => ({ ...prev, [key]: event.payload }));
+    let active = true;
+    let updateFrame: number | null = null;
+    const listener = listen<TfEvent>("tf-update", (event) => {
+      if (!active) return;
+      const transform: TfTransform = {
+        ...event.payload,
+        receivedAtMs: Date.now(),
+      };
+      const key = tfEdgeKey(transform.parent_frame, transform.child_frame);
+      transformsRef.current[key] = transform;
+      if (updateFrame === null) {
+        updateFrame = window.requestAnimationFrame(() => {
+          updateFrame = null;
+          if (active) setTransforms({ ...transformsRef.current });
+        });
+      }
     });
+    const timer = window.setInterval(() => setNowMs(Date.now()), 1000);
 
     return () => {
-      isActiveRef.current = false;
-      unlisten.then((f) => f());
+      active = false;
+      window.clearInterval(timer);
+      if (updateFrame !== null) {
+        window.cancelAnimationFrame(updateFrame);
+      }
+      listener.then((unlisten) => unlisten()).catch(() => undefined);
     };
   }, []);
 
-  // Group by parent frame, so we can render a simple indented tree
-  const byParent: Record<string, TfUpdateWithValidation[]> = {};
-  Object.values(transforms).forEach((t) => {
-    const withValidation: TfUpdateWithValidation = {
-      ...t,
-      validationIssues: validateTfUpdate(t),
-    };
-
-    if (!byParent[t.parent_frame]) byParent[t.parent_frame] = [];
-    byParent[t.parent_frame].push(withValidation);
-  });
-
-  const roots = Object.keys(byParent);
+  const graph = useMemo(
+    () => buildTfGraph(Object.values(transforms), nowMs),
+    [transforms, nowMs],
+  );
+  const selected =
+    graph.edges.find((edge) => edge.key === selectedEdgeKey) ?? graph.edges[0];
+  const euler = selected ? quaternionEulerDegrees(selected) : null;
 
   return (
     <div
@@ -96,92 +171,117 @@ export default function TFTree({ onExplain }: Props) {
         height: "100%",
       }}
     >
-      {roots.length === 0 && (
-        <div style={{ opacity: 0.5 }}>
-          No transforms detected yet — start a ROS node that publishes to /tf.
-        </div>
-      )}
-      {roots.map((parent) => (
-        <div key={parent} style={{ marginBottom: 10 }}>
-          <div style={{ color: "#4fc3f7", fontWeight: 600 }}>{parent}</div>
-          {byParent[parent].map((t) => {
-            const issues = t.validationIssues ?? [];
-            const issueSummary = issues.length > 0 ? issues.join(" • ") : "";
-
-            return (
-              <div
-                key={t.child_frame}
-                style={{ paddingLeft: 20, opacity: 0.9 }}
-              >
-                └─ <span style={{ color: "#7cd992" }}>{t.child_frame}</span>
-                {issues.length > 0 && (
-                  <span
-                    title={issueSummary}
-                    style={{
-                      marginLeft: 8,
-                      color: "#e08080",
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      cursor: "help",
-                    }}
-                  >
-                    <AlertTriangle
-                      style={{
-                        width: "var(--icon-sm)",
-                        height: "var(--icon-sm)",
-                        verticalAlign: "middle",
-                      }}
-                    />
-                    <span style={{ opacity: 0.9 }}>{issues[0]}</span>
-                  </span>
-                )}
-                {onExplain && (
-                  <span
-                    onClick={() =>
-                      onExplain({ ...t, validationIssues: issues })
-                    }
-                    title="Explain this frame with AI"
-                    style={{
-                      marginLeft: "var(--spacing-sm)",
-                      fontSize: "var(--font-xs)",
-                      color: "#4fc3f7",
-                      opacity: 0.8,
-                      cursor: "pointer",
-                      transition: "opacity 0.12s ease",
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.opacity = "1";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.opacity = "0.8";
-                    }}
-                  >
-                    <Sparkles
-                      style={{
-                        width: "var(--icon-sm)",
-                        height: "var(--icon-sm)",
-                        marginRight: 4,
-                        display: "inline",
-                      }}
-                    />{" "}
-                    Explain
-                  </span>
-                )}
-                <div
-                  style={{
-                    paddingLeft: 20,
-                    opacity: 0.6,
-                    fontSize: "var(--font-xs)",
-                  }}
-                >
-                  pos: ({t.x.toFixed(3)}, {t.y.toFixed(3)}, {t.z.toFixed(3)})
-                </div>
-              </div>
-            );
-          })}
+      <div style={{ opacity: 0.65, marginBottom: 8 }}>
+        {graph.edges.length} transform(s) · {graph.roots.length} root frame(s)
+      </div>
+      {graph.warnings.map((warning) => (
+        <div
+          key={warning}
+          role="status"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            color: "#e0b060",
+            marginBottom: 6,
+          }}
+        >
+          <AlertTriangle size={13} />
+          {warning}
         </div>
       ))}
+      {graph.edges.length === 0 && (
+        <div style={{ opacity: 0.5 }}>
+          No transforms detected yet — start a ROS node that publishes to /tf
+          or /tf_static.
+        </div>
+      )}
+      {graph.roots.map((root) => (
+        <TreeBranch
+          key={root.frame}
+          node={root}
+          depth={0}
+          selectedEdgeKey={selected?.key ?? null}
+          onSelect={setSelectedEdgeKey}
+        />
+      ))}
+      {graph.unattachedFrames.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ color: "#e0b060", marginBottom: 4 }}>
+            Cyclic or unreachable frames
+          </div>
+          {graph.unattachedFrames.map((frame) => (
+            <div key={frame} style={{ color: "#e0b060", paddingLeft: 8 }}>
+              {frame}
+            </div>
+          ))}
+        </div>
+      )}
+      {selected && (
+        <section
+          aria-label="Transform inspector"
+          style={{
+            marginTop: 14,
+            padding: 10,
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 5,
+            background: "rgba(255,255,255,0.025)",
+          }}
+        >
+          <div style={{ fontWeight: 600, color: "#4fc3f7", marginBottom: 6 }}>
+            {selected.parent_frame} → {selected.child_frame}
+          </div>
+          <div style={{ opacity: 0.65, marginBottom: 6 }}>
+            Source: {selected.topic_name || "unknown topic"}
+            {selected.topic_name.endsWith("/tf_static")
+              ? " · static"
+              : ` · updated ${Math.max(
+                  0,
+                  Math.floor((nowMs - selected.receivedAtMs) / 1000),
+                )}s ago`}
+          </div>
+          <div>
+            Translation (m): ({selected.x.toFixed(4)}, {selected.y.toFixed(4)},{" "}
+            {selected.z.toFixed(4)})
+          </div>
+          <div>
+            Quaternion (x, y, z, w): ({selected.qx.toFixed(4)},{" "}
+            {selected.qy.toFixed(4)}, {selected.qz.toFixed(4)},{" "}
+            {selected.qw.toFixed(4)})
+          </div>
+          {euler && (
+            <div style={{ marginTop: 4 }}>
+              RPY (deg): ({euler.roll.toFixed(2)}, {euler.pitch.toFixed(2)},{" "}
+              {euler.yaw.toFixed(2)})
+            </div>
+          )}
+          {selected.issues.map((issue) => (
+            <div
+              key={issue}
+              role="alert"
+              style={{ color: "#e0b060", marginTop: 5 }}
+            >
+              {issue}
+            </div>
+          ))}
+          {onExplain && (
+            <button
+              type="button"
+              className="ide-btn"
+              onClick={() =>
+                onExplain({
+                  ...selected,
+                  validationIssues: selected.issues,
+                })
+              }
+              style={{ marginTop: 8 }}
+            >
+              <Sparkles size={13} style={{ marginRight: 4 }} />
+              Explain transform
+            </button>
+          )}
+        </section>
+      )}
     </div>
   );
 }

@@ -16,11 +16,17 @@ upfront about that than pretend otherwise.
   connects to a Docker-based ROS 2 environment automatically on launch. No
   manual Docker/Dev Container setup required.
 - **Live ROS status** — node/topic snapshots and TF updates are streamed over
-  authenticated gRPC while the system runs. The current UI does not yet
-  provide full package, service, or action exploration.
-- **3D visualization** — robot state rendered live in a three.js viewport,
-  with in-app controls to publish `cmd_vel` commands directly (no manual
-  container terminal needed for basic teleop).
+  authenticated gRPC while the system runs. The ROS sidebar also discovers
+  source packages in the selected workspace, shows package metadata and
+  resources, and lets you inspect package files. The live graph shows topic
+  publisher/subscriber QoS, service endpoints, and discovered action servers
+  and clients. Service invocation and action goal monitoring are not yet
+  available.
+- **3D visualization** — preview primitive URDF visuals and articulated
+  joints in the three.js viewport when a `.urdf` file is active; streamed
+  `/joint_states` update supported joints. Without an active URDF, the view
+  keeps its placeholder robot. In-app controls publish bounded `cmd_vel`
+  commands directly (no manual container terminal needed for basic teleop).
 - **Custom Gazebo world support** — load your own world file instead of
   being limited to the bundled demo.
 - **AI assistant with real context** — ask questions about your open file,
@@ -132,6 +138,11 @@ any of this — the app manages the environment for you.
   bounded limits, latch the software emergency stop, or explicitly reset it.
   The backend remains authoritative and rejects commands while stopped.
 - **ROS Log tab** — live feed of ROS 2 node/topic activity.
+- **ROS Explorer sidebar** — filter packages from the selected workspace,
+  inspect build type, version, description, dependencies, installed
+  executables, launch/configuration files, and browse package files. Refresh
+  after builds to update the workspace package inventory. The live graph also
+  shows nodes, topic endpoints/QoS, services, and action endpoint metadata.
 - **TF tab** — live transform updates, with an **Explain** action per
   frame for an AI-generated plain-language breakdown.
 - **AI Assistant (right panel)** — ask questions about your open file,
@@ -157,22 +168,25 @@ any of this — the app manages the environment for you.
 
 ## Known limitations (please break things and tell me what you find)
 
-- 3D view uses accurately-dimensioned placeholder geometry, not full URDF
-  mesh loading yet — visually approximate, not a rendered CAD model.
-- The TF tab currently lists/group-displays received transform edges; it does
-  not yet provide a fully validated hierarchy, stale-frame expiry, or cycle
-  detection.
-- ROS package discovery, detailed node endpoint inspection, and service/action
-  exploration are not implemented. The live ROS view is not a complete graph
-  explorer.
-- URDF editing and AI generation are available, but URDF parsing, Xacro
-  processing, package-resource resolution, and description-based model
-  rendering are not implemented. The 3D view uses placeholder geometry.
-- SDF imports are checked for XML structure, a supported declared version,
-  and a world element; this is not SDFormat schema or resource-reference
+- The URDF preview supports box, cylinder, and sphere visuals plus
+  fixed/revolute/continuous/prismatic joints. It does not expand Xacro or
+  resolve mesh/package resources; mesh visuals are reported and skipped.
+  Floating/planar joints and full URDF semantics are not supported. The ROS
+  to three.js coordinate mapping is a first pass and still needs convention
   validation.
-- ROS↔three.js coordinate mapping is a first-pass approximation — rotation
-  direction hasn't been rigorously verified against every convention.
+- The TF tab builds a live transform forest and warns about multiple roots,
+  cycles, multiple parents, stale dynamic transforms, non-finite values, and
+  invalid quaternions. Static `/tf_static` edges use transient-local QoS and
+  are not marked stale. This is diagnostic validation, not a substitute for
+  `tf2` authority or full ROS graph validation.
+- ROS graph snapshots are bounded and read-only. Service invocation and
+  action goal submission/monitoring are not implemented because arbitrary
+  operations could bypass the motion safety path. Package discovery reads
+  source package manifests and workspace install outputs, but does not show
+  every underlay package.
+- SDF imports are structurally checked, and the world is validated against
+  the installed SDFormat schema before Gazebo starts. This does not resolve or
+  validate every external model/mesh resource.
 - Only one bundled project template (`basic_publisher`) so far.
 - Local/offline model *running* isn't implemented — Settings will suggest
   appropriately-sized models for your hardware, but you'll still need to
@@ -304,6 +318,7 @@ cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
 python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
+npm run test:frontend
 ```
 
 For the live container integration (Docker Desktop or Docker Engine must be
@@ -314,18 +329,19 @@ running), execute:
 ```
 
 The script builds the supported ROS 2 Jazzy/Gazebo Harmonic image, mounts a
-temporary workspace, verifies the pinned-TLS Rust client, gRPC authentication,
-emergency-stop gating, event replay after service restart, Gazebo world/model
+temporary workspace, verifies selected-workspace package discovery, the
+pinned-TLS Rust client, gRPC authentication, emergency-stop gating, event
+replay after service restart, live `/tf_static` delivery, Gazebo world/model
 readiness, reset, and ROS-Gazebo topic bridging. It performs no robot movement
 and removes its temporary container and workspace on exit. CI runs the same
 script on its Linux runner.
 
-These are unit/build checks, not Docker/ROS 2/Gazebo integration tests. They
-require Docker Desktop running for a live environment; if it is unavailable,
-simulation and gRPC integration behavior remains unverified. The current
-supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in the
-bundled container. macOS is tested most often; Linux/Windows builds and
-runtime behavior need additional platform CI coverage.
+Unit/build checks are not a substitute for live Docker/ROS 2/Gazebo checks.
+They require Docker Desktop running for an integration environment; if it is
+unavailable, simulation and gRPC integration behavior remains unverified. The
+current supported development baseline is ROS 2 Jazzy with Gazebo Harmonic in
+the bundled container. macOS is tested most often; Linux/Windows runtime
+behavior and packaged desktop lifecycle still need platform-specific testing.
 
 ---
 

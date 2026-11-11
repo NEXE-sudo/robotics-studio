@@ -4,6 +4,8 @@ import { invoke } from "@tauri-apps/api/core";
 import RobotView, { RobotControls } from "./components/RobotView";
 import { listen, emit } from "@tauri-apps/api/event";
 import TFTree from "./components/TFTree";
+import RosGraphExplorer from "./components/RosGraphExplorer";
+import type { RosGraphSnapshot } from "./components/RosGraphExplorer";
 import Settings from "./components/Settings";
 import NewProjectModal from "./components/NewProjectModal";
 import {
@@ -55,10 +57,12 @@ interface RosPackageInfo {
   path: string;
   package_type: string;
   version: string | null;
+  description: string | null;
   dependencies: string[];
   executables: string[];
   launch_files: string[];
   config_files: string[];
+  metadata_error: string | null;
 }
 
 interface LogEvent {
@@ -280,8 +284,17 @@ function App() {
   const [rosEvents, setRosEvents] = useState<string[]>([]);
   const [rosConnected, setRosConnected] = useState(false);
   const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
+  const [rosGraph, setRosGraph] = useState<RosGraphSnapshot | null>(null);
   const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
   const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
+  const [rosPackageFilter, setRosPackageFilter] = useState("");
+  const [expandedRosPackage, setExpandedRosPackage] = useState<string | null>(
+    null,
+  );
+  const [rosPackageContentsError, setRosPackageContentsError] = useState<
+    string | null
+  >(null);
+  const rosPackagesRequest = useRef(0);
   const [initializing, setInitializing] = useState(false);
   const [safetyState, setSafetyState] = useState<
     "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
@@ -330,6 +343,21 @@ function App() {
         ]
       : []),
   ];
+  const filteredRosPackages = rosPackages.filter((pkg) => {
+    const filter = rosPackageFilter.trim().toLocaleLowerCase();
+    return (
+      !filter ||
+      [
+        pkg.name,
+        pkg.description ?? "",
+        pkg.package_type,
+        ...pkg.dependencies,
+      ]
+        .join(" ")
+        .toLocaleLowerCase()
+        .includes(filter)
+    );
+  });
 
   // --- AI chat ---
   const [chatInput, setChatInput] = useState("");
@@ -561,28 +589,55 @@ function App() {
   };
 
   // ---------- ROS workspace selection ----------
-  const refreshRosPackages = useCallback(async () => {
-    if (!rosWorkspacePath) {
-      setRosPackages([]);
+  const refreshRosPackages = useCallback(
+    async (allowUninitializedWorkspace = false) => {
+      const requestId = ++rosPackagesRequest.current;
+      if (!rosWorkspacePath && !allowUninitializedWorkspace) {
+        setRosPackagesLoading(false);
+        setRosPackages([]);
+        setRosPackagesError(null);
+        return;
+      }
+      setRosPackagesLoading(true);
       setRosPackagesError(null);
-      return;
-    }
-    setRosPackagesLoading(true);
-    setRosPackagesError(null);
-    try {
-      const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
-      setRosPackages(packages);
-    } catch (error) {
-      setRosPackages([]);
-      setRosPackagesError(String(error));
-    } finally {
-      setRosPackagesLoading(false);
-    }
-  }, [rosWorkspacePath]);
+      try {
+        const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
+        if (requestId === rosPackagesRequest.current) {
+          setRosPackages(packages);
+        }
+      } catch (error) {
+        if (requestId === rosPackagesRequest.current) {
+          setRosPackages([]);
+          setRosPackagesError(String(error));
+        }
+      } finally {
+        if (requestId === rosPackagesRequest.current) {
+          setRosPackagesLoading(false);
+        }
+      }
+    },
+    [rosWorkspacePath],
+  );
 
   useEffect(() => {
     void refreshRosPackages();
   }, [refreshRosPackages]);
+
+  const inspectRosPackage = async (path: string) => {
+    if (expandedRosPackage === path) {
+      setExpandedRosPackage(null);
+      setRosPackageContentsError(null);
+      return;
+    }
+    setExpandedRosPackage(path);
+    setRosPackageContentsError(null);
+    try {
+      const contents = await invoke<FileEntry[]>("list_dir", { path });
+      setChildrenByPath((previous) => ({ ...previous, [path]: contents }));
+    } catch (error) {
+      setRosPackageContentsError(String(error));
+    }
+  };
 
   const pickRosWorkspace = async () => {
     try {
@@ -618,6 +673,7 @@ function App() {
     setActiveTab("build");
     try {
       await invoke("run_colcon_build_streaming");
+      await refreshRosPackages();
     } catch (error) {
       setBuilding(false);
       setBuildOutput((prev) => appendLog(prev, `ERROR: ${String(error)}`));
@@ -639,6 +695,7 @@ function App() {
     setCurrentSetupLine("Starting...");
     try {
       await invoke("initialize_ros_environment");
+      await refreshRosPackages(true);
     } catch (err) {
       setSetupOutput((prev) => appendLog(prev, `❌ ${err}`));
       setCurrentSetupLine(`❌ ${err}`);
@@ -895,6 +952,7 @@ function App() {
     const unlistenError = listen<string>("ros-error", (event) => {
       console.error("ROS error:", event.payload);
       setRosConnected(false);
+      setRosGraph(null);
       setSafetyState((state) =>
         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
       );
@@ -902,6 +960,7 @@ function App() {
 
     const unlistenAuthError = listen<string>("ros-auth-error", (event) => {
       setRosConnected(false);
+      setRosGraph(null);
       setSafetyState((state) =>
         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
       );
@@ -917,6 +976,7 @@ function App() {
 
     const unlistenConnecting = listen<void>("ros-connecting", () => {
       setRosConnected(false);
+      setRosGraph(null);
       setSafetyState((state) =>
         state === "ACTIVE" || state === "FAULT" ? state : "DISCONNECTED",
       );
@@ -953,6 +1013,10 @@ function App() {
     }>("event-recovery", (event) => {
       setEventRecovery(event.payload);
     });
+    const unlistenRosGraph = listen<RosGraphSnapshot>(
+      "ros-graph-snapshot",
+      (event) => setRosGraph(event.payload),
+    );
 
     const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
       const { kind, text } = event.payload;
@@ -994,6 +1058,7 @@ function App() {
       unlistenSafety.then((f) => f());
       unlistenEventHealth.then((f) => f());
       unlistenEventRecovery.then((f) => f());
+      unlistenRosGraph.then((f) => f());
       unlistenBuildOutput.then((f) => f());
       unlistenBuildError.then((f) => f());
       unlistenBuildFinished.then((f) => f());
@@ -1436,15 +1501,43 @@ function App() {
 
               {activityView === "ros" && (
                 <div style={{ padding: "4px 14px", fontSize: 12 }}>
-                  <div style={{ opacity: 0.7, marginBottom: 6 }}>
-                    Workspace:{" "}
-                    <span
-                      style={{
-                        color: rosWorkspacePath ? "#7cd992" : "#e08080",
-                      }}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      marginBottom: 8,
+                    }}
+                  >
+                    <div style={{ opacity: 0.7, flex: 1, minWidth: 0 }}>
+                      Workspace:{" "}
+                      <span
+                        title={rosWorkspacePath ?? undefined}
+                        style={{
+                          color: rosWorkspacePath ? "#7cd992" : "#e08080",
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {rosWorkspacePath ? "selected" : "not set"}
+                      </span>
+                    </div>
+                    <button
+                      className="ide-btn"
+                      type="button"
+                      onClick={() => void refreshRosPackages()}
+                      disabled={rosPackagesLoading || !rosWorkspacePath}
+                      aria-label="Refresh ROS packages"
+                      title="Refresh ROS packages"
                     >
-                      {rosWorkspacePath ? "set" : "not set"}
-                    </span>
+                      <RotateCw
+                        size={13}
+                        style={{
+                          animation: rosPackagesLoading
+                            ? "spin 1s linear infinite"
+                            : undefined,
+                        }}
+                      />
+                    </button>
                   </div>
 
                   {rosPackagesLoading && (
@@ -1471,21 +1564,47 @@ function App() {
                     !rosPackagesError &&
                     rosPackages.length === 0 && (
                       <div style={{ opacity: 0.6 }}>
-                        No ROS packages discovered in the active environment.
+                        No packages found in the selected workspace. Build the
+                        workspace after adding packages, then refresh.
                       </div>
                     )}
 
                   {!rosPackagesLoading &&
                     !rosPackagesError &&
                     rosPackages.length > 0 && (
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 8,
-                        }}
-                      >
-                        {rosPackages.map((pkg) => (
+                      <>
+                        <input
+                          type="search"
+                          aria-label="Filter ROS packages"
+                          value={rosPackageFilter}
+                          onChange={(event) =>
+                            setRosPackageFilter(event.target.value)
+                          }
+                          placeholder="Filter packages..."
+                          style={{
+                            boxSizing: "border-box",
+                            width: "100%",
+                            marginBottom: 8,
+                            padding: "6px 8px",
+                            color: "#ddd",
+                            background: "#1e1e1e",
+                            border: "1px solid #444",
+                            borderRadius: 4,
+                          }}
+                        />
+                        {filteredRosPackages.length === 0 ? (
+                          <div style={{ opacity: 0.6 }}>
+                            No packages match this filter.
+                          </div>
+                        ) : (
+                          <div
+                            style={{
+                              display: "flex",
+                              flexDirection: "column",
+                              gap: 8,
+                            }}
+                          >
+                            {filteredRosPackages.map((pkg) => (
                           <div
                             key={pkg.name}
                             style={{
@@ -1504,6 +1623,17 @@ function App() {
                             >
                               {pkg.name}
                             </div>
+                            {pkg.description && (
+                              <div
+                                style={{
+                                  opacity: 0.75,
+                                  marginBottom: 4,
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                {pkg.description}
+                              </div>
+                            )}
                             <div
                               style={{
                                 opacity: 0.7,
@@ -1543,6 +1673,19 @@ function App() {
                                 </span>
                               )}
                             </div>
+                            {pkg.metadata_error && (
+                              <div
+                                role="status"
+                                style={{
+                                  color: "#e0b060",
+                                  marginTop: 6,
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                Package metadata is incomplete:{" "}
+                                {pkg.metadata_error}
+                              </div>
+                            )}
                             {pkg.dependencies.length > 0 && (
                               <div style={{ marginTop: 6 }}>
                                 <div style={{ opacity: 0.6, marginBottom: 2 }}>
@@ -1598,10 +1741,59 @@ function App() {
                                 )}
                               </div>
                             )}
+                            <button
+                              className="ide-btn"
+                              type="button"
+                              aria-expanded={expandedRosPackage === pkg.path}
+                              onClick={() => void inspectRosPackage(pkg.path)}
+                              style={{ marginTop: 8 }}
+                            >
+                              {expandedRosPackage === pkg.path
+                                ? "Hide contents"
+                                : "Inspect contents"}
+                            </button>
+                            {expandedRosPackage === pkg.path &&
+                              rosPackageContentsError && (
+                                <div
+                                  role="alert"
+                                  style={{
+                                    color: "#f0a3a3",
+                                    marginTop: 6,
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  Could not inspect package:{" "}
+                                  {rosPackageContentsError}
+                                </div>
+                              )}
+                            {expandedRosPackage === pkg.path &&
+                              childrenByPath[pkg.path] && (
+                                <div style={{ marginTop: 6 }}>
+                                  <FileTree
+                                    entries={childrenByPath[pkg.path]}
+                                    depth={0}
+                                    expandedPaths={expandedPaths}
+                                    childrenByPath={childrenByPath}
+                                    activeFilePath={activeFilePath}
+                                    onToggleFolder={toggleFolder}
+                                    onOpenFile={(path, name) => {
+                                      void openFile(path, name).catch(
+                                        (error) =>
+                                          setRosPackageContentsError(
+                                            String(error),
+                                          ),
+                                      );
+                                    }}
+                                  />
+                                </div>
+                              )}
                           </div>
-                        ))}
-                      </div>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
+                  <RosGraphExplorer graph={rosGraph} connected={rosConnected} />
                 </div>
               )}
             </div>
@@ -2240,7 +2432,13 @@ function App() {
               {activeTab === "sim" && (
                 <div style={{ height: "100%", display: "flex" }}>
                   <div style={{ flex: 1 }}>
-                    <RobotView />
+                    <RobotView
+                      descriptionContent={
+                        activeFile?.name.toLowerCase().endsWith(".urdf")
+                          ? activeFile.content
+                          : null
+                      }
+                    />
                   </div>
                   <div style={{ width: 200, borderLeft: "1px solid #333" }}>
                     <RobotControls

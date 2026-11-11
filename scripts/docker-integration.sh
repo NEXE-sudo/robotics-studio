@@ -67,6 +67,30 @@ docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
 
 cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
 printf 'workspace-mount-ok\n' > "$workspace/mount-check"
+mkdir -p "$workspace/worlds"
+printf '<sdf version="1.9"><world name="invalid"><model name="bad"><link name="bad"><visual name="bad"><geometry><box><size>1</size></box></geometry></visual></link></model></world></sdf>\n' \
+  > "$workspace/worlds/invalid-schema.sdf"
+package_dir="$workspace/src/robotics_studio_integration_fixture"
+mkdir -p "$package_dir/launch" "$package_dir/config"
+cat > "$package_dir/package.xml" <<'XML'
+<package format="3">
+  <name>robotics_studio_integration_fixture</name>
+  <version>1.0.0</version>
+  <description>Temporary package discovery integration fixture</description>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>rclpy</depend>
+</package>
+XML
+printf '<launch/>\n' > "$package_dir/launch/start.launch.xml"
+printf 'enabled: true\n' > "$package_dir/config/settings.yaml"
+mkdir -p "$workspace/install/lib/robotics_studio_integration_fixture"
+printf '#!/bin/sh\n' > "$workspace/install/lib/robotics_studio_integration_fixture/fixture_node"
+chmod +x "$workspace/install/lib/robotics_studio_integration_fixture/fixture_node"
+mkdir -p "$workspace/other_workspace/src/not_selected"
+printf '<package><name>not_selected</name></package>\n' \
+  > "$workspace/other_workspace/src/not_selected/package.xml"
+mkdir -p "$workspace/src/malformed_fixture"
+printf '<package>\n' > "$workspace/src/malformed_fixture/package.xml"
 container_may_exist=1
 docker run -d \
   --name "$container" \
@@ -84,6 +108,32 @@ docker cp "$repo_root/src-tauri/resources/devcontainer/server_core.py" \
   "$container:/opt/robotics-studio/server_core.py" >/dev/null
 docker cp "$repo_root/src-tauri/resources/devcontainer/proto/ros_engine.proto" \
   "$container:/opt/robotics-studio/proto/ros_engine.proto" >/dev/null
+
+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
+import sys
+
+sys.path.insert(0, "/opt/robotics-studio")
+from server_core import discover_workspace_packages
+
+packages = {
+    package["name"]: package
+    for package in discover_workspace_packages("/workspace")
+}
+assert set(packages) == {
+    "malformed_fixture",
+    "robotics_studio_integration_fixture",
+}, sorted(packages)
+fixture = packages["robotics_studio_integration_fixture"]
+assert fixture["package_type"] == "ament_cmake"
+assert fixture["version"] == "1.0.0"
+assert fixture["description"] == "Temporary package discovery integration fixture"
+assert fixture["dependencies"] == ["ament_cmake", "rclpy"]
+assert fixture["executables"] == ["fixture_node"]
+assert fixture["launch_files"] == ["launch/start.launch.xml"]
+assert fixture["config_files"] == ["config/settings.yaml"]
+assert packages["malformed_fixture"]["metadata_error"]
+print("Selected-workspace ROS package discovery passed")
+PY
 
 docker exec "$container" bash -lc \
   'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
@@ -138,7 +188,161 @@ start_ros_server() {
 }
 
 test "$(docker exec "$container" cat /workspace/mount-check)" = workspace-mount-ok
+docker exec "$container" bash -lc \
+  'source /opt/ros/jazzy/setup.bash && gz sdf --check /workspace/diff_drive.sdf'
+if docker exec "$container" bash -lc \
+  'source /opt/ros/jazzy/setup.bash && gz sdf --check /workspace/worlds/invalid-schema.sdf' \
+  >/dev/null 2>&1; then
+  echo "Gazebo accepted an invalid SDF world" >&2
+  exit 1
+fi
+echo "SDFormat schema validation accepted the valid world and rejected invalid geometry"
 start_ros_server
+
+docker exec -i "$container" bash -lc \
+  'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && python3 -' <<'PY'
+import sys
+import time
+
+sys.path.insert(0, "/opt/robotics-studio/generated")
+import grpc
+import rclpy
+import ros_engine_pb2 as pb
+import ros_engine_pb2_grpc as rpc
+from action_tutorials_interfaces.action import Fibonacci
+from geometry_msgs.msg import TransformStamped
+from rclpy.action import ActionClient, ActionServer
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from sensor_msgs.msg import JointState
+from std_srvs.srv import Trigger
+from tf2_msgs.msg import TFMessage
+
+certificate = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
+token = open("/run/robotics-studio/grpc-auth.json", encoding="utf-8").read()
+import json
+
+metadata = (("x-robotics-studio-token", json.loads(token)["token"]),)
+stub = rpc.RosEngineStub(
+    grpc.secure_channel(
+        "127.0.0.1:50051",
+        grpc.ssl_channel_credentials(root_certificates=certificate),
+    )
+)
+events = stub.ReplayEvents(
+    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
+    metadata=metadata,
+    timeout=10,
+)
+
+rclpy.init()
+node = rclpy.create_node("robotics_studio_tf_integration")
+service = node.create_service(
+    Trigger,
+    "/integration/echo",
+    lambda request, response: response,
+)
+service_client = node.create_client(Trigger, "/integration/echo")
+action_server = ActionServer(
+    node,
+    Fibonacci,
+    "/integration/fibonacci",
+    lambda goal_handle: Fibonacci.Result(),
+)
+action_client = ActionClient(node, Fibonacci, "/integration/fibonacci")
+publisher = node.create_publisher(
+    TFMessage,
+    "/tf_static",
+    QoSProfile(
+        depth=10,
+        reliability=ReliabilityPolicy.RELIABLE,
+        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+    ),
+)
+joint_state_publisher = node.create_publisher(JointState, "/joint_states", 10)
+deadline = time.monotonic() + 8
+while (
+    publisher.get_subscription_count() == 0
+    or joint_state_publisher.get_subscription_count() == 0
+) and time.monotonic() < deadline:
+    rclpy.spin_once(node, timeout_sec=0.1)
+assert publisher.get_subscription_count() > 0, "ROS service did not subscribe to /tf_static"
+assert (
+    joint_state_publisher.get_subscription_count() > 0
+), "ROS service did not subscribe to /joint_states"
+
+transform = TransformStamped()
+transform.header.frame_id = "map"
+transform.child_frame_id = "integration_base"
+transform.transform.translation.x = 0.25
+transform.transform.rotation.w = 1.0
+publisher.publish(TFMessage(transforms=[transform]))
+joint_state = JointState()
+joint_state.name = ["integration_joint"]
+joint_state.position = [0.5]
+joint_state_publisher.publish(joint_state)
+
+tf_verified = False
+graph_verified = False
+joint_state_verified = False
+for event in events:
+    event_type = event.WhichOneof("event")
+    if event_type == "tf_update":
+        assert event.tf_update.parent_frame == "map"
+        assert event.tf_update.child_frame == "integration_base"
+        assert event.tf_update.topic_name == "/tf_static"
+        assert abs(event.tf_update.x - 0.25) < 1e-9
+        tf_verified = True
+    elif event_type == "joint_state_update":
+        joint_state_verified = (
+            event.joint_state_update.topic_name == "/joint_states"
+            and event.joint_state_update.names == ["integration_joint"]
+            and list(event.joint_state_update.positions) == [0.5]
+        )
+    elif event_type == "ros_graph_snapshot":
+        graph = event.ros_graph_snapshot
+        tf_topic = next(
+            (topic for topic in graph.topics if topic.name == "/tf_static"),
+            None,
+        )
+        service_info = next(
+            (service for service in graph.services if service.name == "/integration/echo"),
+            None,
+        )
+        action_info = next(
+            (action for action in graph.actions if action.name == "/integration/fibonacci"),
+            None,
+        )
+        if tf_topic and service_info and action_info:
+            graph_verified = (
+                any(
+                endpoint.node_name == "robotics_studio_tf_integration"
+                and endpoint.reliability == "RELIABLE"
+                and endpoint.durability == "TRANSIENT_LOCAL"
+                for endpoint in tf_topic.publishers
+                )
+                and "/robotics_studio_tf_integration" in service_info.server_nodes
+                and "/robotics_studio_tf_integration" in service_info.client_nodes
+                and action_info.types
+                == ["action_tutorials_interfaces/action/Fibonacci"]
+                and "/robotics_studio_tf_integration" in action_info.server_nodes
+                and "/robotics_studio_tf_integration" in action_info.client_nodes
+            )
+    if tf_verified and graph_verified and joint_state_verified:
+        break
+else:
+    raise AssertionError(
+        "ROS service did not stream TF, joint-state, and graph details"
+    )
+if not graph_verified:
+    raise AssertionError("ROS graph snapshot omitted the /tf_static publisher endpoint")
+if not joint_state_verified:
+    raise AssertionError("ROS service did not stream the joint-state update")
+
+events.cancel()
+node.destroy_node()
+rclpy.shutdown()
+print("Live ROS TF, joint-state, and graph endpoint discovery passed")
+PY
 
 ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
 ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
