@@ -1,18 +1,26 @@
 # Complete Git Diff
 
-Base: `83e88f6` on `main`; generated from the current uncommitted worktree.
-Includes tracked changes and the new architecture, integration-script, and release-readiness files. Excludes this file and the read-only `COMPLETE_GIT_DIFF.md` snapshot.
+Base: `83e88f6` on `main`; generated from the current worktree.
+Includes tracked changes and the architecture, integration-script, and release-readiness files. Excludes this file and the read-only `COMPLETE_GIT_DIFF.md` snapshot.
 
-Validation summary: Rust fmt/check/tests/strict Clippy passed (32 tests, 1 ignored); Python 36 tests passed; frontend build and npm audit passed; cargo audit found 0 vulnerabilities and 13 allowed warnings; Docker ROS/Gazebo integration passed.
+Validation summary: Rust fmt/check/tests/strict Clippy passed (32 tests, 1 ignored); Python 36 tests passed; frontend build and npm audit passed; cargo audit found 0 vulnerabilities and 13 allowed warnings; Docker ROS/Gazebo integration and temporary-directory cleanup passed (shell syntax valid, integration exit code 0, no temporary directory or container left behind).
 
 ## Full diff
 
 ````diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
-index 3363c0f..ae811fb 100644
+index 3363c0f..d6fe722 100644
 --- a/.github/workflows/ci.yml
 +++ b/.github/workflows/ci.yml
-@@ -40,10 +40,14 @@ jobs:
+@@ -31,6 +31,7 @@ jobs:
+             build-essential \
+             curl \
+             file \
++            protobuf-compiler \
+             libayatana-appindicator3-dev \
+             libxdo-dev \
+             libssl-dev \
+@@ -40,10 +41,14 @@ jobs:
        - uses: dtolnay/rust-toolchain@stable
          with:
            components: clippy
@@ -27,7 +35,7 @@ index 3363c0f..ae811fb 100644
  
    python:
      name: Python service-core tests
-@@ -54,4 +58,4 @@ jobs:
+@@ -54,4 +59,4 @@ jobs:
          with:
            python-version: "3.12"
        - run: python -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
@@ -304,6 +312,525 @@ index c5c7fca..029ab36 100644
  ---
  
  ## If something breaks
+diff --git a/RELEASE_READINESS.md b/RELEASE_READINESS.md
+new file mode 100644
+index 0000000..feee44c
+--- /dev/null
++++ b/RELEASE_READINESS.md
+@@ -0,0 +1,111 @@
++# Robotics Studio v0.3.0 Release Readiness
++
++## Decision
++
++**Not ready for release.** The current worktree has meaningful security,
++recovery, and simulator-integration improvements, and the local validation
++listed below passes. The product still lacks several core workflows named in
++the v0.3.0 scope, and cross-platform desktop/CI validation is incomplete.
++
++The checkout is on `main` at `83e88f6` with uncommitted changes. No commit,
++push, tag, or release was created.
++
++## Scope checklist
++
++| # | Area | Status | Evidence and remaining work |
++|---|---|---|---|
++| 1 | gRPC authentication and transport | Pass (local) | Bearer-token requests use TLS with a client-pinned CA; the Docker integration rejects unauthenticated calls and accepts authenticated calls. |
++| 2 | Trusted ROS service installation | Pass (local) | The runtime service and generated protobufs are installed outside the writable workspace mount. Workspace migration compares complete file bytes and uses approved-root operations. |
++| 3 | Workspace filesystem boundaries | Partial | Unix descriptor-rooted reads, writes, imports, and template copies reject symlink escapes. Windows does not yet have equivalent resistance to parent-directory races. |
++| 4 | Dependency security | Partial | `cargo audit` and `npm audit` report zero vulnerabilities. RustSec still reports 13 allowed unmaintained/unsound dependency warnings; see below. |
++| 5 | Critical ROS event recovery | Partial | Critical lifecycle and safety records survive service restart and replay with sequence/gap metadata. Telemetry is best-effort, and the UI does not acknowledge delivery; end-to-end exactly-once delivery is not provided. |
++| 6 | Motion bounds and emergency stop | Partial | The backend enforces conservative per-topic motion limits and a software stop latch. This is not a physical or safety-rated emergency-stop system. |
++| 7 | Workspace selection and isolation | Partial | The backend persists and revalidates the selected workspace. Workspace propagation and cross-platform isolation have not been verified across every operation. |
++| 8 | Build process control | Partial | `colcon build` has a dedicated cancellation path. There is no centralized process registry, general timeout policy, or unified status model. |
++| 9 | Container and desktop lifecycle | Partial | A manual ROS 2 Jazzy/Gazebo Harmonic container integration passes. The packaged desktop app's full startup, shutdown, and supported-platform lifecycle has not been verified. |
++| 10 | ROS node discovery | Partial | Node snapshots are available; a complete graph explorer and detailed endpoint state are not implemented. |
++| 11 | ROS topic discovery | Partial | Topic snapshots and tested ROS-Gazebo bridges are available; detailed publisher/subscriber endpoint and QoS exploration is incomplete. |
++| 12 | ROS service exploration | Not implemented | The UI does not enumerate or inspect ROS services. |
++| 13 | ROS action exploration | Not implemented | The UI does not enumerate or inspect ROS actions. |
++| 14 | TF hierarchy validation | Partial | TF edges are displayed, but a complete validated hierarchy is not maintained. |
++| 15 | TF stale-frame and cycle handling | Not implemented | Stale-frame expiry and cycle detection are absent. |
++| 16 | Robot visualization fidelity | Partial | The 3D view uses placeholder geometry rather than a model derived from the robot description. |
++| 17 | URDF parsing | Not implemented | Robot descriptions are not parsed for visualization. |
++| 18 | Xacro processing | Not implemented | Xacro expansion is not implemented. |
++| 19 | SDF document validation | Partial | XML structure, SDF root/world presence, supported declared versions, and DTD rejection are checked; full SDFormat schema validation is absent. |
++| 20 | Model and mesh resource resolution | Not implemented | External model/mesh references are not comprehensively resolved or validated. |
++| 21 | Frontend and desktop UX test coverage | Not ready | The frontend type-check/build passes, but automated frontend/UI behavior tests and accessibility review were not run. |
++| 22 | Cross-platform release and CI verification | Not ready | The local Docker integration passes, but the hosted workflow, Windows/Linux desktop runtime, and packaged release artifacts have not been validated. |
++
++## Security review and remediation
++
++Three security issues were addressed during this work:
++
++1. **High — workspace marker spoofing.** A marker substring in a workspace
++   service file was previously accepted as evidence that the file was trusted.
++   Migration now compares the complete contents against bundled files; the
++   service actually runs from the application-installed container directory.
++2. **High — bearer token over plaintext gRPC.** A local process could
++   impersonate the service and capture the token. The client now establishes
++   TLS and validates the server against the CA certificate obtained through
++   Docker's control channel before sending authenticated requests.
++3. **Medium (local filesystem boundary) — symlinked destination during resource
++   copy.** Recursive copies could follow a workspace directory symlink and
++   write outside the approved root. Copies and service migration now use
++   approved-root operations; regression tests cover symlinked directories.
++
++The review did not establish additional exploitable issues in the event
++journal, motion validation, or the descriptor-rooted Unix file operations.
++That is not a substitute for platform-specific testing. Docker control and
++code running with container privileges remain inside the trusted boundary.
++
++## Dependency audit residuals
++
++`cargo audit` found **zero vulnerabilities** and 13 allowed warnings:
++
++| Warning group | Advisory IDs | Notes |
++|---|---|---|
++| `proc-macro-error 1.0.4` | `RUSTSEC-2024-0370` | Unmaintained; no fixed upgrade available. |
++| `unic-* 0.9.0` family | `RUSTSEC-2025-0075`, `-0080`, `-0081`, `-0098`, `-0100` | Unmaintained transitive URL-pattern dependencies; no fixed upgrade available. |
++| `zbus_names`, `zvariant`, `zvariant_derive` | `RUSTSEC-2026-0370`, `-0371`, `-0372` | Unmaintained transitive crates. Some older lockfile entries are not on an active dependency path; newer entries remain in the Tauri dependency tree. |
++| `glib 0.18.5` | `RUSTSEC-2024-0429` | Unsoundness advisory; the suggested GLib 0.20+ upgrade is blocked by the current GTK/Tauri dependency chain. |
++
++The advisories above did not provide CVSS scores in the audit output. These
++warnings are disclosed rather than suppressed.
++
++## Validation performed
++
++All commands below were run against the current worktree:
++
++| Check | Result |
++|---|---|
++| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass |
++| `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass |
++| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 32 passed, 1 ignored (the ignored test requires the live service). |
++| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings` | Pass |
++| `python3 -B -m unittest test_server_core` from `src-tauri/resources/devcontainer` | Pass: 36 tests. |
++| `npm run build` | Pass; Vite reports the existing ~811 kB JavaScript chunk-size warning. |
++| `npm audit --audit-level=moderate` | Pass: 0 vulnerabilities. |
++| `cargo audit` from `src-tauri` | Pass: 0 vulnerabilities, 13 allowed warnings. |
++| `scripts/docker-integration.sh` | Pass: pinned TLS/auth, safety latch/reset, event replay after restart, Gazebo world readiness/reset, and ROS-Gazebo topic bridge. No robot motion was commanded. |
++| `git diff --check`, protocol-copy comparison, script syntax check | Pass. |
++
++The Docker integration is a manually run container harness, not a desktop UI
++test or hosted CI run. Its successful result does not establish support for all
++target operating systems or physical robot safety.
++
++## Release blockers
++
++- Implement or explicitly defer full ROS package, service, and action
++  exploration.
++- Add a centralized process lifecycle/status/timeout model and verify shutdown
++  and cancellation in the managed desktop runtime.
++- Complete TF hierarchy validation and stale/cycle handling.
++- Implement description-based robot rendering, including a declared URDF,
++  Xacro, and mesh-resource support boundary.
++- Decide whether SDF import requires full schema and external-resource
++  validation; implement it or clearly constrain supported input.
++- Complete Windows/Linux runtime and filesystem testing, frontend behavior
++  tests, and hosted CI validation.
++- Reassess the disclosed RustSec warnings when compatible upstream dependency
++  upgrades are available.
+diff --git a/docs/architecture.md b/docs/architecture.md
+new file mode 100644
+index 0000000..b1dbb22
+--- /dev/null
++++ b/docs/architecture.md
+@@ -0,0 +1,107 @@
++# Architecture and trust boundaries
++
++## Components
++
++Robotics Studio is a Tauri desktop application. The React frontend invokes
++commands in the native Rust backend; it does not connect directly to Docker or
++ROS. The backend manages a ROS 2 Jazzy container based on the bundled
++`osrf/ros:jazzy-desktop` image, which installs Gazebo Harmonic and
++`ros_gz_bridge`.
++
++The selected ROS workspace is bind-mounted at `/workspace`. It is distinct
++from the folder currently open in the editor. Switching the selected workspace
++stops that workspace's running managed container before persisting the new
++selection.
++
++The ROS service source and generated protobuf modules run from
++`/opt/robotics-studio` inside the container, outside the writable workspace
++mount. The service persists its event journal, safety state, robot limits, and
++workspace data under `/workspace/.robotics-studio`.
++
++## gRPC trust model
++
++The container publishes gRPC on host loopback only. At initialization, the
++backend provisions a per-container certificate authority and a server
++certificate with a loopback subject alternative name. It retrieves only the
++public CA certificate through Docker's control channel and configures the Rust
++gRPC client to trust that certificate. The client sends its random, expiring
++bearer token only after establishing TLS. The token is stored in protected
++files and is not exposed to frontend JavaScript.
++
++This protects against an unrelated local process impersonating the service on
++the loopback port. A user with Docker control, or code running with the
++container's privileges, remains inside the trusted computing boundary.
++
++## Motion and safety
++
++Motion requests are checked in both the Rust command path and the Python ROS
++service. The service enforces topic-specific velocity, acceleration, mode,
++freshness, lease, and timeout limits. A server-side safety controller serializes
++motion publication with emergency-stop transitions. A latched stop blocks
++motion until an explicit reset; restored latches are reasserted on startup.
++
++The software stop publishes zero velocity messages to discovered command
++topics. It cannot stop arbitrary controllers, guarantee physical braking, or
++replace a safety-rated controller or physical emergency-stop circuit.
++
++## Events and recovery
++
++The event hub prioritizes critical events over coalesced telemetry. Selected
++node lifecycle and safety events are durably journaled, with a bound of 256
++records and 4 MiB. Sequence numbers are durable for journaled critical events;
++telemetry and periodic snapshots are best-effort and do not consume those
++sequence numbers. Replay subscribes to live delivery atomically with its
++snapshot to avoid a replay/live handoff gap.
++
++Replay is cursor-based and reports when history has expired. The client
++resynchronizes from available snapshots after a gap. The UI does not
++acknowledge event application, so the end-to-end frontend delivery contract is
++not exactly-once and must not be described as such.
++
++## Workspace and files
++
++Native file operations are scoped to roots selected through native pickers.
++On Unix, the principal read, write, listing, and import paths pin directory
++descriptors and reject symlink traversal. Windows uses canonical-path checks
++and atomic replacement but does not yet have equivalent protection from a
++local process racing parent-directory changes. Some template and project
++operations are not yet descriptor-rooted on every platform.
++
++An editor folder does not implicitly become the ROS workspace. ROS
++initialization, build, simulation, and world import use the selected workspace;
++other general file editing uses the separately approved editor folder.
++
++## Process and simulation lifecycle
++
++The `colcon build` operation has a dedicated process group and a cancellation
++path. Gazebo startup waits for a world control service before launching the
++bridge, and failed startup attempts trigger cleanup. Reset targets the active
++world's discovered control service rather than assuming a `default` world.
++
++Build, container, Gazebo, and bridge processes do not yet share a centralized
++process registry. General execution timeouts, unified status reporting,
++graceful application-shutdown cleanup, and platform-specific lifecycle
++coverage remain incomplete.
++
++## Supported ROS surface
++
++The current service streams node and topic snapshots, transform and odometry
++updates, safety state, and event-recovery metadata. It is not a full ROS graph
++explorer: detailed publisher/subscriber endpoints, services, and actions are
++not exposed. TF updates are visualized as received edges but are not yet
++validated as a complete hierarchy with stale-frame expiry and cycle detection.
++The 3D view uses placeholder geometry; URDF parsing, Xacro processing, mesh
++resource resolution, and description-based robot rendering are not implemented.
++
++SDF import checks XML well-formedness, an SDF root, a world element, supported
++declared versions, and rejects DTDs. It does not perform full SDFormat schema
++validation or resolve and validate all external model and mesh resources.
++
++## Validation boundary
++
++Run unit/build checks with the commands in the README. The live integration
++script `scripts/docker-integration.sh` builds the container image and exercises
++the real ROS service, pinned TLS, event replay after restart, Gazebo world
++readiness/reset, and ROS-Gazebo topic bridging. This does not substitute for
++testing the desktop UI on every target operating system or testing a physical
++robot.
+diff --git a/scripts/docker-integration.sh b/scripts/docker-integration.sh
+new file mode 100755
+index 0000000..43c78e0
+--- /dev/null
++++ b/scripts/docker-integration.sh
+@@ -0,0 +1,283 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++repo_root="$(cd "$(dirname "$0")/.." && pwd)"
++workspace="$(mktemp -d /tmp/robotics-studio-integration.XXXXXX)"
++container="robotics-studio-integration-$$"
++image="robotics-studio-ros2:integration"
++container_may_exist=0
++
++cleanup() {
++    local exit_code=$?
++    local container_removed=1
++    local workspace_removed=0
++    trap - EXIT
++
++    if [[ "$container_may_exist" == 1 ]]; then
++        if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
++            container_removed=0
++            echo "WARNING: Docker is unavailable; cannot confirm integration container removal: $container" >&2
++        elif ! docker rm -f "$container" >/dev/null 2>&1 &&
++            docker inspect "$container" >/dev/null 2>&1; then
++            container_removed=0
++            echo "WARNING: Could not stop and remove integration container: $container" >&2
++        fi
++    fi
++
++    if [[ "$container_removed" == 1 && -d "$workspace" ]]; then
++        # The integration image runs as root and may create root-owned files
++        # in the bind-mounted workspace. Remove those only after its container
++        # has been stopped and removed.
++        if command -v docker >/dev/null 2>&1 &&
++            docker image inspect "$image" >/dev/null 2>&1 &&
++            docker run --rm --user 0:0 \
++                --mount "type=bind,source=$workspace,target=/cleanup" \
++                --entrypoint /bin/bash "$image" -c \
++                'find /cleanup -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
++                >/dev/null 2>&1 &&
++            rm -rf -- "$workspace" 2>/dev/null; then
++            workspace_removed=1
++        fi
++
++        if [[ "$workspace_removed" == 0 ]] && rm -rf -- "$workspace" 2>/dev/null; then
++            workspace_removed=1
++        fi
++
++        if [[ "$workspace_removed" == 0 ]] &&
++            command -v sudo >/dev/null 2>&1 &&
++            sudo -n true >/dev/null 2>&1 &&
++            sudo -n rm -rf -- "$workspace" 2>/dev/null; then
++            workspace_removed=1
++        fi
++
++        if [[ -e "$workspace" ]]; then
++            echo "WARNING: Could not completely remove temporary directory: $workspace" >&2
++        fi
++    elif [[ "$container_removed" == 0 ]]; then
++        echo "WARNING: Leaving bind-mounted temporary directory in place because the container may still exist: $workspace" >&2
++    fi
++
++    exit "$exit_code"
++}
++
++trap cleanup EXIT
++
++docker info >/dev/null
++docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
++
++cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
++printf 'workspace-mount-ok\n' > "$workspace/mount-check"
++container_may_exist=1
++docker run -d \
++  --name "$container" \
++  -p 127.0.0.1:50051:50051 \
++  -v "$workspace:/workspace" \
++  "$image" tail -f /dev/null >/dev/null
++
++docker exec "$container" mkdir -p \
++  /opt/robotics-studio/proto \
++  /opt/robotics-studio/generated \
++  /run/robotics-studio
++docker cp "$repo_root/src-tauri/resources/devcontainer/server.py" \
++  "$container:/opt/robotics-studio/server.py" >/dev/null
++docker cp "$repo_root/src-tauri/resources/devcontainer/server_core.py" \
++  "$container:/opt/robotics-studio/server_core.py" >/dev/null
++docker cp "$repo_root/src-tauri/resources/devcontainer/proto/ros_engine.proto" \
++  "$container:/opt/robotics-studio/proto/ros_engine.proto" >/dev/null
++
++docker exec "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
++
++docker exec "$container" bash -lc '
++  set -eu
++  chmod 700 /run/robotics-studio
++  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
++    -keyout /run/robotics-studio/grpc-ca.key \
++    -out /run/robotics-studio/grpc-ca.crt \
++    -subj "/CN=Robotics Studio local gRPC CA" \
++    -addext "basicConstraints=critical,CA:TRUE" \
++    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
++  openssl req -new -newkey rsa:2048 -nodes \
++    -keyout /run/robotics-studio/grpc-server.key \
++    -out /run/robotics-studio/grpc-server.csr \
++    -subj "/CN=127.0.0.1" >/dev/null 2>&1
++  printf "%s\n" \
++    "basicConstraints=critical,CA:FALSE" \
++    "keyUsage=critical,digitalSignature,keyEncipherment" \
++    "extendedKeyUsage=serverAuth" \
++    "subjectAltName=IP:127.0.0.1,DNS:localhost" \
++    > /run/robotics-studio/grpc-server.ext
++  openssl x509 -req -in /run/robotics-studio/grpc-server.csr \
++    -CA /run/robotics-studio/grpc-ca.crt \
++    -CAkey /run/robotics-studio/grpc-ca.key -CAcreateserial \
++    -out /run/robotics-studio/grpc-server.crt -days 3650 -sha256 \
++    -extfile /run/robotics-studio/grpc-server.ext >/dev/null 2>&1
++  chmod 600 /run/robotics-studio/grpc-ca.key /run/robotics-studio/grpc-server.key
++  chmod 644 /run/robotics-studio/grpc-ca.crt /run/robotics-studio/grpc-server.crt
++'
++docker exec "$container" cat /run/robotics-studio/grpc-ca.crt > "$workspace/grpc-ca.crt"
++
++token="$(openssl rand -hex 32)"
++expires_at="$(python3 -c 'import time; print(int(time.time()) + 86400)')"
++printf '{"token":"%s","expires_at":%s}' "$token" "$expires_at" |
++  docker exec -i "$container" bash -c \
++    'cat > /run/robotics-studio/grpc-auth.json && chmod 600 /run/robotics-studio/grpc-auth.json'
++
++start_ros_server() {
++  docker exec -d "$container" bash -lc \
++    'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated exec python3 /opt/robotics-studio/server.py >/tmp/server.log 2>&1'
++  for attempt in $(seq 1 30); do
++    if docker exec "$container" bash -lc \
++      'grep -q "running on port 50051" /tmp/server.log' 2>/dev/null; then
++      return
++    fi
++    sleep 1
++  done
++  docker exec "$container" cat /tmp/server.log
++  return 1
++}
++
++test "$(docker exec "$container" cat /workspace/mount-check)" = workspace-mount-ok
++start_ros_server
++
++ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
++ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
++  cargo test --manifest-path "$repo_root/src-tauri/Cargo.toml" --locked -- \
++    --ignored --exact \
++    ros_docker_integration_tests::pinned_tls_client_authenticates_to_docker_ros_service
++
++docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
++import json
++import sys
++import time
++
++sys.path.insert(0, "/opt/robotics-studio/generated")
++import grpc
++import ros_engine_pb2 as pb
++import ros_engine_pb2_grpc as rpc
++
++certificate = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
++token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
++stub = rpc.RosEngineStub(
++    grpc.secure_channel(
++        "127.0.0.1:50051",
++        grpc.ssl_channel_credentials(root_certificates=certificate),
++    )
++)
++metadata = (("x-robotics-studio-token", token),)
++try:
++    stub.GetSafetyState(pb.Empty(), timeout=3)
++    raise AssertionError("unauthenticated request was accepted")
++except grpc.RpcError as error:
++    assert error.code() == grpc.StatusCode.UNAUTHENTICATED, error
++
++assert stub.GetSafetyState(pb.Empty(), metadata=metadata, timeout=3).state == pb.SafetyState.READY
++activated = stub.SetEmergencyStop(
++    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.ACTIVATE),
++    metadata=metadata,
++    timeout=3,
++)
++assert activated.state == pb.SafetyState.ACTIVE
++try:
++    stub.PublishTwist(
++        pb.TwistCommand(
++            topic_name="/audit/cmd_vel",
++            linear_x=0.1,
++            timestamp_ns=time.time_ns(),
++        ),
++        metadata=metadata,
++        timeout=3,
++    )
++    raise AssertionError("motion command was accepted while latched")
++except grpc.RpcError as error:
++    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT, error
++assert stub.SetEmergencyStop(
++    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.RESET),
++    metadata=metadata,
++    timeout=3,
++).state == pb.SafetyState.READY
++
++events = stub.ReplayEvents(
++    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
++    metadata=metadata,
++    timeout=5,
++)
++assert next(events).WhichOneof("event") == "event_recovery"
++assert next(events).WhichOneof("event") == "safety_state"
++events.cancel()
++print("Authenticated TLS, stop/reset enforcement and event replay passed")
++PY
++
++docker exec "$container" bash -lc \
++  "pkill -TERM -f '[p]ython3 /opt/robotics-studio/server.py' || true"
++start_ros_server
++docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
++import json
++import sys
++
++sys.path.insert(0, "/opt/robotics-studio/generated")
++import grpc
++import ros_engine_pb2 as pb
++import ros_engine_pb2_grpc as rpc
++
++root = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
++token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
++stub = rpc.RosEngineStub(
++    grpc.secure_channel(
++        "127.0.0.1:50051",
++        grpc.ssl_channel_credentials(root_certificates=root),
++    )
++)
++events = stub.ReplayEvents(
++    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
++    metadata=(("x-robotics-studio-token", token),),
++    timeout=5,
++)
++assert next(events).WhichOneof("event") == "event_recovery"
++event = next(events)
++assert event.WhichOneof("event") == "safety_state" and event.sequence > 0
++events.cancel()
++print("Critical safety history survived a ROS service restart")
++PY
++
++docker exec -d "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering /workspace/diff_drive.sdf >/tmp/gz.log 2>&1'
++world_services=""
++for attempt in $(seq 1 30); do
++  if world_services="$(docker exec "$container" bash -lc \
++    'source /opt/ros/jazzy/setup.bash && gz service -l' 2>/dev/null)" &&
++    printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
++    break
++  fi
++  sleep 1
++done
++if ! printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
++  docker exec "$container" cat /tmp/gz.log
++  echo "Gazebo did not advertise /world/diff_drive/control" >&2
++  exit 1
++fi
++world_control='/world/diff_drive/control'
++docker exec "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && gz topic -l' |
++  grep -F '/model/vehicle_blue' >/dev/null
++docker exec "$container" bash -c \
++  'source /opt/ros/jazzy/setup.bash && gz service -s "$1" --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean --timeout 2000 --req "reset: {all: true}"' \
++  robotics-studio-integration "$world_control"
++
++docker exec -d "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge /model/vehicle_blue/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist /model/vehicle_blue/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry /model/vehicle_blue/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V >/tmp/bridge.log 2>&1'
++for attempt in $(seq 1 20); do
++  if topics="$(docker exec "$container" bash -lc \
++    'source /opt/ros/jazzy/setup.bash && ros2 topic list' 2>/dev/null)" &&
++    printf '%s\n' "$topics" | grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null; then
++    break
++  fi
++  sleep 1
++done
++docker exec "$container" bash -lc \
++  'source /opt/ros/jazzy/setup.bash && ros2 topic list' |
++  grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null
++docker exec "$container" bash -lc \
++  "pkill -TERM -f '[g]z sim -s' || true; pkill -TERM -f '[p]arameter_bridge' || true"
++
++echo "Docker ROS 2 Jazzy and Gazebo Harmonic integration checks passed"
 diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
 index 2ff9ed2..0dbebe6 100644
 --- a/src-tauri/Cargo.lock
@@ -2483,7 +3010,7 @@ index 6793a06..92a2a81 100644
  if __name__ == "__main__":
      unittest.main()
 diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
-index 8fd1649..365fa7d 100644
+index 8fd1649..586a93c 100644
 --- a/src-tauri/src/lib.rs
 +++ b/src-tauri/src/lib.rs
 @@ -1,15 +1,18 @@
@@ -2894,8 +3421,8 @@ index 8fd1649..365fa7d 100644
 +        std::io::Write::write_all(&mut file, contents).map_err(|error| error.to_string())?;
 +        file.sync_all().map_err(|error| error.to_string())
 +    }
- }
- 
++}
++
 +#[cfg(unix)]
 +fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String> {
 +    let file = access.open_rooted_path(path, rustix::fs::OFlags::RDONLY)?;
@@ -2907,8 +3434,8 @@ index 8fd1649..365fa7d 100644
 +        return Err(format!("File exceeds the {MAX_FILE_SIZE}-byte limit"));
 +    }
 +    read_file_limited(file, MAX_FILE_SIZE)
-+}
-+
+ }
+ 
 +#[cfg(not(unix))]
  fn read_approved_file(access: &FsAccess, path: &Path) -> Result<String, String> {
      let path = access.resolve_existing(path)?;
@@ -3136,7 +3663,7 @@ index 8fd1649..365fa7d 100644
      Ok(Some(imported.to_string_lossy().into_owned()))
  }
  
-@@ -655,18 +1103,25 @@ pub fn run() {
+@@ -655,18 +1103,27 @@ pub fn run() {
              write_file,
              list_dir,
              pick_directory,
@@ -3148,6 +3675,8 @@ index 8fd1649..365fa7d 100644
              run_colcon_build,
              run_colcon_build_streaming,
 +            cancel_colcon_build,
++            list_managed_processes,
++            list_ros_packages,
              start_gazebo_sim,
              stop_gazebo_sim,
              reset_gazebo_sim,
@@ -3162,7 +3691,7 @@ index 8fd1649..365fa7d 100644
              save_ai_settings,
              load_ai_settings,
              delete_ai_credential,
-@@ -695,6 +1150,68 @@ use std::sync::atomic::{AtomicBool, Ordering};
+@@ -695,6 +1152,68 @@ use std::sync::atomic::{AtomicBool, Ordering};
  use tauri::{AppHandle, Emitter};
  
  static STREAM_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -3231,7 +3760,7 @@ index 8fd1649..365fa7d 100644
  
  fn stop_stream_for_auth_recovery(app: &AppHandle, message: &str) {
      let _ = app.emit("ros-auth-error", message.to_string());
-@@ -711,6 +1228,14 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -711,6 +1230,14 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
  
      tauri::async_runtime::spawn(async move {
          loop {
@@ -3246,7 +3775,7 @@ index 8fd1649..365fa7d 100644
              let token = match read_grpc_auth_token(&app) {
                  Ok(token) => token,
                  Err(error) => {
-@@ -719,12 +1244,9 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -719,12 +1246,9 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                  }
              };
              let _ = app.emit("ros-connecting", ());
@@ -3262,7 +3791,7 @@ index 8fd1649..365fa7d 100644
  
              let mut client = match client_result {
                  Ok(Ok(c)) => {
-@@ -744,7 +1266,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -744,7 +1268,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                      continue;
                  }
              };
@@ -3284,7 +3813,7 @@ index 8fd1649..365fa7d 100644
                  Ok(request) => request,
                  Err(error) => {
                      let _ = app.emit("ros-error", error);
-@@ -754,12 +1289,12 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -754,12 +1291,12 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
              };
              let mut stream = match tokio::time::timeout(
                  std::time::Duration::from_secs(5),
@@ -3299,7 +3828,7 @@ index 8fd1649..365fa7d 100644
                      s.into_inner()
                  }
                  Ok(Err(e)) if e.code() == tonic::Code::Unauthenticated => {
-@@ -775,7 +1310,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -775,7 +1312,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                      continue;
                  }
                  Err(_) => {
@@ -3308,7 +3837,7 @@ index 8fd1649..365fa7d 100644
                      tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                      continue;
                  }
-@@ -784,8 +1319,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -784,8 +1321,20 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
              loop {
                  match stream.message().await {
                      Ok(Some(evt)) => {
@@ -3329,7 +3858,7 @@ index 8fd1649..365fa7d 100644
  
                          if let Some(rosengine::workspace_event::Event::OdometryUpdate(odom)) =
                              &evt.event
-@@ -826,6 +1373,61 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
+@@ -826,6 +1375,61 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                          {
                              let _ = app.emit("node-snapshot", snap.node_names.clone());
                          }
@@ -3391,7 +3920,7 @@ index 8fd1649..365fa7d 100644
                      }
                      Ok(None) => {
                          let _ = app.emit("ros-error", "Stream closed by server".to_string());
-@@ -955,7 +1557,7 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
+@@ -955,7 +1559,7 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
          "Angular",
      )?;
  
@@ -3400,10 +3929,11 @@ index 8fd1649..365fa7d 100644
          .await
          .map_err(|_| docker_lost_connection_message())?;
  
-@@ -986,6 +1588,210 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
+@@ -986,26 +1590,387 @@ async fn publish_twist(app: AppHandle, command: TwistInput) -> Result<(), String
      Ok(())
  }
  
+-use std::process::Command as StdCommand;
 +#[derive(Serialize, Clone)]
 +#[serde(rename_all = "camelCase")]
 +struct SafetyStateResponse {
@@ -3411,7 +3941,14 @@ index 8fd1649..365fa7d 100644
 +    detail: String,
 +    updated_at_ns: i64,
 +}
-+
+ 
+-fn docker_command() -> StdCommand {
+-    let mut cmd = StdCommand::new("docker");
+-    let current_path = std::env::var("PATH").unwrap_or_default();
+-    let augmented_path = format!(
+-        "/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:{}",
+-        current_path
+-    );
 +#[derive(Serialize, Clone)]
 +#[serde(rename_all = "camelCase")]
 +struct EventHealthResponse {
@@ -3608,10 +4145,16 @@ index 8fd1649..365fa7d 100644
 +    Ok(response.into())
 +}
 +
- use std::process::Command as StdCommand;
- 
- fn docker_command() -> StdCommand {
-@@ -999,7 +1805,151 @@ fn docker_command() -> StdCommand {
++use std::process::Command as StdCommand;
++
++fn docker_command() -> StdCommand {
++    let mut cmd = StdCommand::new("docker");
++    let current_path = std::env::var("PATH").unwrap_or_default();
++    let augmented_path = format!(
++        "/usr/local/bin:/opt/homebrew/bin:/Applications/Docker.app/Contents/Resources/bin:{}",
++        current_path
++    );
+     cmd.env("PATH", augmented_path);
      cmd
  }
  
@@ -3763,7 +4306,28 @@ index 8fd1649..365fa7d 100644
      let home = std::env::var_os("HOME")
          .or_else(|| std::env::var_os("USERPROFILE"))
          .ok_or_else(|| "Could not determine the current user's home directory".to_string())?;
-@@ -1077,6 +2027,69 @@ fn ensure_loopback_grpc_binding(container_id: &str) -> Result<(), String> {
+-    Ok(std::path::PathBuf::from(home)
++    let fallback = std::path::PathBuf::from(home)
+         .join(".robotics-studio")
+-        .join("ros2-workspace")
++        .join("ros2-workspace");
++    if fallback.exists() {
++        let canonical = fallback
++            .canonicalize()
++            .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?;
++        if canonical.is_dir() {
++            return Ok(canonical.to_string_lossy().into_owned());
++        }
++    }
++    fs::create_dir_all(&fallback)
++        .map_err(|error| format!("Could not create default ROS workspace: {error}"))?;
++    Ok(fallback
++        .canonicalize()
++        .map_err(|error| format!("Default ROS workspace is unavailable: {error}"))?
+         .to_string_lossy()
+         .into_owned())
+ }
+@@ -1077,6 +2042,176 @@ fn ensure_loopback_grpc_binding(container_id: &str) -> Result<(), String> {
      Ok(())
  }
  
@@ -3808,6 +4372,113 @@ index 8fd1649..365fa7d 100644
 +    Ok(())
 +}
 +
++#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
++struct RosPackageInfo {
++    name: String,
++    path: String,
++    package_type: String,
++    version: Option<String>,
++    dependencies: Vec<String>,
++    executables: Vec<String>,
++    launch_files: Vec<String>,
++    config_files: Vec<String>,
++}
++
++#[tauri::command]
++fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
++    let container_name = find_dev_container()?;
++    let workspace = get_default_workspace_dir()?;
++    let script = format!(
++        r#"source /opt/ros/jazzy/setup.bash >/dev/null 2>&1 || exit 1
++export ROBOTICS_STUDIO_WORKSPACE="{}"
++if [ -f /workspace/install/setup.bash ]; then source /workspace/install/setup.bash >/dev/null 2>&1 || true; fi
++python3 - <<'PY'
++import json
++import os
++import xml.etree.ElementTree as ET
++from pathlib import Path
++
++try:
++    from ament_index_python.packages import get_packages
++except Exception as exc:  # pragma: no cover - depends on ROS installation
++    print(json.dumps([]))
++    raise SystemExit(0)
++
++packages = get_packages()
++results = []
++for name in sorted(packages):
++    pkg_path = Path(packages[name])
++    package_xml = pkg_path / 'package.xml'
++    version = None
++    package_type = 'ros_package'
++    dependencies = []
++    executables = []
++    launch_files = []
++    config_files = []
++
++    if package_xml.exists():
++        try:
++            root = ET.parse(package_xml).getroot()
++            version = root.attrib.get('version')
++            package_type = root.findtext('export/build_type') or root.tag.rsplit('}}', 1)[-1] or 'ros_package'
++            for tag_name in ['depend', 'build_depend', 'buildtool_depend', 'exec_depend', 'test_depend', 'build_export_depend']:
++                for element in root.findall(tag_name):
++                    value = (element.text or '').strip()
++                    if value:
++                        dependencies.append(value)
++            dependencies = sorted(dict.fromkeys(dependencies))
++        except Exception:
++            pass
++
++    for candidate in sorted(pkg_path.iterdir()):
++        if candidate.name.endswith('.py') and os.access(candidate, os.X_OK):
++            executables.append(candidate.name)
++        if candidate.suffix in {{'.launch', '.xml'}} and candidate.name.endswith('.launch'):
++            launch_files.append(candidate.name)
++        if candidate.suffix in {{'.yaml', '.yml', '.json', '.config', '.ini'}}:
++            config_files.append(candidate.name)
++
++    if not version and package_xml.exists():
++        try:
++            for elem in ET.parse(package_xml).getroot():
++                if elem.tag.endswith('version'):
++                    version = (elem.text or '').strip()
++                    break
++        except Exception:
++            pass
++
++    results.append({{
++        'name': name,
++        'path': str(pkg_path),
++        'package_type': package_type,
++        'version': version,
++        'dependencies': dependencies,
++        'executables': executables,
++        'launch_files': launch_files,
++        'config_files': config_files,
++    }})
++
++print(json.dumps(results))
++PY
++"#,
++        workspace
++    );
++    let output = docker_command()
++        .args(["exec", &container_name, "bash", "-lc", &script])
++        .output()
++        .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
++    if !output.status.success() {
++        return Err(format!(
++            "Could not inspect ROS packages: {}",
++            String::from_utf8_lossy(&output.stderr).trim()
++        ));
++    }
++    let stdout = String::from_utf8_lossy(&output.stdout);
++    let parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
++        .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
++    Ok(parsed)
++}
++
 +#[tauri::command]
 +fn set_ros_workspace(
 +    access: tauri::State<'_, FsAccess>,
@@ -3833,12 +4504,145 @@ index 8fd1649..365fa7d 100644
  fn find_dev_container() -> Result<String, String> {
      if ensure_docker_available().is_err() {
          return Err(docker_lost_connection_message());
-@@ -1293,6 +2306,51 @@ fn stream_process_output<R: Read + Send + 'static>(
+@@ -1293,6 +2428,184 @@ fn stream_process_output<R: Read + Send + 'static>(
  }
  
  static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
 +static BUILD_CONTAINER: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 +static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
++
++#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
++pub enum ManagedProcessStatus {
++    Running,
++    Completed,
++    Failed,
++    Cancelled,
++    TimedOut,
++}
++
++#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
++pub struct ManagedProcess {
++    pub id: String,
++    pub process_type: String,
++    pub command: Vec<String>,
++    pub workspace: Option<String>,
++    pub created_at: u64,
++    pub started_at: Option<u64>,
++    pub status: ManagedProcessStatus,
++    pub exit_code: Option<i32>,
++    pub error: Option<String>,
++    pub parent_task_id: Option<String>,
++}
++
++#[derive(Default)]
++struct ProcessRegistry {
++    processes: Mutex<HashMap<String, ManagedProcess>>,
++}
++
++impl ProcessRegistry {
++    #[allow(dead_code)]
++    fn register(
++        &self,
++        id: String,
++        process_type: String,
++        command: Vec<String>,
++        workspace: Option<String>,
++        parent_task_id: Option<String>,
++    ) -> ManagedProcess {
++        let process = ManagedProcess {
++            id: id.clone(),
++            process_type,
++            command,
++            workspace,
++            created_at: current_unix_seconds(),
++            started_at: Some(current_unix_seconds()),
++            status: ManagedProcessStatus::Running,
++            exit_code: None,
++            error: None,
++            parent_task_id,
++        };
++        self.processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .insert(id.clone(), process.clone());
++        process
++    }
++
++    #[allow(dead_code)]
++    fn get(&self, id: &str) -> Option<ManagedProcess> {
++        self.processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(id)
++            .cloned()
++    }
++
++    fn list(&self) -> Vec<ManagedProcess> {
++        let processes = self
++            .processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let mut entries: Vec<_> = processes.values().cloned().collect();
++        entries.sort_by_key(|entry| entry.created_at);
++        entries
++    }
++
++    fn mark_completed(
++        &self,
++        id: &str,
++        exit_code: Option<i32>,
++        status: ManagedProcessStatus,
++        error: Option<String>,
++    ) {
++        let mut processes = self
++            .processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if let Some(process) = processes.get_mut(id) {
++            process.status = status;
++            process.exit_code = exit_code;
++            process.error = error;
++        }
++    }
++
++    fn cancel(&self, id: &str) -> bool {
++        let mut processes = self
++            .processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let Some(process) = processes.get_mut(id) else {
++            return false;
++        };
++        if process.status != ManagedProcessStatus::Running {
++            return false;
++        }
++        process.status = ManagedProcessStatus::Cancelled;
++        process.error = Some("Cancelled by user".to_string());
++        true
++    }
++
++    #[allow(dead_code)]
++    fn remove_finished(&self, id: &str) -> Option<ManagedProcess> {
++        let mut processes = self
++            .processes
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        processes.remove(id)
++    }
++}
++
++static MANAGED_PROCESSES: OnceLock<ProcessRegistry> = OnceLock::new();
++
++fn managed_process_registry() -> &'static ProcessRegistry {
++    MANAGED_PROCESSES.get_or_init(ProcessRegistry::default)
++}
++
++fn current_unix_seconds() -> u64 {
++    std::time::SystemTime::now()
++        .duration_since(std::time::UNIX_EPOCH)
++        .unwrap_or_default()
++        .as_secs()
++}
 +
 +const COLCON_BUILD_SCRIPT: &str = r#"
 +source /opt/ros/jazzy/setup.bash || exit $?
@@ -3885,7 +4689,7 @@ index 8fd1649..365fa7d 100644
  static INITIALIZATION_RUNNING: AtomicBool = AtomicBool::new(false);
  
  struct BuildRunGuard;
-@@ -1300,6 +2358,11 @@ struct InitializationGuard;
+@@ -1300,6 +2613,11 @@ struct InitializationGuard;
  
  impl Drop for BuildRunGuard {
      fn drop(&mut self) {
@@ -3897,7 +4701,7 @@ index 8fd1649..365fa7d 100644
          BUILD_RUNNING.store(false, Ordering::SeqCst);
      }
  }
-@@ -1317,6 +2380,16 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
+@@ -1317,6 +2635,31 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
          return Err("A build is already running".to_string());
      }
      let build_guard = BuildRunGuard;
@@ -3905,6 +4709,21 @@ index 8fd1649..365fa7d 100644
 +        "{}-{}",
 +        std::process::id(),
 +        BUILD_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
++    );
++    let workspace = Some(get_default_workspace_dir().unwrap_or_else(|_| "".to_string()));
++    managed_process_registry().register(
++        build_id.clone(),
++        "colcon-build".to_string(),
++        vec![
++            "docker".to_string(),
++            "exec".to_string(),
++            container_name.clone(),
++            "bash".to_string(),
++            "-lc".to_string(),
++            "colcon build".to_string(),
++        ],
++        workspace,
++        None,
 +    );
 +    *BUILD_CONTAINER
 +        .get_or_init(|| Mutex::new(None))
@@ -3914,7 +4733,7 @@ index 8fd1649..365fa7d 100644
  
      tauri::async_runtime::spawn(async move {
          let _build_guard = build_guard;
-@@ -1326,7 +2399,9 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
+@@ -1326,7 +2669,9 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                  &container_name,
                  "bash",
                  "-c",
@@ -3925,14 +4744,40 @@ index 8fd1649..365fa7d 100644
              ])
              .stdout(Stdio::piped())
              .stderr(Stdio::piped())
-@@ -1387,7 +2462,105 @@ fn detect_models_in_sdf(sdf_content: &str) -> Vec<String> {
+@@ -1356,9 +2701,29 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
+                 if let Some(reader) = stderr_reader {
+                     let _ = reader.join();
+                 }
++                managed_process_registry().mark_completed(
++                    &build_id,
++                    Some(status.code().unwrap_or(-1)),
++                    if status.success() {
++                        ManagedProcessStatus::Completed
++                    } else {
++                        ManagedProcessStatus::Failed
++                    },
++                    if status.success() {
++                        None
++                    } else {
++                        Some("colcon build exited with a non-zero status".to_string())
++                    },
++                );
+                 let _ = app.emit("build-finished", status.success());
              }
-         }
-     }
--    models
-+    models
-+}
-+
+             Err(e) => {
++                managed_process_registry().mark_completed(
++                    &build_id,
++                    None,
++                    ManagedProcessStatus::Failed,
++                    Some(e.to_string()),
++                );
+                 let _ = app.emit("build-error", e.to_string());
+                 let _ = app.emit("build-finished", false);
+             }
+@@ -1390,6 +2755,110 @@ fn detect_models_in_sdf(sdf_content: &str) -> Vec<String> {
+     models
+ }
+ 
 +#[tauri::command]
 +fn cancel_colcon_build() -> Result<(), String> {
 +    if !BUILD_RUNNING.load(Ordering::SeqCst) {
@@ -3944,6 +4789,7 @@ index 8fd1649..365fa7d 100644
 +        .map_err(|_| "Build process state is unavailable".to_string())?
 +        .clone()
 +        .ok_or_else(|| "Build process state is unavailable".to_string())?;
++    managed_process_registry().cancel(&build_id);
 +    let output = docker_command()
 +        .args([
 +            "exec",
@@ -3963,6 +4809,11 @@ index 8fd1649..365fa7d 100644
 +        ));
 +    }
 +    Ok(())
++}
++
++#[tauri::command]
++fn list_managed_processes() -> Result<Vec<ManagedProcess>, String> {
++    Ok(managed_process_registry().list())
 +}
 +
 +fn parse_gazebo_world_control_service(output: &str) -> Result<Option<String>, String> {
@@ -4029,15 +4880,19 @@ index 8fd1649..365fa7d 100644
 +        ));
 +    }
 +    Ok(())
- }
- 
++}
++
  #[tauri::command]
-@@ -1504,8 +2677,23 @@ fn start_gazebo_sim(
-         return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
-     }
- 
--    // Give Gazebo a moment to actually start before launching the bridge
--    std::thread::sleep(std::time::Duration::from_secs(2));
+ fn start_gazebo_sim(
+     world_path: Option<String>,
+@@ -1501,11 +2970,26 @@ fn start_gazebo_sim(
+         if ensure_docker_available().is_err() {
+             return Err(docker_lost_connection_message());
+         }
+-        return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
++        return Err(String::from_utf8_lossy(&gz_result.stderr).to_string());
++    }
++
 +    let mut world_control_service = None;
 +    for _ in 0..20 {
 +        if let Some(service) = gazebo_world_control_service(&container_name)? {
@@ -4054,11 +4909,14 @@ index 8fd1649..365fa7d 100644
 +                format!("Gazebo did not become ready within 20 seconds; cleanup failed: {error}")
 +            }
 +        });
-+    }
+     }
+-
+-    // Give Gazebo a moment to actually start before launching the bridge
+-    std::thread::sleep(std::time::Duration::from_secs(2));
  
      // Build bridge args dynamically based on models actually found in the
      // world file, rather than hardcoding vehicle_blue/vehicle_green.
-@@ -1541,10 +2729,17 @@ fn start_gazebo_sim(
+@@ -1541,10 +3025,17 @@ fn start_gazebo_sim(
          .map_err(|_| docker_lost_connection_message())?;
  
      if !bridge_result.status.success() {
@@ -4077,7 +4935,7 @@ index 8fd1649..365fa7d 100644
      }
  
      Ok("Gazebo and bridge started".to_string())
-@@ -1553,24 +2748,16 @@ fn start_gazebo_sim(
+@@ -1553,24 +3044,16 @@ fn start_gazebo_sim(
  #[tauri::command]
  fn stop_gazebo_sim() -> Result<String, String> {
      let container_name = find_dev_container()?;
@@ -4107,7 +4965,7 @@ index 8fd1649..365fa7d 100644
  
      let result = docker_command()
          .args([
-@@ -1578,24 +2765,34 @@ fn reset_gazebo_sim() -> Result<String, String> {
+@@ -1578,24 +3061,34 @@ fn reset_gazebo_sim() -> Result<String, String> {
              &container_name,
              "bash",
              "-c",
@@ -4147,7 +5005,7 @@ index 8fd1649..365fa7d 100644
      depth: u32,
  ) -> Result<(), String> {
      if depth > 50 {
-@@ -1604,7 +2801,7 @@ fn copy_dir_recursive_impl(
+@@ -1604,7 +3097,7 @@ fn copy_dir_recursive_impl(
              src, dst
          ));
      }
@@ -4156,7 +5014,7 @@ index 8fd1649..365fa7d 100644
      for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
          let entry = entry.map_err(|e| e.to_string())?;
          let src_path = entry.path();
-@@ -1616,9 +2813,9 @@ fn copy_dir_recursive_impl(
+@@ -1616,9 +3109,9 @@ fn copy_dir_recursive_impl(
          }
  
          if file_type.is_dir() {
@@ -4169,7 +5027,7 @@ index 8fd1649..365fa7d 100644
          }
      }
  
-@@ -1627,7 +2824,13 @@ fn copy_dir_recursive_impl(
+@@ -1627,7 +3120,13 @@ fn copy_dir_recursive_impl(
  
  const GRPC_AUTH_CONTAINER_PATH: &str = "/run/robotics-studio/grpc-auth.json";
  const GRPC_AUTH_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
@@ -4184,7 +5042,7 @@ index 8fd1649..365fa7d 100644
  
  #[derive(Serialize, Deserialize)]
  struct GrpcAuthCredentials {
-@@ -1770,6 +2973,7 @@ fn install_authenticated_server_files(
+@@ -1770,6 +3269,7 @@ fn install_authenticated_server_files(
      resource_dir: &Path,
      workspace_dir: &Path,
      backup_dir: &Path,
@@ -4192,7 +5050,7 @@ index 8fd1649..365fa7d 100644
  ) -> Result<(), String> {
      fs::create_dir_all(backup_dir)
          .map_err(|error| format!("Could not prepare server migration backup: {error}"))?;
-@@ -1778,24 +2982,23 @@ fn install_authenticated_server_files(
+@@ -1778,24 +3278,23 @@ fn install_authenticated_server_files(
          let target_path = workspace_dir.join(file_name);
          let bundled = fs::read(&bundled_path)
              .map_err(|error| format!("Could not read bundled {file_name}: {error}"))?;
@@ -4231,7 +5089,7 @@ index 8fd1649..365fa7d 100644
              let timestamp = std::time::SystemTime::now()
                  .duration_since(std::time::UNIX_EPOCH)
                  .map_err(|error| error.to_string())?
-@@ -1805,48 +3008,143 @@ fn install_authenticated_server_files(
+@@ -1805,48 +3304,143 @@ fn install_authenticated_server_files(
                  file_name.replace('/', "_"),
                  std::process::id()
              ));
@@ -4402,7 +5260,7 @@ index 8fd1649..365fa7d 100644
          ])
          .output()
          .map_err(|error| format!("Failed to generate gRPC modules: {error}"))?;
-@@ -1878,7 +3176,11 @@ fn start_ros_engine_server(container_id: &str, auth_file: &Path) -> Result<(), S
+@@ -1878,7 +3472,11 @@ fn start_ros_engine_server(container_id: &str, auth_file: &Path) -> Result<(), S
              container_id,
              "bash",
              "-c",
@@ -4415,7 +5273,7 @@ index 8fd1649..365fa7d 100644
          ])
          .output()
          .map_err(|error| format!("Failed to start ROS engine server: {error}"))?;
-@@ -1904,11 +3206,8 @@ fn authenticated_request<T>(message: T, token: &str) -> Result<tonic::Request<T>
+@@ -1904,11 +3502,8 @@ fn authenticated_request<T>(message: T, token: &str) -> Result<tonic::Request<T>
  
  async fn wait_for_ros_engine(container_id: &str, token: &str) -> Result<(), String> {
      for _ in 0..30 {
@@ -4429,7 +5287,7 @@ index 8fd1649..365fa7d 100644
          {
              if tokio::time::timeout(
                  std::time::Duration::from_secs(2),
-@@ -1970,13 +3269,13 @@ async fn initialize_ros_environment(
+@@ -1970,13 +3565,13 @@ async fn initialize_ros_environment(
  
      // Install missing resources and preserve legacy server files before updating
      // the authentication-critical ROS service scripts.
@@ -4445,7 +5303,7 @@ index 8fd1649..365fa7d 100644
  
      let filter = format!("label=devcontainer.local_folder={}", workspace_dir);
  
-@@ -2021,6 +3320,7 @@ async fn initialize_ros_environment(
+@@ -2021,6 +3616,7 @@ async fn initialize_ros_environment(
  
          let app = app.clone();
          let workspace_dir = workspace_dir.clone();
@@ -4453,7 +5311,7 @@ index 8fd1649..365fa7d 100644
          tauri::async_runtime::spawn(async move {
              let _initialization_guard = initialization_guard;
              let _ = app.emit(
-@@ -2030,7 +3330,8 @@ async fn initialize_ros_environment(
+@@ -2030,7 +3626,8 @@ async fn initialize_ros_environment(
                      text: "Existing environment found. Checking ROS engine...".to_string(),
                  },
              );
@@ -4463,7 +5321,7 @@ index 8fd1649..365fa7d 100644
                  Ok(()) => wait_for_ros_engine(&container_name, &auth_token).await,
                  Err(error) => Err(error),
              };
-@@ -2153,7 +3454,7 @@ async fn initialize_ros_environment(
+@@ -2153,7 +3750,7 @@ async fn initialize_ros_environment(
          };
          let _ = app.emit("init-progress", event);
  
@@ -4472,7 +5330,16 @@ index 8fd1649..365fa7d 100644
              Ok(()) => match wait_for_ros_engine(&container_id, &auth_token).await {
                  Ok(()) => {
                      let _ = app.emit("init-finished", workspace_dir.clone());
-@@ -3014,7 +4315,7 @@ fn create_project_from_template(
+@@ -2451,7 +4048,7 @@ fn get_total_ram_gb() -> Result<u64, String> {
+ #[cfg(target_os = "linux")]
+ fn get_total_ram_gb() -> Result<u64, String> {
+     let output = std::process::Command::new("grep")
+-        .args(&["MemTotal", "/proc/meminfo"])
++        .args(["MemTotal", "/proc/meminfo"])
+         .output()
+         .map_err(|e| e.to_string())?;
+     let output_str = String::from_utf8_lossy(&output.stdout);
+@@ -3014,7 +4611,7 @@ fn create_project_from_template(
      }
  
      std::fs::create_dir(&dest).map_err(|e| format!("Could not create project directory: {e}"))?;
@@ -4481,7 +5348,7 @@ index 8fd1649..365fa7d 100644
          if let Err(cleanup_error) = std::fs::remove_dir_all(&dest) {
              return Err(format!(
                  "Project creation failed: {error}. Incomplete project could not be removed: {cleanup_error}"
-@@ -3136,6 +4437,25 @@ mod recent_project_tests {
+@@ -3136,6 +4733,25 @@ mod recent_project_tests {
  mod validation_tests {
      use super::*;
  
@@ -4507,7 +5374,7 @@ index 8fd1649..365fa7d 100644
      #[test]
      fn validates_absolute_ros_topics() {
          assert!(is_valid_ros_topic("/robot/cmd_vel"));
-@@ -3201,6 +4521,50 @@ mod filesystem_security_tests {
+@@ -3201,6 +4817,50 @@ mod filesystem_security_tests {
          }
      }
  
@@ -4558,7 +5425,7 @@ index 8fd1649..365fa7d 100644
      #[test]
      fn approved_root_allows_normal_reads_and_writes() {
          let directory = TempDirectory::new();
-@@ -3233,6 +4597,7 @@ mod filesystem_security_tests {
+@@ -3233,6 +4893,7 @@ mod filesystem_security_tests {
  
          let directory = TempDirectory::new();
          let outside = TempDirectory::new();
@@ -4566,7 +5433,7 @@ index 8fd1649..365fa7d 100644
          let access = FsAccess::default();
          access.approve_directory(&directory.0).unwrap();
          symlink(&outside.0, directory.0.join("escape")).unwrap();
-@@ -3240,18 +4605,326 @@ mod filesystem_security_tests {
+@@ -3240,18 +4901,326 @@ mod filesystem_security_tests {
          assert!(access
              .resolve_existing(&directory.0.join("escape"))
              .is_err());
@@ -4896,7 +5763,7 @@ index 8fd1649..365fa7d 100644
          assert!(first
              .file_name()
              .unwrap()
-@@ -3264,12 +4937,19 @@ mod filesystem_security_tests {
+@@ -3264,12 +5233,19 @@ mod filesystem_security_tests {
      #[test]
      fn rejects_invalid_world_document_and_extension() {
          let directory = TempDirectory::new();
@@ -4920,7 +5787,7 @@ index 8fd1649..365fa7d 100644
      }
  
      #[test]
-@@ -3309,14 +4989,41 @@ mod filesystem_security_tests {
+@@ -3309,14 +5285,97 @@ mod filesystem_security_tests {
          let directory = TempDirectory::new();
          let outside = TempDirectory::new();
          symlink(&outside.0, directory.0.join("worlds")).unwrap();
@@ -4936,6 +5803,62 @@ index 8fd1649..365fa7d 100644
      }
  }
  
++#[cfg(test)]
++mod process_registry_tests {
++    use super::*;
++
++    #[test]
++    fn process_registry_tracks_completion_and_cancellation() {
++        let registry = ProcessRegistry::default();
++        let process = registry.register(
++            "test-proc".to_string(),
++            "build".to_string(),
++            vec![
++                "bash".to_string(),
++                "-lc".to_string(),
++                "sleep 30".to_string(),
++            ],
++            Some("/tmp/workspace".to_string()),
++            None,
++        );
++        assert_eq!(process.status, ManagedProcessStatus::Running);
++        assert!(registry.cancel("test-proc"));
++        assert_eq!(
++            registry.get("test-proc").unwrap().status,
++            ManagedProcessStatus::Cancelled
++        );
++        registry.mark_completed(
++            "test-proc",
++            Some(130),
++            ManagedProcessStatus::Cancelled,
++            Some("Cancelled by user".to_string()),
++        );
++        assert_eq!(registry.get("test-proc").unwrap().exit_code, Some(130));
++    }
++
++    #[test]
++    fn process_registry_rejects_unknown_or_finished_process_ids() {
++        let registry = ProcessRegistry::default();
++        assert!(registry.get("missing").is_none());
++        assert!(!registry.cancel("missing"));
++
++        let process = registry.register(
++            "done".to_string(),
++            "sim".to_string(),
++            vec!["true".to_string()],
++            None,
++            None,
++        );
++        assert_eq!(process.status, ManagedProcessStatus::Running);
++        registry.mark_completed("done", Some(0), ManagedProcessStatus::Completed, None);
++        assert_eq!(
++            registry.get("done").unwrap().status,
++            ManagedProcessStatus::Completed
++        );
++        assert!(!registry.cancel("done"));
++    }
++}
++
 +#[cfg(test)]
 +mod ros_docker_integration_tests {
 +    use super::*;
@@ -4964,10 +5887,28 @@ index 8fd1649..365fa7d 100644
  mod stream_line_buffer_tests {
      use super::*;
 diff --git a/src/App.tsx b/src/App.tsx
-index 0abef8f..3666957 100644
+index 0abef8f..2813fb2 100644
 --- a/src/App.tsx
 +++ b/src/App.tsx
-@@ -206,6 +206,8 @@ function FileTree({
+@@ -50,6 +50,17 @@ interface RecentProject {
+   last_opened: string;
+ }
+ 
++interface RosPackageInfo {
++  name: string;
++  path: string;
++  package_type: string;
++  version: string | null;
++  dependencies: string[];
++  executables: string[];
++  launch_files: string[];
++  config_files: string[];
++}
++
+ interface LogEvent {
+   kind: "append" | "replace";
+   text: string;
+@@ -206,6 +217,8 @@ function FileTree({
  }
  
  function App() {
@@ -4976,9 +5917,13 @@ index 0abef8f..3666957 100644
    // --- File browser state ---
    const [entries, setEntries] = useState<FileEntry[]>([]);
    const [currentPath, setCurrentPath] = useState<string | null>(null);
-@@ -267,6 +269,31 @@ function App() {
+@@ -266,7 +279,35 @@ function App() {
+   // --- ROS event log ---
    const [rosEvents, setRosEvents] = useState<string[]>([]);
    const [rosConnected, setRosConnected] = useState(false);
++  const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
++  const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
++  const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
    const [initializing, setInitializing] = useState(false);
 +  const [safetyState, setSafetyState] = useState<
 +    "READY" | "ACTIVE" | "RESET_PENDING" | "FAULT" | "DISCONNECTED"
@@ -5008,7 +5953,7 @@ index 0abef8f..3666957 100644
    const rosWorkspaceReady = useRef(false);
    const authRecoveryStarted = useRef(false);
    const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
-@@ -276,9 +303,14 @@ function App() {
+@@ -276,9 +317,14 @@ function App() {
    const [buildOutput, setBuildOutput] = useState<string[]>([]);
    const [building, setBuilding] = useState(false);
    const diagnostics = [
@@ -5023,9 +5968,33 @@ index 0abef8f..3666957 100644
    ];
  
    // --- AI chat ---
-@@ -512,14 +544,33 @@ function App() {
+@@ -511,15 +557,57 @@ function App() {
+   };
  
    // ---------- ROS workspace selection ----------
++  const refreshRosPackages = useCallback(async () => {
++    if (!rosWorkspacePath) {
++      setRosPackages([]);
++      setRosPackagesError(null);
++      return;
++    }
++    setRosPackagesLoading(true);
++    setRosPackagesError(null);
++    try {
++      const packages = await invoke<RosPackageInfo[]>("list_ros_packages");
++      setRosPackages(packages);
++    } catch (error) {
++      setRosPackages([]);
++      setRosPackagesError(String(error));
++    } finally {
++      setRosPackagesLoading(false);
++    }
++  }, [rosWorkspacePath]);
++
++  useEffect(() => {
++    void refreshRosPackages();
++  }, [refreshRosPackages]);
++
    const pickRosWorkspace = async () => {
 -    const selected = await invoke<string | null>("pick_directory");
 -    if (selected) {
@@ -5060,7 +6029,7 @@ index 0abef8f..3666957 100644
      setBuildOutput([]);
      setBuilding(true);
      setBottomCollapsed(false);
-@@ -532,6 +583,15 @@ function App() {
+@@ -532,6 +620,15 @@ function App() {
      }
    };
  
@@ -5076,7 +6045,7 @@ index 0abef8f..3666957 100644
    const initializeRosEnvironment = async () => {
      setInitializing(true);
      setSetupOutput(["Starting..."]);
-@@ -583,12 +643,39 @@ function App() {
+@@ -583,12 +680,39 @@ function App() {
      linearX: number,
      angularZ: number,
    ) => {
@@ -5117,7 +6086,7 @@ index 0abef8f..3666957 100644
      }
    };
  
-@@ -758,10 +845,12 @@ function App() {
+@@ -758,10 +882,12 @@ function App() {
      const unlistenError = listen<string>("ros-error", (event) => {
        console.error("ROS error:", event.payload);
        setRosConnected(false);
@@ -5130,7 +6099,7 @@ index 0abef8f..3666957 100644
        setRosEvents((prev) =>
          [...prev.slice(-49), `Authentication: ${event.payload}`],
        );
-@@ -773,6 +862,37 @@ function App() {
+@@ -773,6 +899,37 @@ function App() {
  
      const unlistenConnecting = listen<void>("ros-connecting", () => {
        setRosConnected(false);
@@ -5168,7 +6137,7 @@ index 0abef8f..3666957 100644
      });
  
      const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
-@@ -812,6 +932,9 @@ function App() {
+@@ -812,6 +969,9 @@ function App() {
        unlistenAuthError.then((f) => f());
        unlistenNodeSnapshot.then((f) => f());
        unlistenConnecting.then((f) => f());
@@ -5178,7 +6147,7 @@ index 0abef8f..3666957 100644
        unlistenBuildOutput.then((f) => f());
        unlistenBuildError.then((f) => f());
        unlistenBuildFinished.then((f) => f());
-@@ -1016,6 +1139,11 @@ function App() {
+@@ -1016,6 +1176,11 @@ function App() {
              </>
            )}
          </button>
@@ -5190,7 +6159,103 @@ index 0abef8f..3666957 100644
          <select
            value={worldPath ?? "default"}
            onChange={(e) => {
-@@ -1880,6 +2008,12 @@ function App() {
+@@ -1256,10 +1421,91 @@ function App() {
+                       {rosWorkspacePath ? "set" : "not set"}
+                     </span>
+                   </div>
+-                  <div style={{ opacity: 0.5, fontSize: 11 }}>
+-                    Live node/topic graph coming soon — inspect activity in the
+-                    ROS Log panel below.
+-                  </div>
++
++                  {rosPackagesLoading && (
++                    <div style={{ display: "flex", alignItems: "center", gap: 8, opacity: 0.7 }}>
++                      <LoaderCircle size={14} className="spin" />
++                      Loading packages...
++                    </div>
++                  )}
++
++                  {!rosPackagesLoading && rosPackagesError && (
++                    <div style={{ color: "#f0a3a3", whiteSpace: "pre-wrap" }}>
++                      {rosPackagesError}
++                    </div>
++                  )}
++
++                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length === 0 && (
++                    <div style={{ opacity: 0.6 }}>
++                      No ROS packages discovered in the active environment.
++                    </div>
++                  )}
++
++                  {!rosPackagesLoading && !rosPackagesError && rosPackages.length > 0 && (
++                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
++                      {rosPackages.map((pkg) => (
++                        <div
++                          key={pkg.name}
++                          style={{
++                            background: "rgba(255,255,255,0.02)",
++                            border: "1px solid rgba(255,255,255,0.08)",
++                            borderRadius: 6,
++                            padding: 8,
++                          }}
++                        >
++                          <div style={{ fontWeight: 600, color: "#e8e8e8", marginBottom: 4 }}>
++                            {pkg.name}
++                          </div>
++                          <div style={{ opacity: 0.7, wordBreak: "break-word", marginBottom: 4 }}>
++                            {pkg.path}
++                          </div>
++                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
++                            {pkg.package_type && (
++                              <span style={{ background: "rgba(79,195,247,0.12)", borderRadius: 999, padding: "2px 6px" }}>
++                                {pkg.package_type}
++                              </span>
++                            )}
++                            {pkg.version && (
++                              <span style={{ background: "rgba(124,217,146,0.12)", borderRadius: 999, padding: "2px 6px" }}>
++                                v{pkg.version}
++                              </span>
++                            )}
++                          </div>
++                          {pkg.dependencies.length > 0 && (
++                            <div style={{ marginTop: 6 }}>
++                              <div style={{ opacity: 0.6, marginBottom: 2 }}>Dependencies</div>
++                              <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
++                                {pkg.dependencies.slice(0, 8).map((dep) => (
++                                  <span key={`${pkg.name}-${dep}`} style={{ background: "rgba(255,255,255,0.04)", borderRadius: 999, padding: "2px 6px" }}>
++                                    {dep}
++                                  </span>
++                                ))}
++                              </div>
++                            </div>
++                          )}
++                          {(pkg.executables.length > 0 || pkg.launch_files.length > 0 || pkg.config_files.length > 0) && (
++                            <div style={{ marginTop: 6, display: "flex", flexDirection: "column", gap: 2 }}>
++                              {pkg.executables.length > 0 && (
++                                <div style={{ opacity: 0.6 }}>
++                                  Executables: {pkg.executables.join(", ")}
++                                </div>
++                              )}
++                              {pkg.launch_files.length > 0 && (
++                                <div style={{ opacity: 0.6 }}>
++                                  Launch: {pkg.launch_files.join(", ")}
++                                </div>
++                              )}
++                              {pkg.config_files.length > 0 && (
++                                <div style={{ opacity: 0.6 }}>
++                                  Config: {pkg.config_files.join(", ")}
++                                </div>
++                              )}
++                            </div>
++                          )}
++                        </div>
++                      ))}
++                    </div>
++                  )}
+                 </div>
+               )}
+             </div>
+@@ -1880,6 +2126,12 @@ function App() {
                      <RobotControls
                        onCommand={sendTwist}
                        availableRobots={availableRobots}
@@ -5203,7 +6268,7 @@ index 0abef8f..3666957 100644
                      />
                    </div>
                  </div>
-@@ -1887,6 +2021,21 @@ function App() {
+@@ -1887,6 +2139,21 @@ function App() {
                {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
                {activeTab === "problems" && (
                  <div style={{ padding: 8, fontSize: 12 }}>
@@ -5493,472 +6558,4 @@ index 50e76fa..ccf33c3 100644
 +  commandTimeoutMs: number;
 +  permittedMotionModes: string[];
 +}
-diff --git a/docs/architecture.md b/docs/architecture.md
-new file mode 100644
-index 0000000..b1dbb22
---- /dev/null
-+++ b/docs/architecture.md
-@@ -0,0 +1,107 @@
-+# Architecture and trust boundaries
-+
-+## Components
-+
-+Robotics Studio is a Tauri desktop application. The React frontend invokes
-+commands in the native Rust backend; it does not connect directly to Docker or
-+ROS. The backend manages a ROS 2 Jazzy container based on the bundled
-+`osrf/ros:jazzy-desktop` image, which installs Gazebo Harmonic and
-+`ros_gz_bridge`.
-+
-+The selected ROS workspace is bind-mounted at `/workspace`. It is distinct
-+from the folder currently open in the editor. Switching the selected workspace
-+stops that workspace's running managed container before persisting the new
-+selection.
-+
-+The ROS service source and generated protobuf modules run from
-+`/opt/robotics-studio` inside the container, outside the writable workspace
-+mount. The service persists its event journal, safety state, robot limits, and
-+workspace data under `/workspace/.robotics-studio`.
-+
-+## gRPC trust model
-+
-+The container publishes gRPC on host loopback only. At initialization, the
-+backend provisions a per-container certificate authority and a server
-+certificate with a loopback subject alternative name. It retrieves only the
-+public CA certificate through Docker's control channel and configures the Rust
-+gRPC client to trust that certificate. The client sends its random, expiring
-+bearer token only after establishing TLS. The token is stored in protected
-+files and is not exposed to frontend JavaScript.
-+
-+This protects against an unrelated local process impersonating the service on
-+the loopback port. A user with Docker control, or code running with the
-+container's privileges, remains inside the trusted computing boundary.
-+
-+## Motion and safety
-+
-+Motion requests are checked in both the Rust command path and the Python ROS
-+service. The service enforces topic-specific velocity, acceleration, mode,
-+freshness, lease, and timeout limits. A server-side safety controller serializes
-+motion publication with emergency-stop transitions. A latched stop blocks
-+motion until an explicit reset; restored latches are reasserted on startup.
-+
-+The software stop publishes zero velocity messages to discovered command
-+topics. It cannot stop arbitrary controllers, guarantee physical braking, or
-+replace a safety-rated controller or physical emergency-stop circuit.
-+
-+## Events and recovery
-+
-+The event hub prioritizes critical events over coalesced telemetry. Selected
-+node lifecycle and safety events are durably journaled, with a bound of 256
-+records and 4 MiB. Sequence numbers are durable for journaled critical events;
-+telemetry and periodic snapshots are best-effort and do not consume those
-+sequence numbers. Replay subscribes to live delivery atomically with its
-+snapshot to avoid a replay/live handoff gap.
-+
-+Replay is cursor-based and reports when history has expired. The client
-+resynchronizes from available snapshots after a gap. The UI does not
-+acknowledge event application, so the end-to-end frontend delivery contract is
-+not exactly-once and must not be described as such.
-+
-+## Workspace and files
-+
-+Native file operations are scoped to roots selected through native pickers.
-+On Unix, the principal read, write, listing, and import paths pin directory
-+descriptors and reject symlink traversal. Windows uses canonical-path checks
-+and atomic replacement but does not yet have equivalent protection from a
-+local process racing parent-directory changes. Some template and project
-+operations are not yet descriptor-rooted on every platform.
-+
-+An editor folder does not implicitly become the ROS workspace. ROS
-+initialization, build, simulation, and world import use the selected workspace;
-+other general file editing uses the separately approved editor folder.
-+
-+## Process and simulation lifecycle
-+
-+The `colcon build` operation has a dedicated process group and a cancellation
-+path. Gazebo startup waits for a world control service before launching the
-+bridge, and failed startup attempts trigger cleanup. Reset targets the active
-+world's discovered control service rather than assuming a `default` world.
-+
-+Build, container, Gazebo, and bridge processes do not yet share a centralized
-+process registry. General execution timeouts, unified status reporting,
-+graceful application-shutdown cleanup, and platform-specific lifecycle
-+coverage remain incomplete.
-+
-+## Supported ROS surface
-+
-+The current service streams node and topic snapshots, transform and odometry
-+updates, safety state, and event-recovery metadata. It is not a full ROS graph
-+explorer: detailed publisher/subscriber endpoints, services, and actions are
-+not exposed. TF updates are visualized as received edges but are not yet
-+validated as a complete hierarchy with stale-frame expiry and cycle detection.
-+The 3D view uses placeholder geometry; URDF parsing, Xacro processing, mesh
-+resource resolution, and description-based robot rendering are not implemented.
-+
-+SDF import checks XML well-formedness, an SDF root, a world element, supported
-+declared versions, and rejects DTDs. It does not perform full SDFormat schema
-+validation or resolve and validate all external model and mesh resources.
-+
-+## Validation boundary
-+
-+Run unit/build checks with the commands in the README. The live integration
-+script `scripts/docker-integration.sh` builds the container image and exercises
-+the real ROS service, pinned TLS, event replay after restart, Gazebo world
-+readiness/reset, and ROS-Gazebo topic bridging. This does not substitute for
-+testing the desktop UI on every target operating system or testing a physical
-+robot.
-diff --git a/scripts/docker-integration.sh b/scripts/docker-integration.sh
-new file mode 100755
-index 0000000..c5b2a1c
---- /dev/null
-+++ b/scripts/docker-integration.sh
-@@ -0,0 +1,232 @@
-+#!/usr/bin/env bash
-+set -euo pipefail
-+
-+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-+workspace="$(mktemp -d /tmp/robotics-studio-integration.XXXXXX)"
-+container="robotics-studio-integration-$$"
-+image="robotics-studio-ros2:integration"
-+
-+cleanup() {
-+  docker rm -f "$container" >/dev/null 2>&1 || true
-+  rm -rf "$workspace"
-+}
-+trap cleanup EXIT
-+
-+docker info >/dev/null
-+docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
-+
-+cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
-+printf 'workspace-mount-ok\n' > "$workspace/mount-check"
-+docker run -d \
-+  --name "$container" \
-+  -p 127.0.0.1:50051:50051 \
-+  -v "$workspace:/workspace" \
-+  "$image" tail -f /dev/null >/dev/null
-+
-+docker exec "$container" mkdir -p \
-+  /opt/robotics-studio/proto \
-+  /opt/robotics-studio/generated \
-+  /run/robotics-studio
-+docker cp "$repo_root/src-tauri/resources/devcontainer/server.py" \
-+  "$container:/opt/robotics-studio/server.py" >/dev/null
-+docker cp "$repo_root/src-tauri/resources/devcontainer/server_core.py" \
-+  "$container:/opt/robotics-studio/server_core.py" >/dev/null
-+docker cp "$repo_root/src-tauri/resources/devcontainer/proto/ros_engine.proto" \
-+  "$container:/opt/robotics-studio/proto/ros_engine.proto" >/dev/null
-+
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && python3 -m grpc_tools.protoc -I /opt/robotics-studio/proto --python_out=/opt/robotics-studio/generated --grpc_python_out=/opt/robotics-studio/generated /opt/robotics-studio/proto/ros_engine.proto'
-+
-+docker exec "$container" bash -lc '
-+  set -eu
-+  chmod 700 /run/robotics-studio
-+  openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-+    -keyout /run/robotics-studio/grpc-ca.key \
-+    -out /run/robotics-studio/grpc-ca.crt \
-+    -subj "/CN=Robotics Studio local gRPC CA" \
-+    -addext "basicConstraints=critical,CA:TRUE" \
-+    -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
-+  openssl req -new -newkey rsa:2048 -nodes \
-+    -keyout /run/robotics-studio/grpc-server.key \
-+    -out /run/robotics-studio/grpc-server.csr \
-+    -subj "/CN=127.0.0.1" >/dev/null 2>&1
-+  printf "%s\n" \
-+    "basicConstraints=critical,CA:FALSE" \
-+    "keyUsage=critical,digitalSignature,keyEncipherment" \
-+    "extendedKeyUsage=serverAuth" \
-+    "subjectAltName=IP:127.0.0.1,DNS:localhost" \
-+    > /run/robotics-studio/grpc-server.ext
-+  openssl x509 -req -in /run/robotics-studio/grpc-server.csr \
-+    -CA /run/robotics-studio/grpc-ca.crt \
-+    -CAkey /run/robotics-studio/grpc-ca.key -CAcreateserial \
-+    -out /run/robotics-studio/grpc-server.crt -days 3650 -sha256 \
-+    -extfile /run/robotics-studio/grpc-server.ext >/dev/null 2>&1
-+  chmod 600 /run/robotics-studio/grpc-ca.key /run/robotics-studio/grpc-server.key
-+  chmod 644 /run/robotics-studio/grpc-ca.crt /run/robotics-studio/grpc-server.crt
-+'
-+docker exec "$container" cat /run/robotics-studio/grpc-ca.crt > "$workspace/grpc-ca.crt"
-+
-+token="$(openssl rand -hex 32)"
-+expires_at="$(python3 -c 'import time; print(int(time.time()) + 86400)')"
-+printf '{"token":"%s","expires_at":%s}' "$token" "$expires_at" |
-+  docker exec -i "$container" bash -c \
-+    'cat > /run/robotics-studio/grpc-auth.json && chmod 600 /run/robotics-studio/grpc-auth.json'
-+
-+start_ros_server() {
-+  docker exec -d "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && ROBOTICS_STUDIO_GENERATED_PATH=/opt/robotics-studio/generated exec python3 /opt/robotics-studio/server.py >/tmp/server.log 2>&1'
-+  for attempt in $(seq 1 30); do
-+    if docker exec "$container" bash -lc \
-+      'grep -q "running on port 50051" /tmp/server.log' 2>/dev/null; then
-+      return
-+    fi
-+    sleep 1
-+  done
-+  docker exec "$container" cat /tmp/server.log
-+  return 1
-+}
-+
-+test "$(docker exec "$container" cat /workspace/mount-check)" = workspace-mount-ok
-+start_ros_server
-+
-+ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \
-+ROBOTICS_STUDIO_TEST_AUTH_TOKEN="$token" \
-+  cargo test --manifest-path "$repo_root/src-tauri/Cargo.toml" --locked -- \
-+    --ignored --exact \
-+    ros_docker_integration_tests::pinned_tls_client_authenticates_to_docker_ros_service
-+
-+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
-+import json
-+import sys
-+import time
-+
-+sys.path.insert(0, "/opt/robotics-studio/generated")
-+import grpc
-+import ros_engine_pb2 as pb
-+import ros_engine_pb2_grpc as rpc
-+
-+certificate = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
-+token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
-+stub = rpc.RosEngineStub(
-+    grpc.secure_channel(
-+        "127.0.0.1:50051",
-+        grpc.ssl_channel_credentials(root_certificates=certificate),
-+    )
-+)
-+metadata = (("x-robotics-studio-token", token),)
-+try:
-+    stub.GetSafetyState(pb.Empty(), timeout=3)
-+    raise AssertionError("unauthenticated request was accepted")
-+except grpc.RpcError as error:
-+    assert error.code() == grpc.StatusCode.UNAUTHENTICATED, error
-+
-+assert stub.GetSafetyState(pb.Empty(), metadata=metadata, timeout=3).state == pb.SafetyState.READY
-+activated = stub.SetEmergencyStop(
-+    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.ACTIVATE),
-+    metadata=metadata,
-+    timeout=3,
-+)
-+assert activated.state == pb.SafetyState.ACTIVE
-+try:
-+    stub.PublishTwist(
-+        pb.TwistCommand(
-+            topic_name="/audit/cmd_vel",
-+            linear_x=0.1,
-+            timestamp_ns=time.time_ns(),
-+        ),
-+        metadata=metadata,
-+        timeout=3,
-+    )
-+    raise AssertionError("motion command was accepted while latched")
-+except grpc.RpcError as error:
-+    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT, error
-+assert stub.SetEmergencyStop(
-+    pb.EmergencyStopRequest(action=pb.EmergencyStopRequest.RESET),
-+    metadata=metadata,
-+    timeout=3,
-+).state == pb.SafetyState.READY
-+
-+events = stub.ReplayEvents(
-+    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
-+    metadata=metadata,
-+    timeout=5,
-+)
-+assert next(events).WhichOneof("event") == "event_recovery"
-+assert next(events).WhichOneof("event") == "safety_state"
-+events.cancel()
-+print("Authenticated TLS, stop/reset enforcement and event replay passed")
-+PY
-+
-+docker exec "$container" bash -lc \
-+  "pkill -TERM -f '[p]ython3 /opt/robotics-studio/server.py' || true"
-+start_ros_server
-+docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY'
-+import json
-+import sys
-+
-+sys.path.insert(0, "/opt/robotics-studio/generated")
-+import grpc
-+import ros_engine_pb2 as pb
-+import ros_engine_pb2_grpc as rpc
-+
-+root = open("/run/robotics-studio/grpc-ca.crt", "rb").read()
-+token = json.load(open("/run/robotics-studio/grpc-auth.json"))["token"]
-+stub = rpc.RosEngineStub(
-+    grpc.secure_channel(
-+        "127.0.0.1:50051",
-+        grpc.ssl_channel_credentials(root_certificates=root),
-+    )
-+)
-+events = stub.ReplayEvents(
-+    pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
-+    metadata=(("x-robotics-studio-token", token),),
-+    timeout=5,
-+)
-+assert next(events).WhichOneof("event") == "event_recovery"
-+event = next(events)
-+assert event.WhichOneof("event") == "safety_state" and event.sequence > 0
-+events.cancel()
-+print("Critical safety history survived a ROS service restart")
-+PY
-+
-+docker exec -d "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && gz sim -s -r --headless-rendering /workspace/diff_drive.sdf >/tmp/gz.log 2>&1'
-+world_services=""
-+for attempt in $(seq 1 30); do
-+  if world_services="$(docker exec "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && gz service -l' 2>/dev/null)" &&
-+    printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
-+    break
-+  fi
-+  sleep 1
-+done
-+if ! printf '%s\n' "$world_services" | grep -Fx '/world/diff_drive/control' >/dev/null; then
-+  docker exec "$container" cat /tmp/gz.log
-+  echo "Gazebo did not advertise /world/diff_drive/control" >&2
-+  exit 1
-+fi
-+world_control='/world/diff_drive/control'
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && gz topic -l' |
-+  grep -F '/model/vehicle_blue' >/dev/null
-+docker exec "$container" bash -c \
-+  'source /opt/ros/jazzy/setup.bash && gz service -s "$1" --reqtype gz.msgs.WorldControl --reptype gz.msgs.Boolean --timeout 2000 --req "reset: {all: true}"' \
-+  robotics-studio-integration "$world_control"
-+
-+docker exec -d "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && ros2 run ros_gz_bridge parameter_bridge /model/vehicle_blue/cmd_vel@geometry_msgs/msg/Twist@gz.msgs.Twist /model/vehicle_blue/odometry@nav_msgs/msg/Odometry@gz.msgs.Odometry /model/vehicle_blue/tf@tf2_msgs/msg/TFMessage@gz.msgs.Pose_V >/tmp/bridge.log 2>&1'
-+for attempt in $(seq 1 20); do
-+  if topics="$(docker exec "$container" bash -lc \
-+    'source /opt/ros/jazzy/setup.bash && ros2 topic list' 2>/dev/null)" &&
-+    printf '%s\n' "$topics" | grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null; then
-+    break
-+  fi
-+  sleep 1
-+done
-+docker exec "$container" bash -lc \
-+  'source /opt/ros/jazzy/setup.bash && ros2 topic list' |
-+  grep -Fx '/model/vehicle_blue/cmd_vel' >/dev/null
-+docker exec "$container" bash -lc \
-+  "pkill -TERM -f '[g]z sim -s' || true; pkill -TERM -f '[p]arameter_bridge' || true"
-+
-+echo "Docker ROS 2 Jazzy and Gazebo Harmonic integration checks passed"
-diff --git a/RELEASE_READINESS.md b/RELEASE_READINESS.md
-new file mode 100644
-index 0000000..feee44c
---- /dev/null
-+++ b/RELEASE_READINESS.md
-@@ -0,0 +1,111 @@
-+# Robotics Studio v0.3.0 Release Readiness
-+
-+## Decision
-+
-+**Not ready for release.** The current worktree has meaningful security,
-+recovery, and simulator-integration improvements, and the local validation
-+listed below passes. The product still lacks several core workflows named in
-+the v0.3.0 scope, and cross-platform desktop/CI validation is incomplete.
-+
-+The checkout is on `main` at `83e88f6` with uncommitted changes. No commit,
-+push, tag, or release was created.
-+
-+## Scope checklist
-+
-+| # | Area | Status | Evidence and remaining work |
-+|---|---|---|---|
-+| 1 | gRPC authentication and transport | Pass (local) | Bearer-token requests use TLS with a client-pinned CA; the Docker integration rejects unauthenticated calls and accepts authenticated calls. |
-+| 2 | Trusted ROS service installation | Pass (local) | The runtime service and generated protobufs are installed outside the writable workspace mount. Workspace migration compares complete file bytes and uses approved-root operations. |
-+| 3 | Workspace filesystem boundaries | Partial | Unix descriptor-rooted reads, writes, imports, and template copies reject symlink escapes. Windows does not yet have equivalent resistance to parent-directory races. |
-+| 4 | Dependency security | Partial | `cargo audit` and `npm audit` report zero vulnerabilities. RustSec still reports 13 allowed unmaintained/unsound dependency warnings; see below. |
-+| 5 | Critical ROS event recovery | Partial | Critical lifecycle and safety records survive service restart and replay with sequence/gap metadata. Telemetry is best-effort, and the UI does not acknowledge delivery; end-to-end exactly-once delivery is not provided. |
-+| 6 | Motion bounds and emergency stop | Partial | The backend enforces conservative per-topic motion limits and a software stop latch. This is not a physical or safety-rated emergency-stop system. |
-+| 7 | Workspace selection and isolation | Partial | The backend persists and revalidates the selected workspace. Workspace propagation and cross-platform isolation have not been verified across every operation. |
-+| 8 | Build process control | Partial | `colcon build` has a dedicated cancellation path. There is no centralized process registry, general timeout policy, or unified status model. |
-+| 9 | Container and desktop lifecycle | Partial | A manual ROS 2 Jazzy/Gazebo Harmonic container integration passes. The packaged desktop app's full startup, shutdown, and supported-platform lifecycle has not been verified. |
-+| 10 | ROS node discovery | Partial | Node snapshots are available; a complete graph explorer and detailed endpoint state are not implemented. |
-+| 11 | ROS topic discovery | Partial | Topic snapshots and tested ROS-Gazebo bridges are available; detailed publisher/subscriber endpoint and QoS exploration is incomplete. |
-+| 12 | ROS service exploration | Not implemented | The UI does not enumerate or inspect ROS services. |
-+| 13 | ROS action exploration | Not implemented | The UI does not enumerate or inspect ROS actions. |
-+| 14 | TF hierarchy validation | Partial | TF edges are displayed, but a complete validated hierarchy is not maintained. |
-+| 15 | TF stale-frame and cycle handling | Not implemented | Stale-frame expiry and cycle detection are absent. |
-+| 16 | Robot visualization fidelity | Partial | The 3D view uses placeholder geometry rather than a model derived from the robot description. |
-+| 17 | URDF parsing | Not implemented | Robot descriptions are not parsed for visualization. |
-+| 18 | Xacro processing | Not implemented | Xacro expansion is not implemented. |
-+| 19 | SDF document validation | Partial | XML structure, SDF root/world presence, supported declared versions, and DTD rejection are checked; full SDFormat schema validation is absent. |
-+| 20 | Model and mesh resource resolution | Not implemented | External model/mesh references are not comprehensively resolved or validated. |
-+| 21 | Frontend and desktop UX test coverage | Not ready | The frontend type-check/build passes, but automated frontend/UI behavior tests and accessibility review were not run. |
-+| 22 | Cross-platform release and CI verification | Not ready | The local Docker integration passes, but the hosted workflow, Windows/Linux desktop runtime, and packaged release artifacts have not been validated. |
-+
-+## Security review and remediation
-+
-+Three security issues were addressed during this work:
-+
-+1. **High — workspace marker spoofing.** A marker substring in a workspace
-+   service file was previously accepted as evidence that the file was trusted.
-+   Migration now compares the complete contents against bundled files; the
-+   service actually runs from the application-installed container directory.
-+2. **High — bearer token over plaintext gRPC.** A local process could
-+   impersonate the service and capture the token. The client now establishes
-+   TLS and validates the server against the CA certificate obtained through
-+   Docker's control channel before sending authenticated requests.
-+3. **Medium (local filesystem boundary) — symlinked destination during resource
-+   copy.** Recursive copies could follow a workspace directory symlink and
-+   write outside the approved root. Copies and service migration now use
-+   approved-root operations; regression tests cover symlinked directories.
-+
-+The review did not establish additional exploitable issues in the event
-+journal, motion validation, or the descriptor-rooted Unix file operations.
-+That is not a substitute for platform-specific testing. Docker control and
-+code running with container privileges remain inside the trusted boundary.
-+
-+## Dependency audit residuals
-+
-+`cargo audit` found **zero vulnerabilities** and 13 allowed warnings:
-+
-+| Warning group | Advisory IDs | Notes |
-+|---|---|---|
-+| `proc-macro-error 1.0.4` | `RUSTSEC-2024-0370` | Unmaintained; no fixed upgrade available. |
-+| `unic-* 0.9.0` family | `RUSTSEC-2025-0075`, `-0080`, `-0081`, `-0098`, `-0100` | Unmaintained transitive URL-pattern dependencies; no fixed upgrade available. |
-+| `zbus_names`, `zvariant`, `zvariant_derive` | `RUSTSEC-2026-0370`, `-0371`, `-0372` | Unmaintained transitive crates. Some older lockfile entries are not on an active dependency path; newer entries remain in the Tauri dependency tree. |
-+| `glib 0.18.5` | `RUSTSEC-2024-0429` | Unsoundness advisory; the suggested GLib 0.20+ upgrade is blocked by the current GTK/Tauri dependency chain. |
-+
-+The advisories above did not provide CVSS scores in the audit output. These
-+warnings are disclosed rather than suppressed.
-+
-+## Validation performed
-+
-+All commands below were run against the current worktree:
-+
-+| Check | Result |
-+|---|---|
-+| `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass |
-+| `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass |
-+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 32 passed, 1 ignored (the ignored test requires the live service). |
-+| `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets --all-features -- -D warnings` | Pass |
-+| `python3 -B -m unittest test_server_core` from `src-tauri/resources/devcontainer` | Pass: 36 tests. |
-+| `npm run build` | Pass; Vite reports the existing ~811 kB JavaScript chunk-size warning. |
-+| `npm audit --audit-level=moderate` | Pass: 0 vulnerabilities. |
-+| `cargo audit` from `src-tauri` | Pass: 0 vulnerabilities, 13 allowed warnings. |
-+| `scripts/docker-integration.sh` | Pass: pinned TLS/auth, safety latch/reset, event replay after restart, Gazebo world readiness/reset, and ROS-Gazebo topic bridge. No robot motion was commanded. |
-+| `git diff --check`, protocol-copy comparison, script syntax check | Pass. |
-+
-+The Docker integration is a manually run container harness, not a desktop UI
-+test or hosted CI run. Its successful result does not establish support for all
-+target operating systems or physical robot safety.
-+
-+## Release blockers
-+
-+- Implement or explicitly defer full ROS package, service, and action
-+  exploration.
-+- Add a centralized process lifecycle/status/timeout model and verify shutdown
-+  and cancellation in the managed desktop runtime.
-+- Complete TF hierarchy validation and stale/cycle handling.
-+- Implement description-based robot rendering, including a declared URDF,
-+  Xacro, and mesh-resource support boundary.
-+- Decide whether SDF import requires full schema and external-resource
-+  validation; implement it or clearly constrain supported input.
-+- Complete Windows/Linux runtime and filesystem testing, frontend behavior
-+  tests, and hosted CI validation.
-+- Reassess the disclosed RustSec warnings when compatible upstream dependency
-+  upgrades are available.
 ````

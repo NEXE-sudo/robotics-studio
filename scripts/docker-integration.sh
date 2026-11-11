@@ -5,11 +5,61 @@ repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 workspace="$(mktemp -d /tmp/robotics-studio-integration.XXXXXX)"
 container="robotics-studio-integration-$$"
 image="robotics-studio-ros2:integration"
+container_may_exist=0
 
 cleanup() {
-  docker rm -f "$container" >/dev/null 2>&1 || true
-  rm -rf "$workspace"
+    local exit_code=$?
+    local container_removed=1
+    local workspace_removed=0
+    trap - EXIT
+
+    if [[ "$container_may_exist" == 1 ]]; then
+        if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+            container_removed=0
+            echo "WARNING: Docker is unavailable; cannot confirm integration container removal: $container" >&2
+        elif ! docker rm -f "$container" >/dev/null 2>&1 &&
+            docker inspect "$container" >/dev/null 2>&1; then
+            container_removed=0
+            echo "WARNING: Could not stop and remove integration container: $container" >&2
+        fi
+    fi
+
+    if [[ "$container_removed" == 1 && -d "$workspace" ]]; then
+        # The integration image runs as root and may create root-owned files
+        # in the bind-mounted workspace. Remove those only after its container
+        # has been stopped and removed.
+        if command -v docker >/dev/null 2>&1 &&
+            docker image inspect "$image" >/dev/null 2>&1 &&
+            docker run --rm --user 0:0 \
+                --mount "type=bind,source=$workspace,target=/cleanup" \
+                --entrypoint /bin/bash "$image" -c \
+                'find /cleanup -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' \
+                >/dev/null 2>&1 &&
+            rm -rf -- "$workspace" 2>/dev/null; then
+            workspace_removed=1
+        fi
+
+        if [[ "$workspace_removed" == 0 ]] && rm -rf -- "$workspace" 2>/dev/null; then
+            workspace_removed=1
+        fi
+
+        if [[ "$workspace_removed" == 0 ]] &&
+            command -v sudo >/dev/null 2>&1 &&
+            sudo -n true >/dev/null 2>&1 &&
+            sudo -n rm -rf -- "$workspace" 2>/dev/null; then
+            workspace_removed=1
+        fi
+
+        if [[ -e "$workspace" ]]; then
+            echo "WARNING: Could not completely remove temporary directory: $workspace" >&2
+        fi
+    elif [[ "$container_removed" == 0 ]]; then
+        echo "WARNING: Leaving bind-mounted temporary directory in place because the container may still exist: $workspace" >&2
+    fi
+
+    exit "$exit_code"
 }
+
 trap cleanup EXIT
 
 docker info >/dev/null
@@ -17,6 +67,7 @@ docker build -t "$image" "$repo_root/src-tauri/resources/devcontainer"
 
 cp "$repo_root/src-tauri/resources/devcontainer/diff_drive.sdf" "$workspace/diff_drive.sdf"
 printf 'workspace-mount-ok\n' > "$workspace/mount-check"
+container_may_exist=1
 docker run -d \
   --name "$container" \
   -p 127.0.0.1:50051:50051 \
