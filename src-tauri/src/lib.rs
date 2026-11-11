@@ -2644,7 +2644,14 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
     managed_process_registry().register(
         build_id.clone(),
         "colcon-build".to_string(),
-        vec!["docker".to_string(), "exec".to_string(), container_name.clone(), "bash".to_string(), "-lc".to_string(), "colcon build".to_string()],
+        vec![
+            "docker".to_string(),
+            "exec".to_string(),
+            container_name.clone(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            "colcon build".to_string(),
+        ],
         workspace,
         None,
     );
@@ -5299,13 +5306,20 @@ mod process_registry_tests {
         let process = registry.register(
             "test-proc".to_string(),
             "build".to_string(),
-            vec!["bash".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "sleep 30".to_string(),
+            ],
             Some("/tmp/workspace".to_string()),
             None,
         );
         assert_eq!(process.status, ManagedProcessStatus::Running);
         assert!(registry.cancel("test-proc"));
-        assert_eq!(registry.get("test-proc").unwrap().status, ManagedProcessStatus::Cancelled);
+        assert_eq!(
+            registry.get("test-proc").unwrap().status,
+            ManagedProcessStatus::Cancelled
+        );
         registry.mark_completed(
             "test-proc",
             Some(130),
@@ -5329,13 +5343,11 @@ mod process_registry_tests {
             None,
         );
         assert_eq!(process.status, ManagedProcessStatus::Running);
-        registry.mark_completed(
-            "done",
-            Some(0),
-            ManagedProcessStatus::Completed,
-            None,
+        registry.mark_completed("done", Some(0), ManagedProcessStatus::Completed, None);
+        assert_eq!(
+            registry.get("done").unwrap().status,
+            ManagedProcessStatus::Completed
         );
-        assert_eq!(registry.get("done").unwrap().status, ManagedProcessStatus::Completed);
         assert!(!registry.cancel("done"));
     }
 }
