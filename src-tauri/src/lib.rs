@@ -4048,7 +4048,7 @@ fn get_total_ram_gb() -> Result<u64, String> {
 #[cfg(target_os = "linux")]
 fn get_total_ram_gb() -> Result<u64, String> {
     let output = std::process::Command::new("grep")
-        .args(&["MemTotal", "/proc/meminfo"])
+        .args(["MemTotal", "/proc/meminfo"])
         .output()
         .map_err(|e| e.to_string())?;
     let output_str = String::from_utf8_lossy(&output.stdout);
