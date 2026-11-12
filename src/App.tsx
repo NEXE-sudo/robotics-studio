@@ -2,6 +2,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import Editor from "@monaco-editor/react";
 import { invoke } from "@tauri-apps/api/core";
 import RobotView, { RobotControls } from "./components/RobotView";
+import {
+  appendLog,
+  getNextFileAfterClose,
+  normalizeRecentProjects,
+  type RecentProject,
+} from "./appWorkflow";
 import { listen, emit } from "@tauri-apps/api/event";
 import TFTree from "./components/TFTree";
 import RosGraphExplorer from "./components/RosGraphExplorer";
@@ -51,12 +57,6 @@ interface OpenFile {
   savedContent: string;
 }
 
-interface RecentProject {
-  path: string;
-  name: string;
-  last_opened: string;
-}
-
 interface RosPackageInfo {
   name: string;
   path: string;
@@ -75,47 +75,6 @@ interface RosPackageInfo {
 interface LogEvent {
   kind: "append" | "replace";
   text: string;
-}
-
-const MAX_RECENT_PROJECTS = 8;
-const MAX_LOG_LINES = 1000;
-const MAX_LOG_CHARACTERS = 2_000_000;
-
-function trimLog(lines: string[]) {
-  const trimmed = lines.slice(-MAX_LOG_LINES);
-  let characters = trimmed.reduce((total, line) => total + line.length, 0);
-  while (characters > MAX_LOG_CHARACTERS && trimmed.length > 1) {
-    characters -= trimmed.shift()?.length ?? 0;
-  }
-  return trimmed;
-}
-
-function appendLog(lines: string[], line: string) {
-  return trimLog([...lines, line]);
-}
-
-function normalizeRecentProjects(projects: RecentProject[]) {
-  const byPath = new Map<string, RecentProject>();
-
-  for (const project of projects) {
-    const path = project.path.trim();
-    if (!path) continue;
-
-    const existing = byPath.get(path);
-    const next = {
-      path,
-      name: project.name || path.split(/[\\/]/).filter(Boolean).pop() || path,
-      last_opened: project.last_opened || String(Date.now()),
-    };
-
-    if (!existing || Number(next.last_opened) >= Number(existing.last_opened)) {
-      byPath.set(path, next);
-    }
-  }
-
-  return [...byPath.values()]
-    .sort((a, b) => Number(b.last_opened) - Number(a.last_opened))
-    .slice(0, MAX_RECENT_PROJECTS);
 }
 
 type BottomTab =
@@ -803,13 +762,10 @@ function App() {
   const closeTab = (path: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     setOpenFiles((prev) => {
-      const idx = prev.findIndex((f) => f.path === path);
       const next = prev.filter((f) => f.path !== path);
-      if (activeFilePath === path) {
-        const fallback =
-          next[idx] ?? next[idx - 1] ?? next[next.length - 1] ?? null;
-        setActiveFilePath(fallback ? fallback.path : null);
-      }
+      const fallbackPath =
+        activeFilePath === path ? getNextFileAfterClose(prev, activeFilePath, path) : activeFilePath;
+      setActiveFilePath(fallbackPath);
       return next;
     });
   };

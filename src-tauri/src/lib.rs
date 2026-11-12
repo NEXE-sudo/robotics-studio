@@ -1612,6 +1612,11 @@ async fn pick_keybindings_file(app: AppHandle) -> Result<Option<String>, String>
 pub fn run() {
     tauri::Builder::default()
         .manage(FsAccess::default())
+        .on_window_event(|_window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                ManagedProcessLifecycle::request_shutdown();
+            }
+        })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
@@ -3375,6 +3380,56 @@ struct ProcessRegistry {
     processes: Mutex<HashMap<String, ManagedProcess>>,
 }
 
+struct ManagedProcessLifecycle;
+
+impl ManagedProcessLifecycle {
+    fn request_shutdown_for(registry: &ProcessRegistry) -> Vec<ManagedProcess> {
+        let active = registry.active_processes();
+        if active.is_empty() {
+            return Vec::new();
+        }
+
+        for process in &active {
+            registry.request_stop(&process.id);
+        }
+
+        let mut terminal = Vec::new();
+        for process in registry.active_processes() {
+            registry.mark_completed(
+                &process.id,
+                Some(130),
+                ManagedProcessStatus::Cancelled,
+                Some("Application shutdown requested".to_string()),
+            );
+            terminal.push(registry.get(&process.id).unwrap_or(process));
+        }
+        terminal
+    }
+
+    fn request_shutdown() -> Vec<ManagedProcess> {
+        let registry = managed_process_registry();
+        let active = registry.active_processes();
+        if active.is_empty() {
+            return Vec::new();
+        }
+
+        if active
+            .iter()
+            .any(|process| matches!(process.process_type.as_str(), "gazebo-sim" | "ros-gz-bridge"))
+        {
+            let _ = stop_gazebo_sim();
+        }
+        if active
+            .iter()
+            .any(|process| process.process_type == "colcon-build")
+        {
+            let _ = cancel_colcon_build();
+        }
+
+        Self::request_shutdown_for(registry)
+    }
+}
+
 impl ProcessRegistry {
     #[allow(dead_code)]
     fn register(
@@ -3456,6 +3511,21 @@ impl ProcessRegistry {
         let mut entries: Vec<_> = processes.values().cloned().collect();
         entries.sort_by_key(|entry| entry.created_at);
         entries
+    }
+
+    fn active_processes(&self) -> Vec<ManagedProcess> {
+        self.list()
+            .into_iter()
+            .filter(|process| {
+                matches!(
+                    process.status,
+                    ManagedProcessStatus::Created
+                        | ManagedProcessStatus::Starting
+                        | ManagedProcessStatus::Running
+                        | ManagedProcessStatus::Stopping
+                )
+            })
+            .collect()
     }
 
     fn mark_completed(
@@ -6715,6 +6785,40 @@ mod process_registry_tests {
             ManagedProcessStatus::Completed
         );
         assert!(!registry.request_stop("done"));
+    }
+
+    #[test]
+    fn lifecycle_shutdown_marks_all_active_processes_as_cancelled() {
+        let registry = ProcessRegistry::default();
+        let build = registry.register(
+            "build-1".to_string(),
+            "colcon-build".to_string(),
+            vec!["docker".to_string()],
+            None,
+            None,
+        );
+        registry.register(
+            "sim-1".to_string(),
+            "gazebo-sim".to_string(),
+            vec!["gz".to_string()],
+            None,
+            None,
+        );
+        assert_eq!(build.status, ManagedProcessStatus::Created);
+        assert!(registry.mark_starting("build-1"));
+        assert!(registry.mark_running("build-1"));
+        assert!(registry.mark_starting("sim-1"));
+        assert!(registry.mark_running("sim-1"));
+
+        let cancelled = ManagedProcessLifecycle::request_shutdown_for(&registry);
+        assert_eq!(cancelled.len(), 2);
+        assert!(cancelled.iter().all(|process| process.status == ManagedProcessStatus::Cancelled));
+        assert!(registry
+            .get("build-1")
+            .is_some_and(|process| process.status == ManagedProcessStatus::Cancelled));
+        assert!(registry
+            .get("sim-1")
+            .is_some_and(|process| process.status == ManagedProcessStatus::Cancelled));
     }
 }
 

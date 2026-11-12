@@ -4,14 +4,16 @@ A native desktop IDE for ROS 2 development — edit code, build with `colcon`,
 run live simulations in Gazebo, visualize robot state in real time, and get
 AI assistance that actually understands your running ROS 2 system.
 
-**Status**: v0.3.0 release candidate and local release gate passed. Built solo, in the open,
-but the repository is now in a verified implementation state with the final release validation
-workflow available locally.
+**Status**: v0.3.0 development target, early-stage. Built solo, in the open. Expect rough
+edges — this is a real, working tool, not a polished 1.0, and I'd rather be
+upfront about that than pretend otherwise.
 
-**Current repo state**: The working tree contains the current v0.3.0 implementation pass across
-ROS, TF, URDF/Xacro, Docker integration, release docs, and verification updates. The project is
-ready for release from the current worktree after the standard final hosted workflow check and
-release cut. Use `npm run release:check` to run the local release gate for the current worktree.
+**Current repo state**: The working tree contains the current uncommitted v0.3.0 implementation
+pass across ROS, TF, URDF/Xacro, Docker integration, release docs, and verification updates.
+The project remains explicitly not release-ready: the work is substantial and functionally
+advanced, but the remaining acceptance areas are still partial and require broader platform,
+upgrade, and hosted-CI validation before release. Use `npm run release:check` to run the local
+release gate for the current worktree.
 
 ---
 

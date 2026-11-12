@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowUp, ArrowDown, RotateCcw, RotateCw, Square } from "lucide-react";
+import { canLoadRobotDescription } from "../componentUtils";
 import { buildRobotInstance } from "../robotDescription";
 import type { RobotDescription, RobotInstance } from "../robotDescription";
 
@@ -102,7 +103,7 @@ export default function RobotView({
   const inertialVisibleRef = useRef(false);
 
   useEffect(() => {
-    if (!descriptionContent || !descriptionPath || !workspaceRoot) {
+    if (!canLoadRobotDescription(descriptionContent, descriptionPath, workspaceRoot)) {
       setRobotDescription(null);
       setDescriptionError(null);
       return;
@@ -178,8 +179,6 @@ export default function RobotView({
 
       const width = containerRef.current.clientWidth;
       const height = containerRef.current.clientHeight;
-
-      console.log("Resize:", width, height);
 
       if (width === 0 || height === 0) return;
 
@@ -397,7 +396,7 @@ export default function RobotView({
           Validating robot description...
         </div>
       )}
-      {(!descriptionContent || !descriptionPath || !workspaceRoot) &&
+      {!canLoadRobotDescription(descriptionContent, descriptionPath, workspaceRoot) &&
         !descriptionError && (
         <div
           role="status"

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { defaultServiceRequest, nodePath } from "../componentUtils";
 import { groupRosGraphByNode, rosNodeId } from "../rosGraph";
 import type {
   RosGraphEndpoint,
@@ -44,10 +45,6 @@ export interface SafeActionGoal {
   terminal: boolean;
   truncated: boolean;
   cancelPending: boolean;
-}
-
-function nodePath(nodeName: string, nodeNamespace: string) {
-  return `${nodeNamespace === "/" ? "" : nodeNamespace}/${nodeName}`;
 }
 
 function TypeList({ types }: { types: string[] }) {
@@ -114,20 +111,6 @@ function GraphCard({
       </div>
     </details>
   );
-}
-
-function defaultServiceRequest(serviceType: string) {
-  if (
-    serviceType === "rcl_interfaces/srv/GetParameters" ||
-    serviceType === "rcl_interfaces/srv/GetParameterTypes" ||
-    serviceType === "rcl_interfaces/srv/DescribeParameters"
-  ) {
-    return '{"names":[]}';
-  }
-  if (serviceType === "rcl_interfaces/srv/ListParameters") {
-    return '{"prefixes":[],"depth":0}';
-  }
-  return "{}";
 }
 
 function SafeServiceForm({
