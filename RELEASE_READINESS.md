@@ -10,6 +10,11 @@ criteria remain incomplete. The latest known hosted CI passed on the base
 commit; CI has not run against this worktree. No commit, push, tag, or release
 was created.
 
+**Current repository state**: this worktree is a release-candidate implementation pass,
+not a release artifact. The repository has progressed through ROS graph/service/action,
+TF, URDF/Xacro, Docker validation, and documentation updates, yet the remaining acceptance
+areas are still partial and must be closed before a v0.3.0 release decision is made.
+
 ## Acceptance checklist
 
 | # | Area | Status | Evidence and remaining work |

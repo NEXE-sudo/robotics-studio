@@ -1,5 +1,11 @@
 # Architecture and trust boundaries
 
+**Current repository state**: this architecture document reflects the current uncommitted
+worktree, which includes a broader ROS package/service/action surface, TF diagnostics,
+URDF/Xacro mesh rendering, Docker integration coverage, and additional security/recovery
+checks. The implementation is materially advanced but still intentionally partial; the work
+is not yet a release-ready v0.3.0 artifact.
+
 ## Components
 
 Robotics Studio is a Tauri desktop application. The React frontend invokes

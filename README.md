@@ -8,6 +8,12 @@ AI assistance that actually understands your running ROS 2 system.
 edges — this is a real, working tool, not a polished 1.0, and I'd rather be
 upfront about that than pretend otherwise.
 
+**Current repo state**: The working tree contains the current uncommitted v0.3.0 implementation
+pass across ROS, TF, URDF/Xacro, Docker integration, release docs, and verification updates.
+The project remains explicitly not release-ready: the work is substantial and functionally
+advanced, but the remaining acceptance areas are still partial and require broader platform,
+upgrade, and hosted-CI validation before release.
+
 ---
 
 ## What's in the v0.3.0 development target

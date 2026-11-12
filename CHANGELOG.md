@@ -5,6 +5,12 @@
 This version is still in development and is not release-ready. See
 [RELEASE_READINESS.md](./RELEASE_READINESS.md) for verified scope and blockers.
 
+**Current repository state**: the worktree reflects the ongoing v0.3.0 implementation pass,
+including ROS package/service/action support, TF diagnostics, URDF/Xacro mesh rendering,
+Docker integration validation, and updated release documentation. The repository is not yet
+release-ready; the current acceptance status remains partial across the remaining release
+requirements.
+
 ### Added
 
 - Selected-workspace ROS package discovery with package build type, version,

@@ -2,6 +2,10 @@
 
 Snapshot of tracked changes against `HEAD` at generation time. The generated document itself is not part of this snapshot.
 
+**Current repository state**: this snapshot reflects the active uncommitted v0.3.0 worktree,
+including ROS, TF, URDF/Xacro, Docker integration, and release-doc updates. The repository is
+still not release-ready; this diff is a development snapshot rather than a release artifact.
+
 ``````````diff
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 index cb8d19c..3363c0f 100644

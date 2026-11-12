@@ -2,6 +2,10 @@
 
 Base: `59d8467ed2c358894fa529425a999ff930fd6984` on `main`. This generated report includes tracked and untracked worktree files and excludes itself.
 
+**Current repository state**: this worktree reflects the current v0.3.0 implementation pass and
+release-readiness updates. The project remains not release-ready; the verification summary below
+tracks the current status of the in-progress work rather than a completed release candidate.
+
 Diff lines that would otherwise end in whitespace show an explicit marker so this report remains clean under whitespace checks.
 
 ## Verification summary
