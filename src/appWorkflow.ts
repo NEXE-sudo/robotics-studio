@@ -26,6 +26,21 @@ export function appendLog(lines: string[], line: string) {
   return trimLog([...lines, line]);
 }
 
+export function projectDisplayName(path: string, fallbackName?: string) {
+  const trimmedPath = path.trim();
+  const name = fallbackName?.trim();
+  if (name) return name;
+  if (!trimmedPath) return "Untitled project";
+  return trimmedPath.split(/[\\/]/).filter(Boolean).pop() || trimmedPath;
+}
+
+function validTimestamp(value: string | number | undefined) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const numeric = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
 export function normalizeRecentProjects(projects: RecentProject[]) {
   const byPath = new Map<string, RecentProject>();
 
@@ -34,10 +49,14 @@ export function normalizeRecentProjects(projects: RecentProject[]) {
     if (!path) continue;
 
     const existing = byPath.get(path);
+    const timestamp =
+      validTimestamp(project.last_opened) ??
+      validTimestamp(existing?.last_opened) ??
+      0;
     const next = {
       path,
-      name: project.name || path.split(/[\\/]/).filter(Boolean).pop() || path,
-      last_opened: project.last_opened || String(Date.now()),
+      name: projectDisplayName(path, project.name),
+      last_opened: String(timestamp),
     };
 
     if (!existing || Number(next.last_opened) >= Number(existing.last_opened)) {
@@ -68,4 +87,14 @@ export function getNextFileAfterClose<T extends OpenFileLike>(
     null;
 
   return fallback ? fallback.path : null;
+}
+
+export function closeFileByPath<T extends OpenFileLike>(
+  files: T[],
+  activePath: string | null,
+  closedPath: string,
+): { files: T[]; activePath: string | null } {
+  const nextFiles = files.filter((file) => file.path !== closedPath);
+  const nextActivePath = getNextFileAfterClose(files, activePath, closedPath);
+  return { files: nextFiles, activePath: nextActivePath };
 }

@@ -1613,7 +1613,10 @@ pub fn run() {
     tauri::Builder::default()
         .manage(FsAccess::default())
         .on_window_event(|_window, event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
+            if matches!(
+                event,
+                tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed
+            ) {
                 ManagedProcessLifecycle::request_shutdown();
             }
         })
@@ -1749,8 +1752,6 @@ fn stop_stream_for_auth_recovery(app: &AppHandle, message: &str) {
 
 #[tauri::command]
 async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
-    println!("start_ros_stream invoked");
-
     if STREAM_RUNNING.swap(true, Ordering::SeqCst) {
         return Ok(());
     }
@@ -1773,23 +1774,17 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                 }
             };
             let _ = app.emit("ros-connecting", ());
-            println!("[ros-stream] attempting authenticated TLS connection to ROS service");
             let client_result =
                 tokio::time::timeout(std::time::Duration::from_secs(5), connect_ros_engine()).await;
 
             let mut client = match client_result {
-                Ok(Ok(c)) => {
-                    println!("[ros-stream] connected successfully");
-                    c
-                }
+                Ok(Ok(c)) => c,
                 Ok(Err(e)) => {
-                    println!("[ros-stream] connection failed: {}", e);
                     let _ = app.emit("ros-error", format!("Connection failed: {}", e));
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
                 Err(_) => {
-                    println!("[ros-stream] connection attempt timed out");
                     let _ = app.emit("ros-error", "Connection attempt timed out".to_string());
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
@@ -1822,10 +1817,7 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
             )
             .await
             {
-                Ok(Ok(s)) => {
-                    println!("[ros-stream] replayable event stream established");
-                    s.into_inner()
-                }
+                Ok(Ok(s)) => s.into_inner(),
                 Ok(Err(e)) if e.code() == tonic::Code::Unauthenticated => {
                     stop_stream_for_auth_recovery(
                         &app,
@@ -1853,7 +1845,6 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                         {
                             break;
                         }
-                        println!("[ros-stream] received event: {:?}", evt);
                         let _ = app.emit("ros-event", format!("{:?}", evt));
                         if evt.sequence > 0 {
                             if let Err(error) =
@@ -3118,9 +3109,69 @@ fn find_dev_container() -> Result<String, String> {
     }
 }
 
+fn decide_build_lifecycle_state(
+    registry: &ProcessRegistry,
+    build_id: &str,
+    exit_code: Option<i32>,
+    status_success: bool,
+) -> (ManagedProcessStatus, Option<String>) {
+    let cancellation_confirmed = registry
+        .get(build_id)
+        .is_some_and(|process| {
+            process.status == ManagedProcessStatus::Stopping
+                && matches!(exit_code, Some(130 | 137 | 143))
+        });
+    let final_status = if cancellation_confirmed {
+        ManagedProcessStatus::Cancelled
+    } else if status_success {
+        ManagedProcessStatus::Completed
+    } else {
+        ManagedProcessStatus::Failed
+    };
+    let error = if status_success {
+        None
+    } else if cancellation_confirmed {
+        Some("Build cancellation was confirmed by the process exit".to_string())
+    } else {
+        Some("colcon build exited with a non-zero status".to_string())
+    };
+    (final_status, error)
+}
+
 #[tauri::command]
 fn run_colcon_build() -> Result<String, String> {
     let container_name = find_dev_container()?;
+    if BUILD_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("A build is already running".to_string());
+    }
+    let build_guard = BuildRunGuard;
+    let build_id = format!(
+        "{}-{}",
+        std::process::id(),
+        BUILD_RUN_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let workspace = Some(get_default_workspace_dir()?);
+    managed_process_registry().register(
+        build_id.clone(),
+        "colcon-build".to_string(),
+        vec![
+            "docker".to_string(),
+            "exec".to_string(),
+            container_name.clone(),
+            "bash".to_string(),
+            "-lc".to_string(),
+            "colcon build".to_string(),
+        ],
+        workspace,
+        None,
+    );
+    managed_process_registry().mark_starting(&build_id);
+    *BUILD_CONTAINER
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| "Build process state is unavailable".to_string())? =
+        Some((container_name.clone(), build_id.clone()));
+    managed_process_registry().mark_running(&build_id);
 
     let output = docker_command()
         .args([
@@ -3128,18 +3179,34 @@ fn run_colcon_build() -> Result<String, String> {
             &container_name,
             "bash",
             "-c",
-            "source /opt/ros/jazzy/setup.bash && cd /workspace && colcon build",
+            COLCON_BUILD_SCRIPT,
+            "robotics-studio-build",
+            &build_id,
         ])
         .output()
         .map_err(|_| docker_lost_connection_message())?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code();
+    let (final_status, final_error) = decide_build_lifecycle_state(
+        managed_process_registry(),
+        &build_id,
+        exit_code,
+        output.status.success(),
+    );
+    managed_process_registry().mark_completed(
+        &build_id,
+        Some(exit_code.unwrap_or(-1)),
+        final_status,
+        final_error.clone(),
+    );
+    drop(build_guard);
 
     if output.status.success() {
         Ok(format!("{}\n{}", stdout, stderr))
     } else {
-        Err(format!("{}\n{}", stdout, stderr))
+        Err(final_error.unwrap_or_else(|| format!("{}\n{}", stdout, stderr)))
     }
 }
 
@@ -3341,6 +3408,10 @@ fn set_gazebo_runtime_process_ids(sim_id: Option<String>, bridge_id: Option<Stri
     }
 }
 
+fn clear_gazebo_runtime_process_ids() {
+    set_gazebo_runtime_process_ids(None, None);
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ManagedProcessStatus {
     Created,
@@ -3389,21 +3460,7 @@ impl ManagedProcessLifecycle {
             return Vec::new();
         }
 
-        for process in &active {
-            registry.request_stop(&process.id);
-        }
-
-        let mut terminal = Vec::new();
-        for process in registry.active_processes() {
-            registry.mark_completed(
-                &process.id,
-                Some(130),
-                ManagedProcessStatus::Cancelled,
-                Some("Application shutdown requested".to_string()),
-            );
-            terminal.push(registry.get(&process.id).unwrap_or(process));
-        }
-        terminal
+        registry.request_stop_all()
     }
 
     fn request_shutdown() -> Vec<ManagedProcess> {
@@ -3424,6 +3481,10 @@ impl ManagedProcessLifecycle {
             .any(|process| process.process_type == "colcon-build")
         {
             let _ = cancel_colcon_build();
+        }
+
+        if let Ok(workspace) = workspace_path_for_shutdown() {
+            let _ = stop_workspace_container(&workspace);
         }
 
         Self::request_shutdown_for(registry)
@@ -3519,8 +3580,7 @@ impl ProcessRegistry {
             .filter(|process| {
                 matches!(
                     process.status,
-                    ManagedProcessStatus::Created
-                        | ManagedProcessStatus::Starting
+                    ManagedProcessStatus::Starting
                         | ManagedProcessStatus::Running
                         | ManagedProcessStatus::Stopping
                 )
@@ -3555,15 +3615,34 @@ impl ProcessRegistry {
         let Some(process) = processes.get_mut(id) else {
             return false;
         };
-        if !matches!(
-            process.status,
-            ManagedProcessStatus::Starting | ManagedProcessStatus::Running
-        ) {
-            return false;
+        match process.status {
+            ManagedProcessStatus::Starting | ManagedProcessStatus::Running => {
+                process.status = ManagedProcessStatus::Stopping;
+                process.error = Some("Cancellation requested; awaiting process exit".to_string());
+                true
+            }
+            ManagedProcessStatus::Stopping => {
+                process.error = Some("Cancellation requested; awaiting process exit".to_string());
+                true
+            }
+            _ => false,
         }
-        process.status = ManagedProcessStatus::Stopping;
-        process.error = Some("Cancellation requested; awaiting process exit".to_string());
-        true
+    }
+
+    fn request_stop_all(&self) -> Vec<ManagedProcess> {
+        let active = self.active_processes();
+        if active.is_empty() {
+            return Vec::new();
+        }
+
+        let mut results = Vec::with_capacity(active.len());
+        for process in &active {
+            self.request_stop(&process.id);
+            if let Some(updated) = self.get(&process.id) {
+                results.push(updated);
+            }
+        }
+        results
     }
 
     fn restore_running_after_stop_error(&self, id: &str) {
@@ -3757,33 +3836,19 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                     let _ = reader.join();
                 }
                 let exit_code = status.code();
+                let (final_status, final_error) = decide_build_lifecycle_state(
+                    managed_process_registry(),
+                    &build_id,
+                    exit_code,
+                    status.success(),
+                );
                 let cancellation_confirmed =
-                    managed_process_registry()
-                        .get(&build_id)
-                        .is_some_and(|process| {
-                            process.status == ManagedProcessStatus::Stopping
-                                && matches!(exit_code, Some(130 | 137 | 143))
-                        });
-                let final_status = if cancellation_confirmed {
-                    ManagedProcessStatus::Cancelled
-                } else if status.success() {
-                    ManagedProcessStatus::Completed
-                } else {
-                    ManagedProcessStatus::Failed
-                };
+                    final_status == ManagedProcessStatus::Cancelled;
                 managed_process_registry().mark_completed(
                     &build_id,
                     Some(exit_code.unwrap_or(-1)),
                     final_status,
-                    if status.success() {
-                        None
-                    } else {
-                        Some(if cancellation_confirmed {
-                            "Build cancellation was confirmed by the process exit".to_string()
-                        } else {
-                            "colcon build exited with a non-zero status".to_string()
-                        })
-                    },
+                    final_error,
                 );
                 let _ = app.emit(
                     "build-finished",
@@ -3995,6 +4060,15 @@ fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
     }
 }
 
+fn append_gazebo_cleanup_error(primary_error: &str, cleanup_error: Option<&str>) -> String {
+    match cleanup_error {
+        Some(cleanup_error) if !cleanup_error.trim().is_empty() => {
+            format!("{primary_error}; simulator cleanup failed: {cleanup_error}")
+        }
+        _ => primary_error.to_string(),
+    }
+}
+
 fn wait_for_process_exit(
     attempts: usize,
     interval: std::time::Duration,
@@ -4065,12 +4139,6 @@ fn start_gazebo_sim(
             ])
             .output()
             .map_err(|_| docker_lost_connection_message())?;
-
-        eprintln!(
-            "DEBUG attempt {}: check.stdout = {:?}",
-            attempt,
-            String::from_utf8_lossy(&check.stdout)
-        );
 
         if check.stdout.is_empty() {
             break;
@@ -4162,6 +4230,7 @@ fn start_gazebo_sim(
                 ManagedProcessStatus::Failed,
                 Some(error.to_string()),
             );
+            clear_gazebo_runtime_process_ids();
             return Err(format!("Could not launch Gazebo: {error}"));
         }
     };
@@ -4177,6 +4246,7 @@ fn start_gazebo_sim(
                     .to_string(),
             ),
         );
+        clear_gazebo_runtime_process_ids();
         if ensure_docker_available().is_err() {
             return Err(docker_lost_connection_message());
         }
@@ -4197,6 +4267,7 @@ fn start_gazebo_sim(
     if world_control_service.is_none() {
         managed_process_registry().request_stop(&sim_id);
         let cleanup = stop_gazebo_processes(&container_name);
+        clear_gazebo_runtime_process_ids();
         return Err(match cleanup {
             Ok(()) => {
                 managed_process_registry().mark_completed(
@@ -4205,7 +4276,6 @@ fn start_gazebo_sim(
                     ManagedProcessStatus::TimedOut,
                     Some("Gazebo did not become ready within 20 seconds".to_string()),
                 );
-                set_gazebo_runtime_process_ids(None, None);
                 "Gazebo did not become ready within 20 seconds".to_string()
             }
             Err(error) => {
@@ -4271,7 +4341,10 @@ fn start_gazebo_sim(
                 Some(error.to_string()),
             );
             managed_process_registry().request_stop(&sim_id);
-            return match stop_gazebo_processes(&container_name) {
+            let cleanup = stop_gazebo_processes(&container_name);
+            clear_gazebo_runtime_process_ids();
+            let bridge_error = format!("Could not launch the Gazebo bridge: {error}");
+            return match cleanup {
                 Ok(()) => {
                     managed_process_registry().mark_completed(
                         &sim_id,
@@ -4279,30 +4352,29 @@ fn start_gazebo_sim(
                         ManagedProcessStatus::Cancelled,
                         Some("Bridge failed to start; Gazebo was stopped".to_string()),
                     );
-                    set_gazebo_runtime_process_ids(None, None);
-                    Err(docker_lost_connection_message())
+                    Err(bridge_error)
                 }
-                Err(error) => Err(format!(
-                    "{}; simulator cleanup failed: {error}",
-                    docker_lost_connection_message()
+                Err(cleanup_error) => Err(append_gazebo_cleanup_error(
+                    &bridge_error,
+                    Some(cleanup_error.as_str()),
                 )),
             };
         }
     };
 
     if !bridge_result.status.success() {
+        let bridge_error = String::from_utf8_lossy(&bridge_result.stderr)
+            .trim()
+            .to_string();
         managed_process_registry().mark_completed(
             &bridge_id,
             Some(bridge_result.status.code().unwrap_or(-1)),
             ManagedProcessStatus::Failed,
-            Some(
-                String::from_utf8_lossy(&bridge_result.stderr)
-                    .trim()
-                    .to_string(),
-            ),
+            Some(bridge_error.clone()),
         );
         managed_process_registry().request_stop(&sim_id);
         let cleanup = stop_gazebo_processes(&container_name);
+        clear_gazebo_runtime_process_ids();
         if ensure_docker_available().is_err() {
             return Err(docker_lost_connection_message());
         }
@@ -4314,13 +4386,9 @@ fn start_gazebo_sim(
                     ManagedProcessStatus::Cancelled,
                     Some("Bridge failed to start; Gazebo was stopped".to_string()),
                 );
-                set_gazebo_runtime_process_ids(None, None);
-                String::from_utf8_lossy(&bridge_result.stderr).to_string()
+                bridge_error
             }
-            Err(error) => format!(
-                "{}; simulator cleanup failed: {error}",
-                String::from_utf8_lossy(&bridge_result.stderr)
-            ),
+            Err(error) => append_gazebo_cleanup_error(&bridge_error, Some(error.as_str())),
         });
     }
 
@@ -4340,7 +4408,7 @@ fn stop_gazebo_sim() -> Result<String, String> {
             managed_process_registry().request_stop(bridge_id);
         }
     }
-    stop_gazebo_processes(&container_name)?;
+    let cleanup = stop_gazebo_processes(&container_name);
     if let Some((sim_id, bridge_id)) = gazebo_runtime_process_ids() {
         if gazebo_processes_stopped(&container_name) {
             for process_id in [sim_id.as_deref(), bridge_id.as_deref()]
@@ -4354,10 +4422,10 @@ fn stop_gazebo_sim() -> Result<String, String> {
                     None,
                 );
             }
-            set_gazebo_runtime_process_ids(None, None);
         }
+        clear_gazebo_runtime_process_ids();
     }
-    Ok("Gazebo and ROS-Gazebo bridge stopped".to_string())
+    cleanup.map(|_| "Gazebo and ROS-Gazebo bridge stopped".to_string())
 }
 
 #[tauri::command]
@@ -6661,7 +6729,7 @@ mod process_registry_tests {
             Some((None, Some("bridge-process".to_string())))
         );
 
-        set_gazebo_runtime_process_ids(None, None);
+        clear_gazebo_runtime_process_ids();
         assert_eq!(gazebo_runtime_process_ids(), None);
     }
 
@@ -6741,6 +6809,26 @@ mod process_registry_tests {
     }
 
     #[test]
+    fn repeated_stop_requests_are_idempotent_for_inflight_processes() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "repeat-stop".to_string(),
+            "build".to_string(),
+            vec!["bash".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+            None,
+            None,
+        );
+        assert!(registry.mark_starting("repeat-stop"));
+        assert!(registry.mark_running("repeat-stop"));
+        assert!(registry.request_stop("repeat-stop"));
+        assert!(registry.request_stop("repeat-stop"));
+        assert_eq!(
+            registry.get("repeat-stop").unwrap().status,
+            ManagedProcessStatus::Stopping
+        );
+    }
+
+    #[test]
     fn process_registry_tracks_spawn_failure_without_claiming_running() {
         let registry = ProcessRegistry::default();
         registry.register(
@@ -6788,7 +6876,35 @@ mod process_registry_tests {
     }
 
     #[test]
-    fn lifecycle_shutdown_marks_all_active_processes_as_cancelled() {
+    fn lifecycle_shutdown_ignores_processes_before_they_have_started() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "created-but-not-started".to_string(),
+            "colcon-build".to_string(),
+            vec!["docker".to_string()],
+            None,
+            None,
+        );
+        registry.register(
+            "running".to_string(),
+            "gazebo-sim".to_string(),
+            vec!["gz".to_string()],
+            None,
+            None,
+        );
+        assert!(registry.mark_starting("running"));
+        assert!(registry.mark_running("running"));
+
+        let active = registry.active_processes();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, "running");
+        assert!(ManagedProcessLifecycle::request_shutdown_for(&registry)
+            .iter()
+            .all(|process| process.id == "running"));
+    }
+
+    #[test]
+    fn lifecycle_shutdown_requests_graceful_stop_for_all_active_processes() {
         let registry = ProcessRegistry::default();
         let build = registry.register(
             "build-1".to_string(),
@@ -6810,15 +6926,63 @@ mod process_registry_tests {
         assert!(registry.mark_starting("sim-1"));
         assert!(registry.mark_running("sim-1"));
 
-        let cancelled = ManagedProcessLifecycle::request_shutdown_for(&registry);
-        assert_eq!(cancelled.len(), 2);
-        assert!(cancelled.iter().all(|process| process.status == ManagedProcessStatus::Cancelled));
+        let stopping = ManagedProcessLifecycle::request_shutdown_for(&registry);
+        assert_eq!(stopping.len(), 2);
+        assert!(stopping.iter().all(|process| process.status == ManagedProcessStatus::Stopping));
         assert!(registry
             .get("build-1")
-            .is_some_and(|process| process.status == ManagedProcessStatus::Cancelled));
+            .is_some_and(|process| process.status == ManagedProcessStatus::Stopping));
         assert!(registry
             .get("sim-1")
-            .is_some_and(|process| process.status == ManagedProcessStatus::Cancelled));
+            .is_some_and(|process| process.status == ManagedProcessStatus::Stopping));
+    }
+
+    #[test]
+    fn shutdown_request_is_noop_when_no_processes_are_active() {
+        let registry = ProcessRegistry::default();
+        assert!(registry.request_stop_all().is_empty());
+        assert!(ManagedProcessLifecycle::request_shutdown_for(&registry).is_empty());
+    }
+
+    #[test]
+    fn gazebo_cleanup_error_keeps_main_failure_and_appends_cleanup_details() {
+        assert_eq!(
+            append_gazebo_cleanup_error("Bridge failed to start: invalid args", None),
+            "Bridge failed to start: invalid args"
+        );
+        assert_eq!(
+            append_gazebo_cleanup_error(
+                "Bridge failed to start: invalid args",
+                Some("cleanup script timed out"),
+            ),
+            "Bridge failed to start: invalid args; simulator cleanup failed: cleanup script timed out"
+        );
+    }
+
+    #[test]
+    fn build_lifecycle_marks_cancelled_only_when_exit_matches_requested_stop() {
+        let registry = ProcessRegistry::default();
+        registry.register(
+            "build-1".to_string(),
+            "colcon-build".to_string(),
+            vec!["docker".to_string()],
+            None,
+            None,
+        );
+        assert!(registry.mark_starting("build-1"));
+        assert!(registry.mark_running("build-1"));
+        assert!(registry.request_stop("build-1"));
+
+        let (status, error) = decide_build_lifecycle_state(&registry, "build-1", Some(130), false);
+        assert_eq!(status, ManagedProcessStatus::Cancelled);
+        assert_eq!(
+            error.as_deref(),
+            Some("Build cancellation was confirmed by the process exit")
+        );
+
+        let (status, error) = decide_build_lifecycle_state(&registry, "build-1", Some(1), false);
+        assert_eq!(status, ManagedProcessStatus::Failed);
+        assert_eq!(error.as_deref(), Some("colcon build exited with a non-zero status"));
     }
 }
 

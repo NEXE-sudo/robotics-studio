@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import RobotView, { RobotControls } from "./components/RobotView";
 import {
   appendLog,
-  getNextFileAfterClose,
+  closeFileByPath,
   normalizeRecentProjects,
   type RecentProject,
 } from "./appWorkflow";
@@ -25,6 +25,10 @@ import {
   parseKeybinding,
   keyEventMatches,
 } from "./keybindings";
+import {
+  describeEventRecovery,
+  eventRecoveryActionLabel,
+} from "./componentUtils";
 import {
   X,
   Sparkles,
@@ -303,9 +307,19 @@ function App() {
     snapshotIncluded: boolean;
     retainedCriticalEvents: number;
   } | null>(null);
+  const [eventRecoveryAcknowledged, setEventRecoveryAcknowledged] =
+    useState(false);
   const [robotCommandError, setRobotCommandError] = useState<string | null>(
     null,
   );
+
+  useEffect(() => {
+    if (eventRecovery?.gapDetected) {
+      setEventRecoveryAcknowledged(false);
+    } else {
+      setEventRecoveryAcknowledged(false);
+    }
+  }, [eventRecovery?.gapDetected, eventRecovery?.oldestAvailableSequence, eventRecovery?.latestSequence]);
 
   const startTopicInspection = async (topicName: string) => {
     setPendingInspectionTopic(topicName);
@@ -659,16 +673,22 @@ function App() {
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
 
   const loadFolder = async (path: string): Promise<boolean> => {
+    const normalizedPath = path.trim();
+    if (!normalizedPath) {
+      return false;
+    }
+
     try {
-      const result = await invoke<FileEntry[]>("list_dir", { path });
-      setCurrentPath(path);
+      const result = await invoke<FileEntry[]>("list_dir", { path: normalizedPath });
+      setCurrentPath(normalizedPath);
       setEntries(result);
       setChildrenByPath({});
       setExpandedPaths(new Set());
 
-      const projectName = path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+      const projectName =
+        normalizedPath.split(/[\\/]/).filter(Boolean).pop() ?? normalizedPath;
       const nextProject: RecentProject = {
-        path,
+        path: normalizedPath,
         name: projectName,
         last_opened: String(Date.now()),
       };
@@ -762,11 +782,9 @@ function App() {
   const closeTab = (path: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
     setOpenFiles((prev) => {
-      const next = prev.filter((f) => f.path !== path);
-      const fallbackPath =
-        activeFilePath === path ? getNextFileAfterClose(prev, activeFilePath, path) : activeFilePath;
-      setActiveFilePath(fallbackPath);
-      return next;
+      const { files, activePath } = closeFileByPath(prev, activeFilePath, path);
+      setActiveFilePath(activePath);
+      return files;
     });
   };
 
@@ -2820,18 +2838,38 @@ function App() {
                       {eventHealth.persistenceError}
                     </div>
                   )}
-                  {eventRecovery?.gapDetected && (
+                  {eventRecovery?.gapDetected && !eventRecoveryAcknowledged && (
                     <div
                       role="status"
                       style={{ color: "#e0b060", padding: "4px 0" }}
                     >
-                      ROS event history had a gap.{" "}
-                      {eventRecovery.snapshotIncluded
-                        ? "Current state snapshots were restored."
-                        : "A state snapshot is not available yet."}{" "}
-                      Oldest retained sequence:{" "}
-                      {eventRecovery.oldestAvailableSequence}; latest sequence:{" "}
-                      {eventRecovery.latestSequence}.
+                      <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: 8,
+                        }}
+                      >
+                        <div>{eventRecoveryActionLabel(eventRecovery)}</div>
+                        <button
+                          type="button"
+                          className="ide-btn"
+                          onClick={() => setEventRecoveryAcknowledged(true)}
+                        >
+                          Acknowledge
+                        </button>
+                      </div>
+                      {describeEventRecovery(eventRecovery) && (
+                        <div style={{ marginTop: 4 }}>
+                          {describeEventRecovery(eventRecovery)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {eventRecovery?.gapDetected && eventRecoveryAcknowledged && (
+                    <div role="status" style={{ color: "#7cd992", padding: "4px 0" }}>
+                      Recovery gap acknowledged. Telemetry reconciliation is still in progress.
                     </div>
                   )}
                   {diagnostics.length === 0 ? (

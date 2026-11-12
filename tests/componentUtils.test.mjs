@@ -3,6 +3,8 @@ import test from "node:test";
 import {
   canLoadRobotDescription,
   defaultServiceRequest,
+  describeEventRecovery,
+  eventRecoveryActionLabel,
   nodePath,
 } from "../src/componentUtils.ts";
 
@@ -23,4 +25,23 @@ test("common read-only service requests receive a safe default request body", ()
   assert.equal(defaultServiceRequest("rcl_interfaces/srv/GetParameters"), '{"names":[]}');
   assert.equal(defaultServiceRequest("rcl_interfaces/srv/ListParameters"), '{"prefixes":[],"depth":0}');
   assert.equal(defaultServiceRequest("std_srvs/srv/Empty"), "{}");
+});
+
+test("event recovery summaries explain missing telemetry windows in the UI", () => {
+  const recovery = {
+    gapDetected: true,
+    oldestAvailableSequence: 42,
+    latestSequence: 97,
+    snapshotIncluded: true,
+  };
+
+  assert.equal(
+    eventRecoveryActionLabel(recovery),
+    "Acknowledge recovery gap · appears from 42 to 97",
+  );
+  assert.match(
+    describeEventRecovery(recovery),
+    /Current state snapshots were restored\./,
+  );
+  assert.equal(describeEventRecovery({ ...recovery, gapDetected: false }), null);
 });

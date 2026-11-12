@@ -24,3 +24,31 @@ export function defaultServiceRequest(serviceType: string) {
   }
   return "{}";
 }
+
+export function describeEventRecovery(recovery: {
+  gapDetected: boolean;
+  oldestAvailableSequence: number;
+  latestSequence: number;
+  snapshotIncluded: boolean;
+} | null) {
+  if (!recovery || !recovery.gapDetected) {
+    return null;
+  }
+
+  const snapshotText = recovery.snapshotIncluded
+    ? "Current state snapshots were restored."
+    : "A state snapshot is not available yet.";
+
+  return `${snapshotText} Oldest retained sequence: ${recovery.oldestAvailableSequence}; latest sequence: ${recovery.latestSequence}.`;
+}
+
+export function eventRecoveryActionLabel(recovery: {
+  gapDetected: boolean;
+  oldestAvailableSequence: number;
+  latestSequence: number;
+} | null) {
+  if (!recovery || !recovery.gapDetected) {
+    return "No recovery action required";
+  }
+  return `Acknowledge recovery gap · appears from ${recovery.oldestAvailableSequence} to ${recovery.latestSequence}`;
+}
