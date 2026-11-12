@@ -3328,7 +3328,7 @@ fn gazebo_runtime_process_ids() -> Option<(String, String)> {
 fn set_gazebo_runtime_process_ids(sim_id: Option<String>, bridge_id: Option<String>) {
     if let Some(lock) = GAZEBO_RUNTIME_PROCESSES.get() {
         if let Ok(mut guard) = lock.lock() {
-            *guard = sim_id.zip(bridge_id).map(|(sim, bridge)| (sim, bridge));
+            *guard = sim_id.zip(bridge_id);
         }
     }
 }
