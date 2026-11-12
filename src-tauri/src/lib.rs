@@ -3115,12 +3115,10 @@ fn decide_build_lifecycle_state(
     exit_code: Option<i32>,
     status_success: bool,
 ) -> (ManagedProcessStatus, Option<String>) {
-    let cancellation_confirmed = registry
-        .get(build_id)
-        .is_some_and(|process| {
-            process.status == ManagedProcessStatus::Stopping
-                && matches!(exit_code, Some(130 | 137 | 143))
-        });
+    let cancellation_confirmed = registry.get(build_id).is_some_and(|process| {
+        process.status == ManagedProcessStatus::Stopping
+            && matches!(exit_code, Some(130 | 137 | 143))
+    });
     let final_status = if cancellation_confirmed {
         ManagedProcessStatus::Cancelled
     } else if status_success {
@@ -3470,10 +3468,12 @@ impl ManagedProcessLifecycle {
             return Vec::new();
         }
 
-        if active
-            .iter()
-            .any(|process| matches!(process.process_type.as_str(), "gazebo-sim" | "ros-gz-bridge"))
-        {
+        if active.iter().any(|process| {
+            matches!(
+                process.process_type.as_str(),
+                "gazebo-sim" | "ros-gz-bridge"
+            )
+        }) {
             let _ = stop_gazebo_sim();
         }
         if active
@@ -3842,8 +3842,7 @@ async fn run_colcon_build_streaming(app: AppHandle) -> Result<(), String> {
                     exit_code,
                     status.success(),
                 );
-                let cancellation_confirmed =
-                    final_status == ManagedProcessStatus::Cancelled;
+                let cancellation_confirmed = final_status == ManagedProcessStatus::Cancelled;
                 managed_process_registry().mark_completed(
                     &build_id,
                     Some(exit_code.unwrap_or(-1)),
@@ -6814,7 +6813,11 @@ mod process_registry_tests {
         registry.register(
             "repeat-stop".to_string(),
             "build".to_string(),
-            vec!["bash".to_string(), "-lc".to_string(), "sleep 30".to_string()],
+            vec![
+                "bash".to_string(),
+                "-lc".to_string(),
+                "sleep 30".to_string(),
+            ],
             None,
             None,
         );
@@ -6928,7 +6931,9 @@ mod process_registry_tests {
 
         let stopping = ManagedProcessLifecycle::request_shutdown_for(&registry);
         assert_eq!(stopping.len(), 2);
-        assert!(stopping.iter().all(|process| process.status == ManagedProcessStatus::Stopping));
+        assert!(stopping
+            .iter()
+            .all(|process| process.status == ManagedProcessStatus::Stopping));
         assert!(registry
             .get("build-1")
             .is_some_and(|process| process.status == ManagedProcessStatus::Stopping));
@@ -6982,7 +6987,10 @@ mod process_registry_tests {
 
         let (status, error) = decide_build_lifecycle_state(&registry, "build-1", Some(1), false);
         assert_eq!(status, ManagedProcessStatus::Failed);
-        assert_eq!(error.as_deref(), Some("colcon build exited with a non-zero status"));
+        assert_eq!(
+            error.as_deref(),
+            Some("colcon build exited with a non-zero status")
+        );
     }
 }
 
