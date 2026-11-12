@@ -12,9 +12,12 @@ type TfUpdateWithValidation = TfTransform & {
   validationIssues: string[];
 };
 
-interface TfEvent extends Omit<TfTransform, "receivedAtMs"> {}
+interface TfEvent extends Omit<TfTransform, "receivedAtMs"> {
+  received_at_ms: number;
+}
 
 interface Props {
+  connected: boolean;
   onExplain?: (tf: TfUpdateWithValidation) => void;
 }
 
@@ -114,7 +117,7 @@ function quaternionEulerDegrees(transform: TfTransform) {
   };
 }
 
-export default function TFTree({ onExplain }: Props) {
+export default function TFTree({ connected, onExplain }: Props) {
   const [transforms, setTransforms] = useState<Record<string, TfTransform>>(
     {},
   );
@@ -129,7 +132,7 @@ export default function TFTree({ onExplain }: Props) {
       if (!active) return;
       const transform: TfTransform = {
         ...event.payload,
-        receivedAtMs: Date.now(),
+        receivedAtMs: event.payload.received_at_ms,
       };
       const key = tfEdgeKey(transform.parent_frame, transform.child_frame);
       transformsRef.current[key] = transform;
@@ -174,6 +177,12 @@ export default function TFTree({ onExplain }: Props) {
       <div style={{ opacity: 0.65, marginBottom: 8 }}>
         {graph.edges.length} transform(s) · {graph.roots.length} root frame(s)
       </div>
+      {!connected && (
+        <div role="status" style={{ color: "#e0b060", marginBottom: 8 }}>
+          ROS disconnected. Displayed transforms are last-known data; dynamic
+          transforms are marked stale by their receive time.
+        </div>
+      )}
       {graph.warnings.map((warning) => (
         <div
           key={warning}
@@ -239,6 +248,14 @@ export default function TFTree({ onExplain }: Props) {
                   0,
                   Math.floor((nowMs - selected.receivedAtMs) / 1000),
                 )}s ago`}
+          </div>
+          <div style={{ opacity: 0.65, marginBottom: 6 }}>
+            ROS source stamp:{" "}
+            {selected.source_timestamp_ms > 0
+              ? `${Math.floor(selected.source_timestamp_ms / 1000)}.${String(
+                  selected.source_timestamp_ms % 1000,
+                ).padStart(3, "0")} s`
+              : "zero or unavailable"}
           </div>
           <div>
             Translation (m): ({selected.x.toFixed(4)}, {selected.y.toFixed(4)},{" "}

@@ -16,7 +16,13 @@ This version is still in development and is not release-ready. See
 - Bounded read-only ROS graph snapshots with node namespaces, topic
   publisher/subscriber identities and QoS, service types/endpoints, and action
   server/client discovery, grouped by fully qualified node identity in the UI.
+- Optional bounded live topic inspection with executor-owned subscriptions,
+  authenticated start/stop controls, rate and payload limits, and serialized
+  message previews.
 - Reliable transient-local subscription to `/tf_static`.
+- TF inspection preserves each transform's ROS source stamp separately from
+  receive time; reconnect state shows disconnected last-known data and stale
+  dynamic transforms.
 - Bounded URDF parsing for primitive visuals and connected link trees, with
   safe rejection of malformed or unsupported descriptions.
 - Three.js rendering for box, cylinder, and sphere visuals and supported
@@ -28,7 +34,8 @@ This version is still in development and is not release-ready. See
 - Docker integration coverage for selected-workspace package discovery,
   malformed package manifests, installed executables, workspace isolation,
   live ROS graph endpoints, static and dynamic TF plus `/joint_states`
-  delivery, and valid/invalid SDFormat schema checks.
+  delivery, bounded live topic inspection, and valid/invalid SDFormat schema
+  checks.
 - Build-process state and cancellation feedback that distinguishes a stop
   request from confirmed process termination.
 

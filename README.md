@@ -178,14 +178,18 @@ any of this — the app manages the environment for you.
   a first pass and still needs convention validation.
 - The TF tab builds a live transform forest and warns about multiple roots,
   cycles, multiple parents, stale dynamic transforms, non-finite values, and
-  invalid quaternions. Static `/tf_static` edges use transient-local QoS and
-  are not marked stale. This is diagnostic validation, not a substitute for
-  `tf2` authority or full ROS graph validation.
-- ROS graph snapshots are bounded and read-only. Service invocation and
-  action goal submission/monitoring are not implemented because arbitrary
-  operations could bypass the motion safety path. Package discovery reads
-  source package manifests and workspace install outputs, but does not show
-  every underlay package.
+  invalid quaternions. It displays the ROS source stamp separately from the
+  local receive age, so replayed old data does not appear freshly received.
+  Disconnection is explicit; static `/tf_static` edges use transient-local
+  QoS and are not marked stale. This is diagnostic validation, not a
+  substitute for `tf2` authority or full ROS graph validation.
+- ROS graph snapshots are bounded and read-only, with optional live topic
+  inspection limited to four topics, five samples per second per topic, and
+  bounded serialized payloads. Service invocation and action goal
+  submission/monitoring are not implemented because arbitrary operations
+  could bypass the motion safety path. Package discovery reads source
+  package manifests and workspace install outputs, but does not show every
+  underlay package.
 - SDF imports are structurally checked, and the world is validated against
   the installed SDFormat schema before Gazebo starts. This does not resolve or
   validate every external model/mesh resource.

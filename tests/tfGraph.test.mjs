@@ -15,6 +15,7 @@ function transform(parent, child, overrides = {}) {
     qz: 0,
     qw: 1,
     receivedAtMs: 10000,
+    source_timestamp_ms: 9000,
     ...overrides,
   };
 }
@@ -69,6 +70,20 @@ test("marks old dynamic transforms stale but exempts static transforms", () => {
   );
   assert.ok(graph.edges[0].issues.includes("Transform is stale"));
   assert.ok(!graph.edges[1].issues.includes("Transform is stale"));
+});
+
+test("uses receive time for staleness and preserves the ROS source timestamp", () => {
+  const graph = buildTfGraph(
+    [
+      transform("map", "replayed", {
+        receivedAtMs: 0,
+        source_timestamp_ms: 9000,
+      }),
+    ],
+    10000,
+  );
+  assert.ok(graph.edges[0].issues.includes("Transform is stale"));
+  assert.equal(graph.edges[0].source_timestamp_ms, 9000);
 });
 
 test("reports invalid quaternions and non-finite transforms", () => {

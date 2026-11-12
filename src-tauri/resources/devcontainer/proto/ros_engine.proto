@@ -12,6 +12,12 @@ service RosEngine {
   rpc GetRobotConfig(RobotConfigRequest) returns (RobotConfig);
   rpc SetRobotConfig(RobotConfig) returns (RobotConfig);
   rpc GetEventHealth(Empty) returns (EventHealth);
+  rpc StartTopicInspection(TopicInspectionRequest) returns (Empty);
+  rpc StopTopicInspection(TopicInspectionRequest) returns (Empty);
+}
+
+message TopicInspectionRequest {
+  string topic_name = 1;
 }
 
 message TwistCommand {
@@ -96,9 +102,19 @@ message WorkspaceEvent {
     EventRecovery event_recovery = 9;
     RosGraphSnapshot ros_graph_snapshot = 12;
     JointStateUpdate joint_state_update = 13;
+    TopicInspectionUpdate topic_inspection_update = 14;
   }
   int64 timestamp_ns = 10;
   uint64 sequence = 11;
+}
+
+message TopicInspectionUpdate {
+  string topic_name = 1;
+  string message_type = 2;
+  string json_payload = 3;
+  bool active = 4;
+  bool truncated = 5;
+  string error = 6;
 }
 
 message JointStateUpdate {
@@ -175,6 +191,7 @@ message TFUpdate {
   double qz = 8;
   double qw = 9;
   string topic_name = 10;
+  int64 source_timestamp_ms = 11;
 }
 
 message NodeStarted {

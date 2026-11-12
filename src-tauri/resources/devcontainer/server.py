@@ -3,6 +3,10 @@ import queue
 import time
 import logging
 import os
+import math
+import re
+import json
+from collections.abc import Sequence
 
 import grpc
 from concurrent import futures
@@ -28,6 +32,7 @@ from tf2_msgs.msg import TFMessage
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
+from rosidl_runtime_py.utilities import get_message
 from server_core import (
     CommandLeaseManager,
     EventPersistenceError,
@@ -49,6 +54,80 @@ MAX_GRAPH_SERVICES = 512
 MAX_GRAPH_ACTIONS = 128
 MAX_GRAPH_ENDPOINTS = 2048
 MAX_JOINT_STATE_ENTRIES = 512
+MAX_INSPECTED_TOPICS = 4
+MAX_INSPECTION_RATE_HZ = 5.0
+MAX_INSPECTION_MESSAGE_BYTES = 16 * 1024
+MAX_INSPECTION_DEPTH = 5
+MAX_INSPECTION_ITEMS = 256
+MAX_INSPECTION_STRING_LENGTH = 512
+
+
+class _MessageSerializationBudget:
+    def __init__(self):
+        self.items = 0
+        self.truncated = False
+
+
+def _bounded_message_value(value, budget, depth=0):
+    if budget.items >= MAX_INSPECTION_ITEMS:
+        budget.truncated = True
+        return "<truncated>"
+    budget.items += 1
+
+    if value is None or isinstance(value, (bool, int)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, str):
+        if len(value) > MAX_INSPECTION_STRING_LENGTH:
+            budget.truncated = True
+            return value[:MAX_INSPECTION_STRING_LENGTH]
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        if len(value) > 64:
+            budget.truncated = True
+        return {"hex": bytes(value[:64]).hex(), "length": len(value)}
+    if depth >= MAX_INSPECTION_DEPTH:
+        budget.truncated = True
+        return "<maximum depth reached>"
+    if hasattr(value, "get_fields_and_field_types"):
+        result = {}
+        for field_name in value.get_fields_and_field_types():
+            if budget.items >= MAX_INSPECTION_ITEMS:
+                budget.truncated = True
+                result["_truncated"] = True
+                break
+            result[field_name] = _bounded_message_value(
+                getattr(value, field_name), budget, depth + 1
+            )
+        return result
+    if isinstance(value, Sequence):
+        result = []
+        for item in value:
+            if budget.items >= MAX_INSPECTION_ITEMS:
+                budget.truncated = True
+                result.append("<truncated>")
+                break
+            result.append(_bounded_message_value(item, budget, depth + 1))
+        return result
+    return str(value)[:MAX_INSPECTION_STRING_LENGTH]
+
+
+def _serialize_inspection_message(message):
+    budget = _MessageSerializationBudget()
+    value = _bounded_message_value(message, budget)
+    payload = json.dumps(
+        value,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    )
+    if len(payload.encode("utf-8")) > MAX_INSPECTION_MESSAGE_BYTES:
+        return (
+            '{"error":"Serialized message exceeds the inspection size limit"}',
+            True,
+        )
+    return payload, budget.truncated
 
 
 def _qos_policy_name(value):
@@ -84,6 +163,11 @@ class RosIntrospector(Node):
         )
         self.tf_subscribers = {}
         self.joint_state_subscribers = {}
+        self.topic_inspection_subscriptions = {}
+        self.topic_inspection_requests = queue.Queue(maxsize=16)
+        self.topic_inspection_timer = self.create_timer(
+            0.1, self._process_topic_inspection_requests
+        )
 
     def _publish_stop_to_all(self):
         with self._command_lock:
@@ -151,6 +235,10 @@ class RosIntrospector(Node):
                     qz=transform.transform.rotation.z,
                     qw=transform.transform.rotation.w,
                     topic_name=topic_name,
+                    source_timestamp_ms=(
+                        transform.header.stamp.sec * 1000
+                        + transform.header.stamp.nanosec // 1_000_000
+                    ),
                 ),
                 timestamp_ns=time.time_ns()
             )
@@ -179,6 +267,147 @@ class RosIntrospector(Node):
             event,
             priority="telemetry",
             key=("joint_state", topic_name),
+        )
+
+    def request_topic_inspection(self, action, topic_name):
+        if not re.fullmatch(r"/[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*", topic_name):
+            raise ValueError("Topic name must be a fully qualified ROS topic name")
+        future = futures.Future()
+        try:
+            self.topic_inspection_requests.put_nowait(
+                (action, topic_name, future)
+            )
+        except queue.Full as error:
+            raise RuntimeError("Topic inspection request queue is full") from error
+        try:
+            return future.result(timeout=5.0)
+        except futures.TimeoutError as error:
+            future.cancel()
+            raise TimeoutError("Timed out waiting for the ROS executor") from error
+
+    def _process_topic_inspection_requests(self):
+        while True:
+            try:
+                action, topic_name, future = (
+                    self.topic_inspection_requests.get_nowait()
+                )
+            except queue.Empty:
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                if action == "start":
+                    result = self._start_topic_inspection(topic_name)
+                else:
+                    result = self._stop_topic_inspection(topic_name)
+            except Exception as error:
+                future.set_exception(error)
+            else:
+                future.set_result(result)
+
+    def _publish_topic_inspection(
+        self, topic_name, message_type, active, payload="", truncated=False, error=""
+    ):
+        event = ros_engine_pb2.WorkspaceEvent(
+            topic_inspection_update=ros_engine_pb2.TopicInspectionUpdate(
+                topic_name=topic_name,
+                message_type=message_type,
+                json_payload=payload,
+                active=active,
+                truncated=truncated,
+                error=error,
+            ),
+            timestamp_ns=time.time_ns(),
+        )
+        self.event_hub.publish(
+            event,
+            priority="telemetry",
+            key=("topic_inspection", topic_name),
+        )
+
+    def _start_topic_inspection(self, topic_name):
+        existing = self.topic_inspection_subscriptions.get(topic_name)
+        if existing is not None:
+            return existing["message_type"]
+        if len(self.topic_inspection_subscriptions) >= MAX_INSPECTED_TOPICS:
+            raise RuntimeError(
+                f"At most {MAX_INSPECTED_TOPICS} topics can be inspected at once"
+            )
+
+        topic_types = dict(self.get_topic_names_and_types()).get(topic_name, [])
+        if not topic_types:
+            raise LookupError(f"ROS topic {topic_name} is not currently available")
+        if len(topic_types) != 1:
+            raise ValueError(f"ROS topic {topic_name} has ambiguous message types")
+
+        message_type_name = topic_types[0]
+        try:
+            message_class = get_message(message_type_name)
+        except (AttributeError, ModuleNotFoundError, ValueError) as error:
+            raise LookupError(
+                f"Message type {message_type_name} is not available in this ROS environment"
+            ) from error
+
+        qos = QoSProfile(
+            depth=5,
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        subscription = self.create_subscription(
+            message_class,
+            topic_name,
+            lambda message, name=topic_name, type_name=message_type_name: (
+                self._topic_inspection_callback(message, name, type_name)
+            ),
+            qos,
+        )
+        self.topic_inspection_subscriptions[topic_name] = {
+            "subscription": subscription,
+            "message_type": message_type_name,
+            "last_sent_at": 0.0,
+        }
+        self._publish_topic_inspection(
+            topic_name, message_type_name, active=True
+        )
+        return message_type_name
+
+    def _stop_topic_inspection(self, topic_name):
+        inspection = self.topic_inspection_subscriptions.pop(topic_name, None)
+        if inspection is not None:
+            self.destroy_subscription(inspection["subscription"])
+            message_type = inspection["message_type"]
+        else:
+            message_type = ""
+        self._publish_topic_inspection(
+            topic_name, message_type, active=False
+        )
+        return message_type
+
+    def _topic_inspection_callback(self, message, topic_name, message_type):
+        inspection = self.topic_inspection_subscriptions.get(topic_name)
+        if inspection is None:
+            return
+        now = time.monotonic()
+        if now - inspection["last_sent_at"] < 1.0 / MAX_INSPECTION_RATE_HZ:
+            return
+        inspection["last_sent_at"] = now
+        try:
+            payload, truncated = _serialize_inspection_message(message)
+        except (TypeError, ValueError, OverflowError):
+            LOGGER.exception("Could not serialize inspected topic %s", topic_name)
+            self._publish_topic_inspection(
+                topic_name,
+                message_type,
+                active=True,
+                error="Message could not be serialized",
+            )
+            return
+        self._publish_topic_inspection(
+            topic_name,
+            message_type,
+            active=True,
+            payload=payload,
+            truncated=truncated,
         )
 
     def tick(self):
@@ -233,6 +462,18 @@ class RosIntrospector(Node):
         # Clean up subscription tracking for topics that no longer exist,
         # so they can be freshly re-subscribed if they reappear later
         current_topic_names = {name for name, _ in topics}
+        stale_inspections = (
+            set(self.topic_inspection_subscriptions) - current_topic_names
+        )
+        for name in stale_inspections:
+            inspection = self.topic_inspection_subscriptions.pop(name)
+            self.destroy_subscription(inspection["subscription"])
+            self._publish_topic_inspection(
+                name,
+                inspection["message_type"],
+                active=False,
+                error="Topic is no longer available",
+            )
         stale = set(self.odom_subscribers.keys()) - current_topic_names
         for name in stale:
             del self.odom_subscribers[name]
@@ -522,6 +763,42 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
         except Exception as error:
             LOGGER.exception("Failed to publish Twist command")
             context.abort(grpc.StatusCode.INTERNAL, "Failed to publish Twist command")
+        return ros_engine_pb2.Empty()
+
+    def StartTopicInspection(self, request, context):
+        self._require_authentication(context)
+        try:
+            self.ros_node.request_topic_inspection("start", request.topic_name)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except LookupError as error:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(error))
+        except TimeoutError as error:
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
+        except RuntimeError as error:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+        except Exception:
+            LOGGER.exception("Failed to start topic inspection for %s", request.topic_name)
+            context.abort(
+                grpc.StatusCode.INTERNAL, "Failed to start topic inspection"
+            )
+        return ros_engine_pb2.Empty()
+
+    def StopTopicInspection(self, request, context):
+        self._require_authentication(context)
+        try:
+            self.ros_node.request_topic_inspection("stop", request.topic_name)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except TimeoutError as error:
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
+        except RuntimeError as error:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+        except Exception:
+            LOGGER.exception("Failed to stop topic inspection for %s", request.topic_name)
+            context.abort(
+                grpc.StatusCode.INTERNAL, "Failed to stop topic inspection"
+            )
         return ros_engine_pb2.Empty()
 
     def _safety_state_message(self):

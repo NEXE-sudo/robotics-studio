@@ -2,12 +2,12 @@
 
 ## Decision
 
-**Not ready for release.** The worktree is based on `307f3ef` on `main` and
+**Not ready for release.** The worktree is based on `e9d7459` on `main` and
 contains uncommitted ROS graph, TF integration, URDF preview, build lifecycle,
-and package-discovery test changes. Local validation and Docker integration
-pass, but substantial v0.3.0 acceptance criteria remain incomplete. Hosted CI
-has not run against this worktree. No commit, push, tag, or release was
-created.
+package-discovery test changes, and bounded live ROS topic inspection. Local
+validation and Docker integration pass, but substantial v0.3.0 acceptance
+criteria remain incomplete. Hosted CI has not run against this worktree. No
+commit, push, tag, or release was created.
 
 ## Acceptance checklist
 
@@ -22,20 +22,20 @@ created.
 | 7 | Workspace selection and isolation | PARTIAL | Selected workspace is persisted and passed to container lookup/build/simulation. Package discovery now filters to source/install trees inside that mounted workspace; full operation/platform matrix remains unverified. |
 | 8 | ROS package explorer | PARTIAL | Selected-workspace package metadata, build type, dependencies, executable outputs, launch/config files, filtering, refresh, and file browsing are implemented and tested. Underlay packages, dependency resolution, and full package content workflows remain out of scope. |
 | 9 | ROS node explorer | PARTIAL | Bounded node names/namespaces and per-topic endpoint node identities are streamed and grouped in the UI by fully qualified node identity, including service/action roles. Full ROS lifecycle-state details remain. |
-| 10 | ROS topic explorer | PARTIAL | Bounded publisher/subscriber identities and QoS policies are streamed and shown. Safe live-message inspection and subscription controls are not implemented. |
+| 10 | ROS topic explorer | PARTIAL | Bounded publisher/subscriber identities and QoS policies are streamed and shown. Authenticated live-message inspection is available with executor-owned subscriptions, four-topic/five-Hz/payload bounds, and stop controls. ROS topic type support depends on installed message packages; broader UX and lifecycle testing remain. |
 | 11 | ROS service explorer | PARTIAL | Bounded service names/types and discovered server/client nodes are shown read-only. Structured invocation, validation, timeout, and cancellation remain absent to avoid bypassing safety controls. |
 | 12 | ROS action explorer | PARTIAL | Action names/types and discovered server/client nodes are shown read-only. Goal submission, feedback/results, and cancellation are not implemented. |
 | 13 | Consistent ROS graph refresh | PARTIAL | Nodes, topics, services, and actions are snapshotted from one service timer and bounded. Automatic client subscriptions and full graph transactionality remain absent. |
 | 14 | TF hierarchy and transform inspection | PARTIAL | A UI forest, translation/quaternion/RPY inspector, multiple-root/multiple-parent/cycle checks, and pure unit tests are implemented. It is not authoritative `tf2` validation. |
-| 15 | TF stale and static-frame behavior | PARTIAL | Dynamic edges become stale after five seconds; `/tf_static` uses reliable transient-local QoS and is exempt. Docker integration publishes and verifies both static and dynamic TF. Missing authorities cannot be inferred from edge data. |
+| 15 | TF stale and static-frame behavior | PARTIAL | Dynamic edges become stale after five seconds using event receive time, independent of the preserved ROS source stamp; `/tf_static` uses reliable transient-local QoS and is exempt. The UI labels last-known data on disconnect. Docker integration verifies static/dynamic delivery and source stamps. Frame disappearance/relationship changes and full TF composition remain unverified. |
 | 16 | URDF parsing and validation | PARTIAL | A bounded parser rejects malformed/unsafe XML, validates link/joint-tree structure, primitive dimensions, joint limits, and mimic references/cycles, and reports unsupported mesh visuals. Full URDF semantics, Xacro, and resource validation remain. |
 | 17 | Xacro expansion | NOT STARTED | No controlled ROS Xacro expansion workflow exists. |
 | 18 | Mesh/resource resolution | NOT STARTED | `package://`, relative model paths, and mesh formats are not resolved for rendering. |
 | 19 | Robot model and joint-state rendering | PARTIAL | Active `.urdf` files render box/cylinder/sphere visuals and supported joint transforms; limits, mimic joints, and a collision-geometry toggle are supported. Bounded `/joint_states` updates are covered by Docker integration. No mesh/Xacro, coordinate-convention verification, or visual desktop test yet; inertial and named robot-level materials are not rendered. |
 | 20 | Process lifecycle manager | PARTIAL | Build states distinguish starting/running/stopping/terminal outcomes; stop requests are only reported as cancellation after process exit. Docker, Gazebo, bridge, and ROS service processes still lack a shared lifecycle manager, generalized timeouts, and application-shutdown cleanup. |
 | 21 | Gazebo and SDF | PARTIAL | Jazzy/Harmonic startup, reset, bridge, and pre-launch `gz sdf --check` schema validation are integration-tested. Comprehensive external resource resolution and validation remain absent. |
-| 22 | Frontend workflow tests/accessibility | PARTIAL | Ten dependency-free TF graph and robot-rendering tests plus production type-check/build pass. React workflow tests, accessibility review, and coverage of workspace/ROS/safety UI remain. |
-| 23 | Cross-platform runtime and release artifacts | BLOCKED | CI has Linux checks and a release workflow matrix for macOS/Linux/Windows, but no current packaged artifacts or runtime verification on every platform were produced. Signing/notarization and upgrade verification remain. |
+| 22 | Frontend workflow tests/accessibility | PARTIAL | Eleven dependency-free TF graph and robot-rendering tests plus production type-check/build pass. React workflow tests, accessibility review, and coverage of workspace/ROS/safety UI remain. |
+| 23 | Cross-platform runtime and release artifacts | PARTIAL | A local macOS x86_64 `.app` and `.dmg` were built successfully. They have not been launch-tested or notarized; macOS Apple Silicon, Linux, and Windows release builds/runtime and v0.2.0 upgrade verification remain. |
 
 ## Security and safety notes
 
@@ -69,8 +69,8 @@ created.
 | Check | Result |
 |---|---|
 | `npm ci` | Pass; 91 packages installed. |
-| `npm run build` | Pass; Vite reports a large JavaScript chunk warning (~831 kB). |
-| `npm run test:frontend` | Pass: 10 TF graph and robot-description tests. |
+| `npm run build` | Pass; Vite reports a large JavaScript chunk warning (~832 kB). |
+| `npm run test:frontend` | Pass: 11 TF graph and robot-description tests. |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass. |
 | `cargo check --manifest-path src-tauri/Cargo.toml --locked` | Pass. |
 | `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 43 passed, 1 ignored (live-service test). |
@@ -78,7 +78,8 @@ created.
 | Python unittest discovery from `src-tauri/resources/devcontainer` | Pass: 43 tests, including inaccessible workspace-tree reporting. |
 | Python `py_compile` for service and tests | Pass. |
 | `bash -n scripts/docker-integration.sh` | Pass. |
-| `scripts/docker-integration.sh` | Pass: selected-workspace package discovery, live graph endpoints, static/dynamic TF and joint-state delivery, SDFormat checks, pinned TLS/auth, stop/reset enforcement, event replay/restart, and Gazebo. Cleanup exited 0; a follow-up check found no integration container or temporary directory. |
+| `scripts/docker-integration.sh` | Pass: selected-workspace package discovery, live graph endpoints, bounded topic inspection and stop, static/dynamic TF and joint-state delivery, SDFormat checks, pinned TLS/auth, stop/reset enforcement, event replay/restart, and Gazebo. Cleanup exited 0; a follow-up check found no integration container or temporary directory. |
+| `npm run tauri build` | Pass: built macOS x86_64 `.app` and `.dmg`; `hdiutil verify` confirms the DMG checksum. Application launch, signing/notarization, and non-macOS bundles were not verified. |
 | `cargo audit --file src-tauri/Cargo.lock` | Pass with 13 allowed warnings: no vulnerability findings; warnings include unmaintained crates and unsound `glib`. |
 | `npm audit --audit-level=moderate` | Pass: 0 vulnerabilities. |
 | Python dependency audit | Pass: no known vulnerabilities in the isolated environment's pinned `grpcio==1.85.1`, `grpcio-tools==1.85.1`, `protobuf==7.36.2`, `setuptools==84.2.1`, and `typing_extensions==4.16.0`. The full system pip inventory could not be resolved because it includes ROS distro packages. |
@@ -100,7 +101,9 @@ created.
 - Complete filesystem race hardening for remaining operations and Windows.
 - Add frontend workflow tests and conduct accessibility review.
 - Run hosted CI on the modified worktree; verify Linux, Windows, macOS Intel,
-  and Apple Silicon packaging/runtime paths and test upgrades from v0.2.0.
+  and Apple Silicon packaging/runtime paths and test upgrades from v0.2.0. Only
+  the local macOS x86_64 bundle build has been produced; it has not been
+  launch-tested or notarized.
 - Complete external SDF model/mesh resource resolution and validation.
 - Re-run current dependency audits and reassess disclosed RustSec advisories.
 - Prepare and verify unsigned/signed release artifacts as applicable; do not

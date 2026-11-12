@@ -214,6 +214,7 @@ from geometry_msgs.msg import TransformStamped
 from rclpy.action import ActionClient, ActionServer
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
+from std_msgs.msg import String
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 
@@ -260,6 +261,9 @@ publisher = node.create_publisher(
 )
 dynamic_publisher = node.create_publisher(TFMessage, "/tf", 10)
 joint_state_publisher = node.create_publisher(JointState, "/joint_states", 10)
+inspection_publisher = node.create_publisher(
+    String, "/integration/inspect", 10
+)
 deadline = time.monotonic() + 8
 while (
     publisher.get_subscription_count() == 0
@@ -275,15 +279,47 @@ assert (
     joint_state_publisher.get_subscription_count() > 0
 ), "ROS service did not subscribe to /joint_states"
 
+inspection_deadline = time.monotonic() + 8
+while True:
+    try:
+        stub.StartTopicInspection(
+            pb.TopicInspectionRequest(topic_name="/integration/inspect"),
+            metadata=metadata,
+            timeout=3,
+        )
+        break
+    except grpc.RpcError as error:
+        if (
+            error.code() != grpc.StatusCode.NOT_FOUND
+            or time.monotonic() >= inspection_deadline
+        ):
+            raise
+        time.sleep(0.1)
+
+try:
+    stub.StartTopicInspection(
+        pb.TopicInspectionRequest(topic_name="/invalid//topic"),
+        metadata=metadata,
+        timeout=3,
+    )
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT
+else:
+    raise AssertionError("ROS service accepted an invalid inspection topic name")
+
 transform = TransformStamped()
 transform.header.frame_id = "map"
 transform.child_frame_id = "integration_base"
+transform.header.stamp.sec = 1
+transform.header.stamp.nanosec = 234_000_000
 transform.transform.translation.x = 0.25
 transform.transform.rotation.w = 1.0
 publisher.publish(TFMessage(transforms=[transform]))
 dynamic_transform = TransformStamped()
 dynamic_transform.header.frame_id = "odom"
 dynamic_transform.child_frame_id = "integration_dynamic_base"
+dynamic_transform.header.stamp.sec = 5
+dynamic_transform.header.stamp.nanosec = 678_000_000
 dynamic_transform.transform.translation.x = 1.5
 dynamic_transform.transform.rotation.w = 1.0
 dynamic_publisher.publish(TFMessage(transforms=[dynamic_transform]))
@@ -296,18 +332,25 @@ static_tf_verified = False
 dynamic_tf_verified = False
 graph_verified = False
 joint_state_verified = False
+topic_inspection_verified = False
+topic_inspection_stopped = False
+inspection_data = "x" * 600
 for event in events:
+    if not topic_inspection_verified:
+        inspection_publisher.publish(String(data=inspection_data))
     event_type = event.WhichOneof("event")
     if event_type == "tf_update":
         if event.tf_update.topic_name == "/tf_static":
             assert event.tf_update.parent_frame == "map"
             assert event.tf_update.child_frame == "integration_base"
             assert abs(event.tf_update.x - 0.25) < 1e-9
+            assert event.tf_update.source_timestamp_ms == 1234
             static_tf_verified = True
         elif event.tf_update.topic_name == "/tf":
             assert event.tf_update.parent_frame == "odom"
             assert event.tf_update.child_frame == "integration_dynamic_base"
             assert abs(event.tf_update.x - 1.5) < 1e-9
+            assert event.tf_update.source_timestamp_ms == 5678
             dynamic_tf_verified = True
     elif event_type == "joint_state_update":
         joint_state_verified = (
@@ -315,6 +358,26 @@ for event in events:
             and event.joint_state_update.names == ["integration_joint"]
             and list(event.joint_state_update.positions) == [0.5]
         )
+    elif event_type == "topic_inspection_update":
+        update = event.topic_inspection_update
+        if update.topic_name == "/integration/inspect":
+            if update.json_payload:
+                assert update.active
+                import json
+
+                assert update.message_type == "std_msgs/msg/String"
+                assert json.loads(update.json_payload) == {
+                    "data": inspection_data[:512]
+                }
+                assert update.truncated
+                topic_inspection_verified = True
+                stub.StopTopicInspection(
+                    pb.TopicInspectionRequest(topic_name=update.topic_name),
+                    metadata=metadata,
+                    timeout=3,
+                )
+            elif not update.active:
+                topic_inspection_stopped = True
     elif event_type == "ros_graph_snapshot":
         graph = event.ros_graph_snapshot
         tf_topic = next(
@@ -349,11 +412,13 @@ for event in events:
         and dynamic_tf_verified
         and graph_verified
         and joint_state_verified
+        and topic_inspection_verified
+        and topic_inspection_stopped
     ):
         break
 else:
     raise AssertionError(
-        "ROS service did not stream static/dynamic TF, joint-state, and graph details"
+        "ROS service did not stream TF, joint-state, graph, and inspected topic details"
     )
 if not graph_verified:
     raise AssertionError("ROS graph snapshot omitted the /tf_static publisher endpoint")
@@ -361,11 +426,13 @@ if not joint_state_verified:
     raise AssertionError("ROS service did not stream the joint-state update")
 if not dynamic_tf_verified:
     raise AssertionError("ROS service did not stream the dynamic TF update")
+if not topic_inspection_verified or not topic_inspection_stopped:
+    raise AssertionError("ROS topic inspection did not stream and stop cleanly")
 
 events.cancel()
 node.destroy_node()
 rclpy.shutdown()
-print("Live ROS static/dynamic TF, joint-state, and graph endpoint discovery passed")
+print("Live ROS TF, joint-state, graph, and bounded topic inspection passed")
 PY
 
 ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \

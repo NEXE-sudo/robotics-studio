@@ -5,7 +5,10 @@ import RobotView, { RobotControls } from "./components/RobotView";
 import { listen, emit } from "@tauri-apps/api/event";
 import TFTree from "./components/TFTree";
 import RosGraphExplorer from "./components/RosGraphExplorer";
-import type { RosGraphSnapshot } from "./components/RosGraphExplorer";
+import type {
+  RosGraphSnapshot,
+  TopicInspection,
+} from "./components/RosGraphExplorer";
 import Settings from "./components/Settings";
 import NewProjectModal from "./components/NewProjectModal";
 import {
@@ -285,6 +288,14 @@ function App() {
   const [rosConnected, setRosConnected] = useState(false);
   const [rosPackages, setRosPackages] = useState<RosPackageInfo[]>([]);
   const [rosGraph, setRosGraph] = useState<RosGraphSnapshot | null>(null);
+  const [topicInspection, setTopicInspection] =
+    useState<TopicInspection | null>(null);
+  const [pendingInspectionTopic, setPendingInspectionTopic] = useState<
+    string | null
+  >(null);
+  const [topicInspectionError, setTopicInspectionError] = useState<
+    string | null
+  >(null);
   const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
   const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
   const [rosPackageFilter, setRosPackageFilter] = useState("");
@@ -323,6 +334,50 @@ function App() {
   const [robotCommandError, setRobotCommandError] = useState<string | null>(
     null,
   );
+
+  const startTopicInspection = async (topicName: string) => {
+    setPendingInspectionTopic(topicName);
+    setTopicInspectionError(null);
+    setTopicInspection((current) => ({
+      topicName,
+      messageType:
+        current?.topicName === topicName ? current.messageType : "",
+      jsonPayload: current?.topicName === topicName ? current.jsonPayload : "",
+      active: false,
+      truncated: current?.topicName === topicName ? current.truncated : false,
+      error: "",
+    }));
+    try {
+      if (topicInspection?.active && topicInspection.topicName !== topicName) {
+        await invoke("stop_topic_inspection", {
+          topicName: topicInspection.topicName,
+        });
+      }
+      await invoke("start_topic_inspection", { topicName });
+      setTopicInspection((current) =>
+        current?.topicName === topicName ? { ...current, active: true } : current,
+      );
+    } catch (error) {
+      setTopicInspectionError(String(error));
+    } finally {
+      setPendingInspectionTopic(null);
+    }
+  };
+
+  const stopTopicInspection = async (topicName: string) => {
+    setPendingInspectionTopic(topicName);
+    setTopicInspectionError(null);
+    try {
+      await invoke("stop_topic_inspection", { topicName });
+      setTopicInspection((current) =>
+        current?.topicName === topicName ? { ...current, active: false } : current,
+      );
+    } catch (error) {
+      setTopicInspectionError(String(error));
+    } finally {
+      setPendingInspectionTopic(null);
+    }
+  };
   const rosWorkspaceReady = useRef(false);
   const authRecoveryStarted = useRef(false);
   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
@@ -1022,6 +1077,18 @@ function App() {
       "ros-graph-snapshot",
       (event) => setRosGraph(event.payload),
     );
+    const unlistenTopicInspection = listen<TopicInspection>(
+      "topic-inspection-update",
+      (event) => {
+        const update = event.payload;
+        setTopicInspection((current) =>
+          current && !update.active && current.topicName !== update.topicName
+            ? current
+            : update,
+        );
+        if (!update.error) setTopicInspectionError(null);
+      },
+    );
 
     const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
       const { kind, text } = event.payload;
@@ -1072,6 +1139,7 @@ function App() {
       unlistenEventHealth.then((f) => f());
       unlistenEventRecovery.then((f) => f());
       unlistenRosGraph.then((f) => f());
+      unlistenTopicInspection.then((f) => f());
       unlistenBuildOutput.then((f) => f());
       unlistenBuildError.then((f) => f());
       unlistenBuildFinished.then((f) => f());
@@ -1811,7 +1879,19 @@ function App() {
                         )}
                       </>
                     )}
-                  <RosGraphExplorer graph={rosGraph} connected={rosConnected} />
+                  <RosGraphExplorer
+                    graph={rosGraph}
+                    connected={rosConnected}
+                    inspection={topicInspection}
+                    pendingTopic={pendingInspectionTopic}
+                    inspectionError={topicInspectionError}
+                    onStartInspection={(topicName) =>
+                      void startTopicInspection(topicName)
+                    }
+                    onStopInspection={(topicName) =>
+                      void stopTopicInspection(topicName)
+                    }
+                  />
                 </div>
               )}
             </div>
@@ -2474,7 +2554,9 @@ function App() {
                   </div>
                 </div>
               )}
-              {activeTab === "tf" && <TFTree onExplain={explainTfFrame} />}
+              {activeTab === "tf" && (
+                <TFTree connected={rosConnected} onExplain={explainTfFrame} />
+              )}
               {activeTab === "problems" && (
                 <div style={{ padding: 8, fontSize: 12 }}>
                   {eventHealth && (

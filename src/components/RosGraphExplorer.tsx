@@ -14,6 +14,15 @@ export type {
   RosGraphTopic,
 } from "../rosGraph";
 
+export interface TopicInspection {
+  topicName: string;
+  messageType: string;
+  jsonPayload: string;
+  active: boolean;
+  truncated: boolean;
+  error: string;
+}
+
 function nodePath(nodeName: string, nodeNamespace: string) {
   return `${nodeNamespace === "/" ? "" : nodeNamespace}/${nodeName}`;
 }
@@ -87,9 +96,19 @@ function GraphCard({
 export default function RosGraphExplorer({
   graph,
   connected,
+  inspection,
+  pendingTopic,
+  inspectionError,
+  onStartInspection,
+  onStopInspection,
 }: {
   graph: RosGraphSnapshot | null;
   connected: boolean;
+  inspection: TopicInspection | null;
+  pendingTopic: string | null;
+  inspectionError: string | null;
+  onStartInspection: (topicName: string) => void;
+  onStopInspection: (topicName: string) => void;
 }) {
   if (!graph) {
     return (
@@ -186,8 +205,8 @@ export default function RosGraphExplorer({
     >
       <div style={{ fontWeight: 600, marginBottom: 4 }}>Live ROS Graph</div>
       <div style={{ opacity: 0.65, fontSize: 11, marginBottom: 6 }}>
-        Read-only discovery. This panel does not call services or send action
-        goals.
+        Read-only discovery with bounded live topic inspection. This panel does
+        not call services or send action goals.
       </div>
       {graph.truncated && (
         <div role="status" style={{ color: "#e0b060", marginBottom: 6 }}>
@@ -235,6 +254,70 @@ export default function RosGraphExplorer({
               <>
                 {endpointList("Publishers", topic.publishers)}
                 {endpointList("Subscribers", topic.subscribers)}
+                <button
+                  type="button"
+                  disabled={!connected || pendingTopic !== null}
+                  onClick={() =>
+                    inspection?.topicName === topic.name && inspection.active
+                      ? onStopInspection(topic.name)
+                      : onStartInspection(topic.name)
+                  }
+                  style={{ justifySelf: "start", marginTop: 4 }}
+                >
+                  {pendingTopic === topic.name
+                    ? "Updating…"
+                    : inspection?.topicName === topic.name && inspection.active
+                      ? "Stop inspection"
+                      : "Inspect messages"}
+                </button>
+                {inspection?.topicName === topic.name && (
+                  <div
+                    aria-label={`Inspection for ${topic.name}`}
+                    style={{
+                      display: "grid",
+                      gap: 4,
+                      maxWidth: "100%",
+                      overflow: "hidden",
+                    }}
+                  >
+                    {inspection.messageType && (
+                      <div style={{ opacity: 0.7 }}>
+                        {inspection.messageType}
+                      </div>
+                    )}
+                    {inspectionError && (
+                      <div role="alert" style={{ color: "#e99" }}>
+                        {inspectionError}
+                      </div>
+                    )}
+                    {inspection.error && (
+                      <div role="alert" style={{ color: "#e99" }}>
+                        {inspection.error}
+                      </div>
+                    )}
+                    {inspection.truncated && (
+                      <div role="status" style={{ color: "#e0b060" }}>
+                        Message was truncated to fit inspection limits.
+                      </div>
+                    )}
+                    {inspection.jsonPayload && (
+                      <pre
+                        aria-label="Latest ROS topic message"
+                        style={{
+                          maxHeight: 220,
+                          overflow: "auto",
+                          whiteSpace: "pre-wrap",
+                          overflowWrap: "anywhere",
+                          margin: 0,
+                          padding: 6,
+                          background: "rgba(0,0,0,0.2)",
+                        }}
+                      >
+                        {inspection.jsonPayload}
+                      </pre>
+                    )}
+                  </div>
+                )}
               </>
             }
           />

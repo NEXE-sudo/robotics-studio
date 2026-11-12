@@ -1127,6 +1127,8 @@ pub fn run() {
             ask_ai,
             initialize_ros_environment,
             publish_twist,
+            start_topic_inspection,
+            stop_topic_inspection,
             set_emergency_stop,
             get_safety_state,
             get_robot_config,
@@ -1361,6 +1363,22 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                                 },
                             );
                         }
+                        if let Some(rosengine::workspace_event::Event::TopicInspectionUpdate(
+                            update,
+                        )) = &evt.event
+                        {
+                            let _ = app.emit(
+                                "topic-inspection-update",
+                                TopicInspectionUpdateResponse {
+                                    topic_name: update.topic_name.clone(),
+                                    message_type: update.message_type.clone(),
+                                    json_payload: update.json_payload.clone(),
+                                    active: update.active,
+                                    truncated: update.truncated,
+                                    error: update.error.clone(),
+                                },
+                            );
+                        }
 
                         if let Some(rosengine::workspace_event::Event::TfUpdate(tf)) = &evt.event {
                             let _ = app.emit(
@@ -1376,6 +1394,8 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                                     qz: tf.qz,
                                     qw: tf.qw,
                                     topic_name: tf.topic_name.clone(),
+                                    source_timestamp_ms: tf.source_timestamp_ms,
+                                    received_at_ms: evt.timestamp_ns.div_euclid(1_000_000),
                                 },
                             );
                         }
@@ -1716,6 +1736,17 @@ struct JointStateUpdateResponse {
     truncated: bool,
 }
 
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TopicInspectionUpdateResponse {
+    topic_name: String,
+    message_type: String,
+    json_payload: String,
+    active: bool,
+    truncated: bool,
+    error: String,
+}
+
 fn ros_graph_snapshot_response(snapshot: &rosengine::RosGraphSnapshot) -> RosGraphSnapshotResponse {
     RosGraphSnapshotResponse {
         nodes: snapshot
@@ -1807,6 +1838,38 @@ async fn connect_ros_client(
         .await
         .map_err(|_| "ROS service connection timed out".to_string())??;
     Ok((client, token))
+}
+
+#[tauri::command]
+async fn start_topic_inspection(app: AppHandle, topic_name: String) -> Result<(), String> {
+    if !is_valid_ros_topic(&topic_name) {
+        return Err("Invalid ROS topic name".to_string());
+    }
+    let (mut client, token) = connect_ros_client(&app).await?;
+    client
+        .start_topic_inspection(authenticated_request(
+            rosengine::TopicInspectionRequest { topic_name },
+            &token,
+        )?)
+        .await
+        .map_err(|error| format!("Could not inspect ROS topic: {}", error.message()))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn stop_topic_inspection(app: AppHandle, topic_name: String) -> Result<(), String> {
+    if !is_valid_ros_topic(&topic_name) {
+        return Err("Invalid ROS topic name".to_string());
+    }
+    let (mut client, token) = connect_ros_client(&app).await?;
+    client
+        .stop_topic_inspection(authenticated_request(
+            rosengine::TopicInspectionRequest { topic_name },
+            &token,
+        )?)
+        .await
+        .map_err(|error| format!("Could not stop ROS topic inspection: {}", error.message()))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -4458,6 +4521,8 @@ struct TfUpdate {
     qz: f64,
     qw: f64,
     topic_name: String,
+    source_timestamp_ms: i64,
+    received_at_ms: i64,
 }
 
 #[derive(Deserialize)]

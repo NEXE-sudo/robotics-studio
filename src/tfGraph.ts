@@ -10,6 +10,7 @@ export interface TfTransform {
   qz: number;
   qw: number;
   receivedAtMs: number;
+  source_timestamp_ms: number;
 }
 
 export interface TfGraphEdge extends TfTransform {

@@ -98,16 +98,23 @@ selected workspace's source and install trees rather than treating ROS
 underlay packages as workspace packages. It reports bounded metadata,
 installed executables, launch/configuration files, and allows the frontend to
 browse package files through approved-root file commands. The graph explorer
-is read-only: it does not invoke arbitrary ROS services or submit action goals,
-which could otherwise bypass the application's motion safety path.
+supports bounded live topic inspection through subscriptions created and
+destroyed on the ROS executor. Inspection is authenticated and limited to four
+topics, five messages per second per topic, depth-five best-effort queues, and
+16 KiB serialized payloads. It does not invoke arbitrary ROS services or submit
+action goals, which could otherwise bypass the application's motion safety
+path.
 
 TF updates include their source topic. `/tf_static` uses transient-local
 reliable QoS so late subscribers receive latched static transforms. The
 frontend constructs a transform forest, warns on multiple roots, cycles,
 multiple parents, stale dynamic transforms, non-finite values, and invalid
-quaternions, and provides translation/quaternion/RPY inspection. It cannot
-infer missing transform authorities from edge data alone, and is diagnostic
-validation rather than a replacement for `tf2`.
+quaternions, and provides translation/quaternion/RPY inspection. ROS message
+source stamps are retained independently from local event receive time; stale
+replayed dynamic transforms are not made fresh by reconnect. The UI explicitly
+labels disconnected transform data as last-known. It cannot infer missing
+transform authorities from edge data alone, and is diagnostic validation
+rather than a replacement for `tf2`.
 
 When an active editor file is a `.urdf`, the native backend parses a bounded
 URDF subset and the frontend renders box, cylinder, and sphere visuals with a
