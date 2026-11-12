@@ -184,13 +184,17 @@ function FileTree({
         const isExpanded = expandedPaths.has(entry.path);
         return (
           <div key={entry.path}>
-            <div
+            <button
+              type="button"
               className={`file-row ${activeFilePath === entry.path ? "active" : ""}`}
+              aria-expanded={entry.is_dir ? isExpanded : undefined}
+              aria-current={
+                !entry.is_dir && activeFilePath === entry.path
+                  ? "page"
+                  : undefined
+              }
               style={{
                 paddingLeft: 16 + depth * 14,
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
               }}
               onClick={() =>
                 entry.is_dir
@@ -208,7 +212,7 @@ function FileTree({
                 <FileText size={16} style={{ flexShrink: 0 }} />
               )}
               <span>{entry.name}</span>
-            </div>
+            </button>
             {entry.is_dir && isExpanded && childrenByPath[entry.path] && (
               <FileTree
                 entries={childrenByPath[entry.path]}
@@ -1449,10 +1453,11 @@ function App() {
         .activity-icon:hover { color: #fff; }
         .activity-icon.active { color: #fff; border-left: 2px solid #4fc3f7; background: #1e1e1e; }
         .file-row {
-          padding: var(--spacing-xs) var(--spacing-base) var(--spacing-xs) var(--spacing-lg);
+          width: 100%; padding: var(--spacing-xs) var(--spacing-base) var(--spacing-xs) var(--spacing-lg);
           font-size: var(--font-md); cursor: pointer;
           display: flex; align-items: center; gap: var(--spacing-sm); white-space: nowrap;
-          border-left: 2px solid transparent;
+          border: 0; border-left: 2px solid transparent; text-align: left;
+          color: inherit; background: transparent; font-family: inherit;
         }
         .file-row:hover { background: #2a2d2e; }
         .file-row.active { background: #37373d; border-left: 2px solid #4fc3f7; }

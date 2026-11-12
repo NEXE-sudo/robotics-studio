@@ -3307,7 +3307,8 @@ static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
 static BUILD_CONTAINER: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static MANAGED_PROCESS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static GAZEBO_RUNTIME_PROCESSES: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+type GazeboRuntimeProcessIds = (Option<String>, Option<String>);
+static GAZEBO_RUNTIME_PROCESSES: OnceLock<Mutex<Option<GazeboRuntimeProcessIds>>> = OnceLock::new();
 
 fn next_managed_process_id(prefix: &str) -> String {
     format!(
@@ -3317,7 +3318,7 @@ fn next_managed_process_id(prefix: &str) -> String {
     )
 }
 
-fn gazebo_runtime_process_ids() -> Option<(String, String)> {
+fn gazebo_runtime_process_ids() -> Option<GazeboRuntimeProcessIds> {
     GAZEBO_RUNTIME_PROCESSES
         .get_or_init(|| Mutex::new(None))
         .lock()
@@ -3326,10 +3327,12 @@ fn gazebo_runtime_process_ids() -> Option<(String, String)> {
 }
 
 fn set_gazebo_runtime_process_ids(sim_id: Option<String>, bridge_id: Option<String>) {
-    if let Some(lock) = GAZEBO_RUNTIME_PROCESSES.get() {
-        if let Ok(mut guard) = lock.lock() {
-            *guard = sim_id.zip(bridge_id);
-        }
+    let active_processes = (sim_id.is_some() || bridge_id.is_some()).then_some((sim_id, bridge_id));
+    if let Ok(mut guard) = GAZEBO_RUNTIME_PROCESSES
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *guard = active_processes;
     }
 }
 
@@ -3881,8 +3884,7 @@ fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
             container_name,
             "bash",
             "-c",
-            "pkill -TERM -f '[g]z sim -s' || true; \
-             pkill -TERM -f '[p]arameter_bridge' || true",
+            "pkill -TERM -f '[g]z sim -s' || true; pkill -TERM -f '[p]arameter_bridge' || true",
         ])
         .output()
         .map_err(|error| format!("Could not stop Gazebo processes: {error}"))?;
@@ -3892,7 +3894,51 @@ fn stop_gazebo_processes(container_name: &str) -> Result<(), String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(())
+    if wait_for_process_exit(10, std::time::Duration::from_millis(200), || {
+        gazebo_processes_stopped(container_name)
+    }) {
+        return Ok(());
+    }
+
+    let output = docker_command()
+        .args([
+            "exec",
+            container_name,
+            "bash",
+            "-c",
+            "pkill -KILL -f '[g]z sim -s' || true; pkill -KILL -f '[p]arameter_bridge' || true",
+        ])
+        .output()
+        .map_err(|error| format!("Could not force-stop Gazebo processes: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "Could not force-stop Gazebo processes: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    if wait_for_process_exit(10, std::time::Duration::from_millis(200), || {
+        gazebo_processes_stopped(container_name)
+    }) {
+        Ok(())
+    } else {
+        Err("Gazebo and ROS-Gazebo bridge did not exit after forced termination".to_string())
+    }
+}
+
+fn wait_for_process_exit(
+    attempts: usize,
+    interval: std::time::Duration,
+    mut has_exited: impl FnMut() -> bool,
+) -> bool {
+    for attempt in 0..attempts {
+        if has_exited() {
+            return true;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(interval);
+        }
+    }
+    false
 }
 
 fn gazebo_processes_stopped(container_name: &str) -> bool {
@@ -3918,25 +3964,6 @@ fn start_gazebo_sim(
 ) -> Result<String, String> {
     let container_name = find_dev_container()?;
     let sim_id = next_managed_process_id("gazebo-sim");
-    let workspace = get_default_workspace_dir()?;
-
-    managed_process_registry().register(
-        sim_id.clone(),
-        "gazebo-sim".to_string(),
-        vec![
-            "docker".to_string(),
-            "exec".to_string(),
-            "-d".to_string(),
-            container_name.clone(),
-            "bash".to_string(),
-            "-c".to_string(),
-            "source /opt/ros/jazzy/setup.bash && exec gz sim -s -r --headless-rendering \"$1\" > /tmp/gz.log 2>&1".to_string(),
-            "robotics-studio".to_string(),
-        ],
-        Some(workspace.clone()),
-        None,
-    );
-    managed_process_registry().mark_starting(&sim_id);
 
     // Defensively kill any existing instances, and actively verify
     // they're gone before proceeding — a fixed sleep isn't reliable
@@ -4026,7 +4053,25 @@ fn start_gazebo_sim(
         .filter(|m| m.as_str() != "ground_plane")
         .collect();
 
-    let gz_result = docker_command()
+    managed_process_registry().register(
+        sim_id.clone(),
+        "gazebo-sim".to_string(),
+        vec![
+            "docker".to_string(),
+            "exec".to_string(),
+            "-d".to_string(),
+            container_name.clone(),
+            "bash".to_string(),
+            "-c".to_string(),
+            "source /opt/ros/jazzy/setup.bash && exec gz sim -s -r --headless-rendering \"$1\" > /tmp/gz.log 2>&1".to_string(),
+            "robotics-studio".to_string(),
+        ],
+        Some(workspace.to_string_lossy().to_string()),
+        None,
+    );
+    managed_process_registry().mark_starting(&sim_id);
+
+    let gz_result = match docker_command()
         .args([
             "exec",
             "-d",
@@ -4038,7 +4083,18 @@ fn start_gazebo_sim(
             &container_world_path,
         ])
         .output()
-        .map_err(|_| docker_lost_connection_message())?;
+    {
+        Ok(result) => result,
+        Err(error) => {
+            managed_process_registry().mark_completed(
+                &sim_id,
+                None,
+                ManagedProcessStatus::Failed,
+                Some(error.to_string()),
+            );
+            return Err(format!("Could not launch Gazebo: {error}"));
+        }
+    };
 
     if !gz_result.status.success() {
         managed_process_registry().mark_completed(
@@ -4069,15 +4125,19 @@ fn start_gazebo_sim(
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
     if world_control_service.is_none() {
-        managed_process_registry().mark_completed(
-            &sim_id,
-            None,
-            ManagedProcessStatus::TimedOut,
-            Some("Gazebo did not become ready within 20 seconds".to_string()),
-        );
+        managed_process_registry().request_stop(&sim_id);
         let cleanup = stop_gazebo_processes(&container_name);
         return Err(match cleanup {
-            Ok(()) => "Gazebo did not become ready within 20 seconds".to_string(),
+            Ok(()) => {
+                managed_process_registry().mark_completed(
+                    &sim_id,
+                    None,
+                    ManagedProcessStatus::TimedOut,
+                    Some("Gazebo did not become ready within 20 seconds".to_string()),
+                );
+                set_gazebo_runtime_process_ids(None, None);
+                "Gazebo did not become ready within 20 seconds".to_string()
+            }
             Err(error) => {
                 format!("Gazebo did not become ready within 20 seconds; cleanup failed: {error}")
             }
@@ -4131,10 +4191,34 @@ fn start_gazebo_sim(
         "robotics-studio",
     ];
     bridge_args.extend(bridge_topics.iter().map(String::as_str));
-    let bridge_result = docker_command()
-        .args(bridge_args)
-        .output()
-        .map_err(|_| docker_lost_connection_message())?;
+    let bridge_result = match docker_command().args(bridge_args).output() {
+        Ok(result) => result,
+        Err(error) => {
+            managed_process_registry().mark_completed(
+                &bridge_id,
+                None,
+                ManagedProcessStatus::Failed,
+                Some(error.to_string()),
+            );
+            managed_process_registry().request_stop(&sim_id);
+            return match stop_gazebo_processes(&container_name) {
+                Ok(()) => {
+                    managed_process_registry().mark_completed(
+                        &sim_id,
+                        Some(0),
+                        ManagedProcessStatus::Cancelled,
+                        Some("Bridge failed to start; Gazebo was stopped".to_string()),
+                    );
+                    set_gazebo_runtime_process_ids(None, None);
+                    Err(docker_lost_connection_message())
+                }
+                Err(error) => Err(format!(
+                    "{}; simulator cleanup failed: {error}",
+                    docker_lost_connection_message()
+                )),
+            };
+        }
+    };
 
     if !bridge_result.status.success() {
         managed_process_registry().mark_completed(
@@ -4147,12 +4231,22 @@ fn start_gazebo_sim(
                     .to_string(),
             ),
         );
+        managed_process_registry().request_stop(&sim_id);
         let cleanup = stop_gazebo_processes(&container_name);
         if ensure_docker_available().is_err() {
             return Err(docker_lost_connection_message());
         }
         return Err(match cleanup {
-            Ok(()) => String::from_utf8_lossy(&bridge_result.stderr).to_string(),
+            Ok(()) => {
+                managed_process_registry().mark_completed(
+                    &sim_id,
+                    Some(0),
+                    ManagedProcessStatus::Cancelled,
+                    Some("Bridge failed to start; Gazebo was stopped".to_string()),
+                );
+                set_gazebo_runtime_process_ids(None, None);
+                String::from_utf8_lossy(&bridge_result.stderr).to_string()
+            }
             Err(error) => format!(
                 "{}; simulator cleanup failed: {error}",
                 String::from_utf8_lossy(&bridge_result.stderr)
@@ -4169,24 +4263,27 @@ fn start_gazebo_sim(
 fn stop_gazebo_sim() -> Result<String, String> {
     let container_name = find_dev_container()?;
     if let Some((sim_id, bridge_id)) = gazebo_runtime_process_ids() {
-        managed_process_registry().request_stop(&sim_id);
-        managed_process_registry().request_stop(&bridge_id);
+        if let Some(sim_id) = &sim_id {
+            managed_process_registry().request_stop(sim_id);
+        }
+        if let Some(bridge_id) = &bridge_id {
+            managed_process_registry().request_stop(bridge_id);
+        }
     }
     stop_gazebo_processes(&container_name)?;
     if let Some((sim_id, bridge_id)) = gazebo_runtime_process_ids() {
         if gazebo_processes_stopped(&container_name) {
-            managed_process_registry().mark_completed(
-                &sim_id,
-                Some(0),
-                ManagedProcessStatus::Completed,
-                None,
-            );
-            managed_process_registry().mark_completed(
-                &bridge_id,
-                Some(0),
-                ManagedProcessStatus::Completed,
-                None,
-            );
+            for process_id in [sim_id.as_deref(), bridge_id.as_deref()]
+                .into_iter()
+                .flatten()
+            {
+                managed_process_registry().mark_completed(
+                    process_id,
+                    Some(0),
+                    ManagedProcessStatus::Cancelled,
+                    None,
+                );
+            }
             set_gazebo_runtime_process_ids(None, None);
         }
     }
@@ -6479,6 +6576,44 @@ mod filesystem_security_tests {
 #[cfg(test)]
 mod process_registry_tests {
     use super::*;
+
+    #[test]
+    fn gazebo_runtime_registry_tracks_partial_startup_and_can_be_cleared() {
+        set_gazebo_runtime_process_ids(Some("sim-process".to_string()), None);
+        assert_eq!(
+            gazebo_runtime_process_ids(),
+            Some((Some("sim-process".to_string()), None))
+        );
+
+        set_gazebo_runtime_process_ids(None, Some("bridge-process".to_string()));
+        assert_eq!(
+            gazebo_runtime_process_ids(),
+            Some((None, Some("bridge-process".to_string())))
+        );
+
+        set_gazebo_runtime_process_ids(None, None);
+        assert_eq!(gazebo_runtime_process_ids(), None);
+    }
+
+    #[test]
+    fn process_exit_waits_until_the_probe_confirms_termination() {
+        let mut probes = 0;
+        assert!(wait_for_process_exit(3, std::time::Duration::ZERO, || {
+            probes += 1;
+            probes == 2
+        }));
+        assert_eq!(probes, 2);
+    }
+
+    #[test]
+    fn process_exit_wait_stops_after_the_configured_attempts() {
+        let mut probes = 0;
+        assert!(!wait_for_process_exit(3, std::time::Duration::ZERO, || {
+            probes += 1;
+            false
+        }));
+        assert_eq!(probes, 3);
+    }
 
     #[test]
     fn process_registry_confirms_cancellation_only_after_process_exit() {

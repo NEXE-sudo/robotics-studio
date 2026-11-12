@@ -2,11 +2,11 @@
 
 ## Decision
 
-**Not ready for release.** The worktree is based on `59d8467` on `main` and
-contains uncommitted ROS package, service/action, Xacro/mesh rendering, TF,
-filesystem, and process-related changes. Local validation and the complete
-Jazzy/Harmonic Docker integration pass, but substantial v0.3.0 acceptance
-criteria remain incomplete. Hosted run
+**Not ready for release.** The checked-out base is `791407f` on `main`; the
+worktree has local frontend accessibility and Gazebo lifecycle changes in
+addition to the already-integrated ROS, TF, URDF/Xacro, and filesystem work.
+Local validation and the complete Jazzy/Harmonic Docker integration pass, but
+substantial v0.3.0 acceptance criteria remain incomplete. Hosted run
 [#43253091970](https://github.com/NEXE-sudo/robotics-studio/actions/runs/43253091970)
 failed strict Clippy on an identity `Option::map`; that was fixed locally and
 the same strict Clippy command now passes. Hosted CI has not yet been rerun
@@ -40,9 +40,9 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 | 17 | Xacro expansion | PARTIAL | A bounded non-executing subset supports arguments, properties, arithmetic, macros, workspace-local includes, and boolean conditionals, with cycle/expansion limits and fail-closed unsupported expressions. This is not controlled ROS `xacro` tooling or full Xacro compatibility. |
 | 18 | Mesh/resource resolution | PARTIAL | Workspace/package-confined relative and `package://` STL and texture-free DAE meshes are loaded with file/size bounds. External DAE textures/references and broader resource semantics fail closed; visual desktop verification remains. |
 | 19 | Robot model and joint-state rendering | PARTIAL | URDF/Xacro visuals, supported joints (including best-effort planar/floating axis translations), live `/joint_states`, limits, mimic, collision geometry, materials, inertial frames, mesh transforms, and scene disposal are implemented and covered by focused tests. Native preview and broader coordinate-convention verification remain unperformed. |
-| 20 | Process lifecycle manager | PARTIAL | Build states distinguish starting/running/stopping/terminal outcomes; stop requests are only reported as cancellation after process exit. Docker, Gazebo, bridge, and ROS service processes still lack a shared lifecycle manager, generalized timeouts, and application-shutdown cleanup. |
+| 20 | Process lifecycle manager | PARTIAL | Build and Gazebo processes have registry states and stop tracking. Gazebo shutdown waits for graceful exit, escalates to forced termination after a bounded grace period, tracks the simulator before bridge startup, and returns success/marks cancellation only after both Gazebo and bridge are confirmed gone. Failed bridge startup cleans up and records the simulator state. Unit tests cover partial ID tracking and bounded exit polling; Docker integration passes. Docker, ROS service, and other processes still lack a unified lifecycle manager, generalized timeouts, unexpected-exit handling, and application-shutdown cleanup. |
 | 21 | Gazebo and SDF | PARTIAL | Jazzy/Harmonic startup, reset, bridge, and pre-launch `gz sdf --check` schema validation are integration-tested. Comprehensive external resource resolution and validation remain absent. |
-| 22 | Frontend workflow tests/accessibility | PARTIAL | Seventeen dependency-free TF graph and robot-rendering tests plus production type-check/build pass. React workflow tests, accessibility review, and coverage of workspace/ROS/safety UI remain. |
+| 22 | Frontend workflow tests/accessibility | PARTIAL | Seventeen dependency-free TF graph and robot-rendering tests plus production type-check/build pass. Workspace file rows use keyboard-operable native buttons; React workflow tests, full accessibility review, and coverage of workspace/ROS/safety UI remain. |
 | 23 | Cross-platform runtime and release artifacts | PARTIAL | A local macOS x86_64 `.app` and `.dmg` were built successfully. They have not been launch-tested or notarized; macOS Apple Silicon, Linux, and Windows release builds/runtime and v0.2.0 upgrade verification remain. |
 
 ## Security and safety notes
@@ -78,15 +78,15 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 | Check | Result |
 |---|---|
 | `npm ci` | Pass; 90 packages installed and 0 npm vulnerabilities reported. |
-| `npm run build` | Pass; TypeScript check and Vite production build succeed; latest observed JavaScript chunk is 943.91 kB and still triggers the >500 kB chunk warning. |
+| `npm run build` | Pass; TypeScript check and Vite production build succeed; latest observed JavaScript chunk is 944.09 kB and still triggers the >500 kB chunk warning. |
 | `npm run test:frontend` | Pass: 17 dependency-free TF graph and robot-rendering tests, including planar/floating joint preview coverage and symlink-safety checks. |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass. |
-| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 52 passed, 0 failed, 1 ignored (live-service test). |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 55 passed, 0 failed, 1 ignored (live-service test); includes partial Gazebo ID tracking and bounded process-exit confirmation tests. |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | Pass locally after removing an identity `Option::map` in Gazebo runtime process-ID storage. |
 | Python unittest discovery from `src-tauri/resources/devcontainer` | Pass: 44 tests. |
 | Python `py_compile` for ROS service modules | Pass. |
 | `bash -n scripts/docker-integration.sh` | Pass. |
-| `scripts/docker-integration.sh` | Pass: selected-workspace/underlay discovery; safe lifecycle service calls and denied/invalid requests; Fibonacci action feedback, result, unavailable-server reporting and confirmed cancellation; bounded topic inspection; static/dynamic TF and joint-state delivery; SDFormat; pinned TLS/auth; stop/reset; event replay/restart; and Gazebo. Exit 0; no integration container or temporary directory remains. |
+| `scripts/docker-integration.sh` | Pass on the current worktree: selected-workspace/underlay discovery; safe lifecycle service calls and denied/invalid requests; Fibonacci action feedback, result, unavailable-server reporting and confirmed cancellation; bounded topic inspection; static/dynamic TF and joint-state delivery; SDFormat; pinned TLS/auth; stop/reset; event replay/restart; and Gazebo. Exit 0. |
 | `npm run tauri build` and `hdiutil verify` | Pass: built the macOS x86_64 `.app` and `.dmg`; DMG checksum is valid. Launch, signing/notarization, and non-macOS bundles remain unverified. |
 | `cd src-tauri && cargo audit` | Pass with 13 warnings: no vulnerability findings; unsound `glib` and unmaintained transitive dependencies remain. |
 | `npm audit` | Pass: 0 vulnerabilities. |
