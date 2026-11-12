@@ -25,6 +25,7 @@ export interface RosGraphService {
   types: string[];
   serverNodes: string[];
   clientNodes: string[];
+  safeTypes: string[];
 }
 
 export interface RosGraphAction {
@@ -32,6 +33,7 @@ export interface RosGraphAction {
   types: string[];
   serverNodes: string[];
   clientNodes: string[];
+  safeTypes: string[];
 }
 
 export interface RosGraphSnapshot {

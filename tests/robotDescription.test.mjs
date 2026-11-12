@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import * as THREE from "three";
 import { buildRobotInstance } from "../src/robotDescription.ts";
 
 const origin = { xyz: [0, 0, 0], rpy: [0, 0, 0] };
@@ -150,4 +151,82 @@ test("clamps joint limits, resolves mimic joints, and toggles collision geometry
   assert.ok(Math.abs(follower.rotation.z - (-1.75)) < 1e-8);
   instance.setCollisionVisible(true);
   assert.equal(collision.visible, true);
+});
+
+test("loads STL meshes, applies URDF transforms, shows inertial frames, and disposes resources", () => {
+  const stl = `solid triangle
+facet normal 0 0 1
+outer loop
+vertex 0 0 0
+vertex 1 0 0
+vertex 0 1 0
+endloop
+endfacet
+endsolid triangle
+`;
+  const instance = buildRobotInstance({
+    name: "mesh_robot",
+    rootLink: "base",
+    warnings: [],
+    links: [
+      {
+        name: "base",
+        visuals: [
+          {
+            origin: { xyz: [0, 0, 0.2], rpy: [0.2, 0.3, 0.4] },
+            geometry: {
+              kind: "mesh",
+              filename: "package://demo/meshes/triangle.stl",
+              scale: [1, 2, 3],
+              format: "stl",
+              data: Buffer.from(stl).toString("base64"),
+            },
+            color: [0.1, 0.3, 0.8, 1],
+            materialName: "blue",
+          },
+        ],
+        collisions: [],
+        inertial: {
+          origin: { xyz: [0, 0, 0.1], rpy: [0, 0, 0] },
+          mass: 2,
+          inertia: [0.2, 0, 0, 0.3, 0, 0.4],
+        },
+      },
+    ],
+    joints: [],
+  });
+
+  const base = instance.group.getObjectByName("base");
+  assert.ok(base);
+  const visual = base.children.find(
+    (child) => child instanceof THREE.Group && child.position.z === 0.2,
+  );
+  assert.ok(visual);
+  assert.ok(
+    visual.quaternion.angleTo(
+      new THREE.Quaternion().setFromEuler(
+        new THREE.Euler(0.2, 0.3, 0.4, "ZYX"),
+      ),
+    ) < 1e-7,
+  );
+  const mesh = visual.children[0];
+  assert.ok(mesh instanceof THREE.Mesh);
+  assert.equal(mesh.scale.y, 2);
+  assert.equal(mesh.scale.z, 3);
+  assert.equal(mesh.geometry.getAttribute("position").count, 3);
+
+  const inertial = instance.group.getObjectByName("base:inertial");
+  assert.ok(inertial);
+  assert.equal(inertial.visible, false);
+  instance.setInertialVisible(true);
+  assert.equal(inertial.visible, true);
+
+  let geometryDisposed = false;
+  const disposeGeometry = mesh.geometry.dispose.bind(mesh.geometry);
+  mesh.geometry.dispose = () => {
+    geometryDisposed = true;
+    disposeGeometry();
+  };
+  instance.dispose();
+  assert.equal(geometryDisposed, true);
 });

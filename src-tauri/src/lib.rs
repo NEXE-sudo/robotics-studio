@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 mod urdf;
+mod xacro;
 
 const MAX_FILE_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_WORLD_SIZE: u64 = 10 * 1024 * 1024;
@@ -15,6 +16,41 @@ struct FsAccess {
     approved_roots: Mutex<HashSet<PathBuf>>,
     #[cfg(unix)]
     root_descriptors: Mutex<HashMap<PathBuf, Arc<rustix::fd::OwnedFd>>>,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SafeServiceResponse {
+    service_name: String,
+    service_type: String,
+    response_json: String,
+    truncated: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SafeActionGoalUpdateResponse {
+    goal_id: String,
+    action_name: String,
+    action_type: String,
+    status: String,
+    feedback_json: String,
+    result_json: String,
+    error: String,
+    terminal: bool,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeActionGoalResponse {
+    goal_id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeActionCancelResponse {
+    requested: bool,
 }
 
 impl FsAccess {
@@ -982,9 +1018,457 @@ fn validate_sdf_file(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+const MAX_XACRO_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MESH_COUNT: usize = 128;
+const MAX_TOTAL_MESH_BYTES: usize = 16 * 1024 * 1024;
+
+fn package_name_from_manifest(content: &str) -> Result<String, String> {
+    let mut reader = quick_xml::Reader::from_str(content);
+    reader.config_mut().trim_text(true);
+    let mut package_root = false;
+    let mut in_name = false;
+    let mut name = None;
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(element)) => {
+                let local = element.local_name();
+                if !package_root {
+                    if local.as_ref() != b"package" {
+                        return Err("ROS package manifest root must be <package>".to_string());
+                    }
+                    package_root = true;
+                } else if local.as_ref() == b"name" && name.is_none() {
+                    in_name = true;
+                }
+            }
+            Ok(quick_xml::events::Event::Text(text)) if in_name => {
+                name = Some(
+                    text.decode()
+                        .map_err(|error| format!("Malformed ROS package name: {error}"))?
+                        .trim()
+                        .to_string(),
+                );
+            }
+            Ok(quick_xml::events::Event::End(element))
+                if element.local_name().as_ref() == b"name" =>
+            {
+                in_name = false;
+            }
+            Ok(quick_xml::events::Event::DocType(_)) => {
+                return Err("ROS package manifests must not contain a DTD".to_string());
+            }
+            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(_) => {}
+            Err(error) => return Err(format!("Malformed ROS package manifest: {error}")),
+        }
+    }
+    let name = name.ok_or_else(|| "ROS package manifest is missing its name".to_string())?;
+    if name.is_empty()
+        || !name.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        })
+        || name.starts_with('_')
+    {
+        return Err(format!("Invalid ROS package name '{name}'"));
+    }
+    Ok(name)
+}
+
+fn find_ros_packages(
+    access: &FsAccess,
+    workspace: &Path,
+) -> Result<HashMap<String, PathBuf>, String> {
+    const MAX_SCANNED_ENTRIES: usize = 20_000;
+    const MAX_PACKAGE_DEPTH: usize = 12;
+    let mut packages = HashMap::new();
+    let mut pending = vec![(workspace.to_path_buf(), 0usize)];
+    let mut scanned = 0usize;
+    while let Some((directory, depth)) = pending.pop() {
+        let manifest = directory.join("package.xml");
+        if fs::symlink_metadata(&manifest)
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+        {
+            if fs::metadata(&manifest)
+                .map_err(|error| format!("Could not inspect ROS package manifest: {error}"))?
+                .len()
+                > 64 * 1024
+            {
+                return Err("ROS package manifest exceeds the 64 KiB limit".to_string());
+            }
+            let content = read_approved_file(access, &manifest)?;
+            if content.len() > 64 * 1024 {
+                return Err("ROS package manifest exceeds the 64 KiB limit".to_string());
+            }
+            let name = package_name_from_manifest(&content)?;
+            if packages.insert(name.clone(), directory.clone()).is_some() {
+                return Err(format!(
+                    "ROS package name '{name}' is ambiguous in the selected workspace"
+                ));
+            }
+            continue;
+        }
+        if depth >= MAX_PACKAGE_DEPTH {
+            continue;
+        }
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries {
+            scanned += 1;
+            if scanned > MAX_SCANNED_ENTRIES {
+                return Err(format!(
+                    "ROS package discovery exceeds the {MAX_SCANNED_ENTRIES}-entry limit"
+                ));
+            }
+            let entry = entry.map_err(|error| format!("Could not scan workspace: {error}"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("Could not inspect workspace entry: {error}"))?;
+            let name = entry.file_name();
+            if file_type.is_dir()
+                && !file_type.is_symlink()
+                && !matches!(
+                    name.to_str(),
+                    Some(".git" | "node_modules" | "build" | "install" | "log" | "target")
+                )
+            {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    Ok(packages)
+}
+
+fn package_boundary_for(
+    source: &Path,
+    packages: &HashMap<String, PathBuf>,
+    workspace: &Path,
+) -> PathBuf {
+    packages
+        .values()
+        .filter(|root| source.starts_with(root))
+        .max_by_key(|root| root.components().count())
+        .cloned()
+        .unwrap_or_else(|| workspace.to_path_buf())
+}
+
+fn resolve_resource_file(base: &Path, boundary: &Path, filename: &str) -> Result<PathBuf, String> {
+    if filename.is_empty()
+        || filename.contains("://")
+        || filename.contains('\\')
+        || filename.contains('\0')
+    {
+        return Err("Robot resource URI must be a local relative path".to_string());
+    }
+    let relative = Path::new(filename);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| matches!(component, Component::RootDir | Component::Prefix(_)))
+    {
+        return Err("Robot resource path must be relative".to_string());
+    }
+    let resolved = base
+        .join(relative)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve robot resource '{filename}': {error}"))?;
+    if !resolved.starts_with(boundary) {
+        return Err("Robot resource resolves outside its approved workspace/package root".into());
+    }
+    let metadata = fs::symlink_metadata(&resolved)
+        .map_err(|error| format!("Could not inspect robot resource: {error}"))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Robot resource must be a regular file".to_string());
+    }
+    Ok(resolved)
+}
+
+fn resolve_mesh_path(
+    filename: &str,
+    description_path: &Path,
+    workspace: &Path,
+    packages: &HashMap<String, PathBuf>,
+) -> Result<PathBuf, String> {
+    if let Some(package_uri) = filename.strip_prefix("package://") {
+        let (package_name, relative) = package_uri.split_once('/').ok_or_else(|| {
+            "package:// mesh URI must include a package and file path".to_string()
+        })?;
+        if package_name.is_empty()
+            || !package_name.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+            })
+        {
+            return Err("package:// URI contains an invalid package name".to_string());
+        }
+        let package_root = packages.get(package_name).ok_or_else(|| {
+            format!("ROS package '{package_name}' is not in the selected workspace")
+        })?;
+        if Path::new(relative)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+        {
+            return Err(
+                "package:// mesh path cannot traverse outside its package root".to_string(),
+            );
+        }
+        resolve_resource_file(package_root, package_root, relative)
+    } else {
+        let boundary = package_boundary_for(description_path, packages, workspace);
+        let base = description_path
+            .parent()
+            .ok_or_else(|| "Robot description has no parent directory".to_string())?;
+        resolve_resource_file(base, &boundary, filename)
+    }
+}
+
+fn render_robot_description(
+    access: &FsAccess,
+    workspace_root: &str,
+    path: &str,
+    content: &str,
+) -> Result<urdf::RobotDescription, String> {
+    let workspace = Path::new(workspace_root)
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve selected workspace: {error}"))?;
+    if !workspace.is_dir()
+        || !access
+            .approved_roots
+            .lock()
+            .map_err(|_| "Filesystem access state is unavailable".to_string())?
+            .contains(&workspace)
+    {
+        return Err("Robot resources are restricted to the approved selected workspace".into());
+    }
+    let source_path = access.resolve_existing(Path::new(path))?;
+    if !source_path.starts_with(&workspace) {
+        return Err("Robot description is outside the selected workspace".to_string());
+    }
+    if content.len() > 2 * 1024 * 1024 {
+        return Err("Robot description exceeds the 2 MiB source limit".to_string());
+    }
+    let packages = find_ros_packages(access, &workspace)?;
+    let is_xacro = source_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("xacro"));
+    let expanded = if is_xacro {
+        let mut total_include_bytes = content.len();
+        let mut include_loader = |including_file: &Path,
+                                  filename: &str|
+         -> Result<(PathBuf, String), String> {
+            if filename.contains('\\') {
+                return Err("Xacro includes must use workspace-local relative paths".to_string());
+            }
+            let include_path = if let Some(package_uri) = filename.strip_prefix("package://") {
+                let (package_name, relative) = package_uri.split_once('/').ok_or_else(|| {
+                    "Xacro package include must name a package and file".to_string()
+                })?;
+                let package_root = packages.get(package_name).ok_or_else(|| {
+                    format!("ROS package '{package_name}' is not in the selected workspace")
+                })?;
+                if Path::new(relative)
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_) | Component::CurDir))
+                {
+                    return Err(
+                        "Xacro package include cannot traverse its package root".to_string()
+                    );
+                }
+                resolve_resource_file(package_root, package_root, relative)?
+            } else {
+                if Path::new(filename).is_absolute() || filename.contains("://") {
+                    return Err(
+                        "Xacro includes must use workspace-local relative paths".to_string()
+                    );
+                }
+                let include_boundary = package_boundary_for(including_file, &packages, &workspace);
+                let include_base = including_file
+                    .parent()
+                    .ok_or_else(|| "Xacro source has no parent directory".to_string())?;
+                resolve_resource_file(include_base, &include_boundary, filename)?
+            };
+            if fs::metadata(&include_path)
+                .map_err(|error| format!("Could not inspect Xacro include: {error}"))?
+                .len()
+                > 2 * 1024 * 1024
+            {
+                return Err("Xacro include exceeds the 2 MiB source limit".to_string());
+            }
+            let include_content = read_approved_file(access, &include_path)?;
+            if include_content.len() > 2 * 1024 * 1024 {
+                return Err("Xacro include exceeds the 2 MiB source limit".to_string());
+            }
+            total_include_bytes = total_include_bytes.saturating_add(include_content.len());
+            if total_include_bytes > MAX_XACRO_TOTAL_BYTES {
+                return Err("Xacro source and includes exceed the 8 MiB total limit".into());
+            }
+            Ok((include_path, include_content))
+        };
+        xacro::expand(content, &source_path, &mut include_loader)?
+    } else {
+        content.to_string()
+    };
+
+    let mut robot = urdf::parse_robot_description(&expanded)?;
+    let mut mesh_count = 0usize;
+    let mut mesh_bytes = 0usize;
+    for link in &mut robot.links {
+        for visual in link.visuals.iter_mut().chain(link.collisions.iter_mut()) {
+            let urdf::RobotGeometry::Mesh {
+                filename,
+                format,
+                data,
+                ..
+            } = &mut visual.geometry
+            else {
+                continue;
+            };
+            mesh_count += 1;
+            if mesh_count > MAX_MESH_COUNT {
+                return Err(format!("Robot mesh count exceeds {MAX_MESH_COUNT}"));
+            }
+            let mesh_path = resolve_mesh_path(filename, &source_path, &workspace, &packages)?;
+            let mesh_content = access
+                .read_file_if_present(&mesh_path)?
+                .ok_or_else(|| "Robot mesh disappeared while loading".to_string())?;
+            mesh_bytes = mesh_bytes.saturating_add(mesh_content.len());
+            if mesh_bytes > MAX_TOTAL_MESH_BYTES {
+                return Err("Robot meshes exceed the 16 MiB total byte limit".to_string());
+            }
+            urdf::validate_mesh_bytes(format, &mesh_content)?;
+            *data = Some(base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                mesh_content,
+            ));
+        }
+    }
+    Ok(robot)
+}
+
 #[tauri::command]
-fn parse_robot_description(content: String) -> Result<urdf::RobotDescription, String> {
-    urdf::parse_robot_description(&content)
+fn parse_robot_description(
+    access: tauri::State<'_, FsAccess>,
+    workspace_root: String,
+    path: String,
+    content: String,
+) -> Result<urdf::RobotDescription, String> {
+    render_robot_description(&access, &workspace_root, &path, &content)
+}
+
+#[cfg(test)]
+mod urdf_rendering_tests {
+    use super::{render_robot_description, FsAccess};
+    use crate::urdf::RobotGeometry;
+    use std::fs;
+
+    fn fixture_workspace() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests/fixtures/urdf_workspace")
+            .canonicalize()
+            .unwrap()
+    }
+
+    #[test]
+    fn expands_xacro_and_loads_only_workspace_package_meshes() {
+        let access = FsAccess::default();
+        let workspace = fixture_workspace();
+        access.approve_directory(&workspace).unwrap();
+        let description_path = workspace
+            .join("src/demo_robot/urdf/robot.xacro")
+            .canonicalize()
+            .unwrap();
+        let content = fs::read_to_string(&description_path).unwrap();
+        let robot = render_robot_description(
+            &access,
+            workspace.to_str().unwrap(),
+            description_path.to_str().unwrap(),
+            &content,
+        )
+        .unwrap();
+
+        assert_eq!(robot.name, "demo_robot");
+        assert_eq!(robot.root_link, "base");
+        assert_eq!(robot.links[0].visuals[0].color, Some([0.1, 0.3, 0.8, 1.0]));
+        assert_eq!(robot.links[0].inertial.as_ref().unwrap().mass, 1.5);
+        assert_eq!(robot.links[0].collisions.len(), 1);
+        let RobotGeometry::Mesh {
+            filename,
+            scale,
+            format,
+            data,
+        } = &robot.links[0].visuals[0].geometry
+        else {
+            panic!("expected resolved STL mesh");
+        };
+        assert_eq!(filename, "package://demo_robot/meshes/triangle.stl");
+        assert_eq!(*scale, [1.0, 2.0, 1.0]);
+        assert_eq!(format, "stl");
+        assert!(data.as_ref().is_some_and(|mesh| !mesh.is_empty()));
+    }
+
+    #[test]
+    fn rejects_unapproved_roots_and_package_traversal_in_mesh_uris() {
+        let workspace = fixture_workspace();
+        let access = FsAccess::default();
+        let description_path = workspace.join("src/demo_robot/urdf/robot.xacro");
+        let content = fs::read_to_string(&description_path).unwrap();
+
+        assert!(render_robot_description(
+            &access,
+            workspace.to_str().unwrap(),
+            description_path.to_str().unwrap(),
+            &content,
+        )
+        .unwrap_err()
+        .contains("approved selected workspace"));
+
+        access.approve_directory(&workspace).unwrap();
+        let traversal = content.replace(
+            "package://demo_robot/meshes/triangle.stl",
+            "package://demo_robot/../../outside.stl",
+        );
+        assert!(render_robot_description(
+            &access,
+            workspace.to_str().unwrap(),
+            description_path.to_str().unwrap(),
+            &traversal,
+        )
+        .unwrap_err()
+        .contains("cannot traverse"));
+    }
+
+    #[test]
+    fn resolves_and_validates_texture_free_collada_meshes() {
+        let access = FsAccess::default();
+        let workspace = fixture_workspace();
+        access.approve_directory(&workspace).unwrap();
+        let description_path = workspace
+            .join("src/demo_robot/urdf/robot.xacro")
+            .canonicalize()
+            .unwrap();
+        let content = r#"<robot name="dae_test"><link name="base"><visual><geometry><mesh filename="package://demo_robot/meshes/triangle.dae"/></geometry></visual></link></robot>"#;
+        let robot = render_robot_description(
+            &access,
+            workspace.to_str().unwrap(),
+            description_path.to_str().unwrap(),
+            content,
+        )
+        .unwrap();
+        let RobotGeometry::Mesh {
+            format,
+            data: Some(data),
+            ..
+        } = &robot.links[0].visuals[0].geometry
+        else {
+            panic!("expected resolved DAE mesh");
+        };
+        assert_eq!(format, "dae");
+        let decoded =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).unwrap();
+        let original = fs::read(workspace.join("src/demo_robot/meshes/triangle.dae")).unwrap();
+        assert_eq!(decoded, original);
+    }
 }
 
 fn import_world_contents(
@@ -1127,6 +1611,9 @@ pub fn run() {
             ask_ai,
             initialize_ros_environment,
             publish_twist,
+            invoke_safe_ros_service,
+            send_safe_ros_action_goal,
+            cancel_safe_ros_action_goal,
             start_topic_inspection,
             stop_topic_inspection,
             set_emergency_stop,
@@ -1376,6 +1863,24 @@ async fn start_ros_stream(app: AppHandle) -> Result<(), String> {
                                     active: update.active,
                                     truncated: update.truncated,
                                     error: update.error.clone(),
+                                },
+                            );
+                        }
+                        if let Some(rosengine::workspace_event::Event::ActionGoalUpdate(update)) =
+                            &evt.event
+                        {
+                            let _ = app.emit(
+                                "safe-action-goal-update",
+                                SafeActionGoalUpdateResponse {
+                                    goal_id: update.goal_id.clone(),
+                                    action_name: update.action_name.clone(),
+                                    action_type: update.action_type.clone(),
+                                    status: update.status.clone(),
+                                    feedback_json: update.feedback_json.clone(),
+                                    result_json: update.result_json.clone(),
+                                    error: update.error.clone(),
+                                    terminal: update.terminal,
+                                    truncated: update.truncated,
                                 },
                             );
                         }
@@ -1706,6 +2211,7 @@ struct RosGraphServiceResponse {
     types: Vec<String>,
     server_nodes: Vec<String>,
     client_nodes: Vec<String>,
+    safe_types: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1715,6 +2221,7 @@ struct RosGraphActionResponse {
     types: Vec<String>,
     server_nodes: Vec<String>,
     client_nodes: Vec<String>,
+    safe_types: Vec<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -1799,6 +2306,7 @@ fn ros_graph_snapshot_response(snapshot: &rosengine::RosGraphSnapshot) -> RosGra
                 types: service.types.clone(),
                 server_nodes: service.server_nodes.clone(),
                 client_nodes: service.client_nodes.clone(),
+                safe_types: service.safe_types.clone(),
             })
             .collect(),
         actions: snapshot
@@ -1809,6 +2317,7 @@ fn ros_graph_snapshot_response(snapshot: &rosengine::RosGraphSnapshot) -> RosGra
                 types: action.types.clone(),
                 server_nodes: action.server_nodes.clone(),
                 client_nodes: action.client_nodes.clone(),
+                safe_types: action.safe_types.clone(),
             })
             .collect(),
         truncated: snapshot.truncated,
@@ -1838,6 +2347,126 @@ async fn connect_ros_client(
         .await
         .map_err(|_| "ROS service connection timed out".to_string())??;
     Ok((client, token))
+}
+
+const SAFE_READ_ONLY_SERVICE_TYPES: &[&str] = &[
+    "lifecycle_msgs/srv/GetAvailableStates",
+    "lifecycle_msgs/srv/GetAvailableTransitions",
+    "lifecycle_msgs/srv/GetState",
+    "lifecycle_msgs/srv/GetTransitionGraph",
+    "rcl_interfaces/srv/DescribeParameters",
+    "rcl_interfaces/srv/GetParameterTypes",
+    "rcl_interfaces/srv/GetParameters",
+    "rcl_interfaces/srv/ListParameters",
+];
+const SAFE_NON_MOTION_ACTION_TYPES: &[&str] = &["action_tutorials_interfaces/action/Fibonacci"];
+
+#[tauri::command]
+async fn invoke_safe_ros_service(
+    app: AppHandle,
+    service_name: String,
+    service_type: String,
+    request_json: String,
+    timeout_ms: u32,
+) -> Result<SafeServiceResponse, String> {
+    if !is_valid_ros_topic(&service_name) {
+        return Err("Invalid ROS service name".to_string());
+    }
+    if !SAFE_READ_ONLY_SERVICE_TYPES.contains(&service_type.as_str()) {
+        return Err("This ROS service type is not on the read-only allowlist".to_string());
+    }
+    if !(100..=5_000).contains(&timeout_ms) {
+        return Err("Service timeout must be between 100 and 5000 milliseconds".to_string());
+    }
+    if request_json.len() > 16 * 1024
+        || !serde_json::from_str::<serde_json::Value>(&request_json)
+            .is_ok_and(|value| value.is_object())
+    {
+        return Err("Service request must be a JSON object no larger than 16 KiB".to_string());
+    }
+    let (mut client, token) = connect_ros_client(&app).await?;
+    let response = client
+        .invoke_safe_service(authenticated_request(
+            rosengine::SafeServiceRequest {
+                service_name,
+                service_type,
+                request_json,
+                timeout_ms,
+            },
+            &token,
+        )?)
+        .await
+        .map_err(|error| format!("Safe ROS service call failed: {}", error.message()))?
+        .into_inner();
+    Ok(SafeServiceResponse {
+        service_name: response.service_name,
+        service_type: response.service_type,
+        response_json: response.response_json,
+        truncated: response.truncated,
+    })
+}
+
+#[tauri::command]
+async fn send_safe_ros_action_goal(
+    app: AppHandle,
+    action_name: String,
+    action_type: String,
+    goal_json: String,
+) -> Result<SafeActionGoalResponse, String> {
+    if !is_valid_ros_topic(&action_name) {
+        return Err("Invalid ROS action name".to_string());
+    }
+    if !SAFE_NON_MOTION_ACTION_TYPES.contains(&action_type.as_str()) {
+        return Err("This ROS action type is not on the non-motion allowlist".to_string());
+    }
+    if goal_json.len() > 16 * 1024
+        || !serde_json::from_str::<serde_json::Value>(&goal_json)
+            .is_ok_and(|value| value.is_object())
+    {
+        return Err("Action goal must be a JSON object no larger than 16 KiB".to_string());
+    }
+    let (mut client, token) = connect_ros_client(&app).await?;
+    let response = client
+        .send_safe_action_goal(authenticated_request(
+            rosengine::SafeActionGoalRequest {
+                action_name,
+                action_type,
+                goal_json,
+            },
+            &token,
+        )?)
+        .await
+        .map_err(|error| format!("Could not submit ROS action goal: {}", error.message()))?
+        .into_inner();
+    Ok(SafeActionGoalResponse {
+        goal_id: response.goal_id,
+    })
+}
+
+#[tauri::command]
+async fn cancel_safe_ros_action_goal(
+    app: AppHandle,
+    goal_id: String,
+) -> Result<SafeActionCancelResponse, String> {
+    if goal_id.len() != 36
+        || !goal_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+    {
+        return Err("Invalid action goal identifier".to_string());
+    }
+    let (mut client, token) = connect_ros_client(&app).await?;
+    let response = client
+        .cancel_action_goal(authenticated_request(
+            rosengine::ActionGoalIdRequest { goal_id },
+            &token,
+        )?)
+        .await
+        .map_err(|error| format!("Could not cancel ROS action goal: {}", error.message()))?
+        .into_inner();
+    Ok(SafeActionCancelResponse {
+        requested: response.requested,
+    })
 }
 
 #[tauri::command]
@@ -2311,10 +2940,12 @@ fn stop_workspace_container(workspace: &Path) -> Result<(), String> {
 struct RosPackageInfo {
     name: String,
     path: String,
+    source: String,
     package_type: String,
     version: Option<String>,
     description: Option<String>,
     dependencies: Vec<String>,
+    dependency_sources: HashMap<String, String>,
     executables: Vec<String>,
     launch_files: Vec<String>,
     config_files: Vec<String>,
@@ -2370,7 +3001,7 @@ fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
             &container_name,
             "bash",
             "-lc",
-            "cd /opt/robotics-studio && python3 -c \"import json; from server_core import discover_workspace_packages; print(json.dumps(discover_workspace_packages('/workspace')))\"",
+            "cd /opt/robotics-studio && python3 -c \"import json; from server_core import discover_ros_packages; print(json.dumps(discover_ros_packages('/workspace')))\"",
         ])
         .output()
         .map_err(|error| format!("Could not inspect ROS packages: {error}"))?;
@@ -2384,9 +3015,28 @@ fn list_ros_packages() -> Result<Vec<RosPackageInfo>, String> {
     let mut parsed: Vec<RosPackageInfo> = serde_json::from_str(stdout.trim())
         .map_err(|error| format!("Could not parse ROS package metadata: {error}"))?;
     for package in &mut parsed {
-        package.path = resolve_workspace_package_path(&workspace, &package.name, &package.path)?
-            .to_string_lossy()
-            .into_owned();
+        match package.source.as_str() {
+            "workspace" => {
+                package.path =
+                    resolve_workspace_package_path(&workspace, &package.name, &package.path)?
+                        .to_string_lossy()
+                        .into_owned();
+            }
+            "underlay" => {
+                if !package.path.is_empty() {
+                    return Err(format!(
+                        "ROS underlay package {} unexpectedly returned a workspace path",
+                        package.name
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "ROS package {} returned an unknown package source",
+                    package.name
+                ));
+            }
+        }
     }
     Ok(parsed)
 }

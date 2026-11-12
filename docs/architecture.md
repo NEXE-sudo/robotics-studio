@@ -94,16 +94,22 @@ coverage remain incomplete.
 The current service streams bounded node, topic endpoint/QoS, service, and
 action snapshots alongside transform and odometry updates, safety state, and
 event-recovery metadata. The package explorer scans package manifests in the
-selected workspace's source and install trees rather than treating ROS
-underlay packages as workspace packages. It reports bounded metadata,
-installed executables, launch/configuration files, and allows the frontend to
-browse package files through approved-root file commands. The graph explorer
-supports bounded live topic inspection through subscriptions created and
-destroyed on the ROS executor. Inspection is authenticated and limited to four
-topics, five messages per second per topic, depth-five best-effort queues, and
-16 KiB serialized payloads. It does not invoke arbitrary ROS services or submit
-action goals, which could otherwise bypass the application's motion safety
-path.
+selected workspace's source and install trees and a bounded Jazzy underlay
+inventory. Workspace packages take precedence; dependencies are annotated as
+workspace, underlay, or missing. It reports bounded metadata, installed
+executables, launch/configuration files, and allows the frontend to browse
+workspace package files through approved-root file commands.
+
+The graph explorer supports bounded live topic inspection through
+subscriptions created and destroyed on the ROS executor. Inspection is
+authenticated and limited to four topics, five messages per second per topic,
+depth-five best-effort queues, and 16 KiB serialized payloads. Structured
+service calls are restricted to read-only lifecycle and parameter types,
+validated against ROS request schemas, and bounded by request, response, and
+timeout limits. Action goals are restricted to the non-motion Fibonacci
+action; feedback, results, server errors, cancellation acknowledgement, and
+confirmed terminal status are streamed. These are narrow allowlists, not
+arbitrary service/action access or a replacement for motion-safety controls.
 
 TF updates include their source topic. `/tf_static` uses transient-local
 reliable QoS so late subscribers receive latched static transforms. The
@@ -112,20 +118,26 @@ multiple parents, stale dynamic transforms, non-finite values, and invalid
 quaternions, and provides translation/quaternion/RPY inspection. ROS message
 source stamps are retained independently from local event receive time; stale
 replayed dynamic transforms are not made fresh by reconnect. The UI explicitly
-labels disconnected transform data as last-known. It cannot infer missing
-transform authorities from edge data alone, and is diagnostic validation
-rather than a replacement for `tf2`.
+labels disconnected transform data as last-known, marks dynamic edges stale
+after five seconds, and calls out edges without updates after 30 seconds. A
+stale dynamic parent is replaced after a later parent change; simultaneously
+conflicting parents remain visible as an error. Unambiguous valid chains are
+composed into a root-relative pose. The UI cannot infer missing transform
+authorities from edge data alone, and is diagnostic validation rather than a
+replacement for `tf2`.
 
-When an active editor file is a `.urdf`, the native backend parses a bounded
-URDF subset and the frontend renders box, cylinder, and sphere visuals with a
-connected link tree. Fixed, revolute, continuous, and prismatic joint states
-are updated from bounded `/joint_states` telemetry, with supported joint
-limits and mimic relationships applied. Supported primitive collision
-geometry can be toggled in the preview. Mesh visuals are surfaced as warnings
-and skipped; inertial properties and robot-level named materials are not used
-in rendering. Xacro expansion, mesh/package resource resolution,
-floating/planar joints, and full URDF semantics are not implemented. The
-ROS-to-three.js coordinate mapping still needs broader convention validation.
+When an active editor file is a `.urdf` or `.xacro`, the native backend parses
+bounded XML and performs a non-executing Xacro subset expansion. Workspace-
+confined relative and `package://` STL and texture-free DAE resources are
+loaded into the Three.js preview alongside supported primitives. Fixed,
+revolute, continuous, and prismatic joint states are updated from bounded
+`/joint_states` telemetry; supported limits, mimic relationships, named
+material colors, inertial origins, and collision geometry are represented.
+Meshes and scene resources are disposed when the model changes. This is not
+the full ROS Xacro implementation: unsupported macros/expressions fail closed,
+external DAE resources are rejected, floating/planar joints and full URDF
+semantics remain unsupported, and the coordinate mapping still needs broader
+visual convention validation.
 
 SDF import checks XML well-formedness, an SDF root, a world element, supported
 declared versions, and rejects DTDs. Before launching Gazebo, the container's
@@ -137,9 +149,12 @@ validated.
 
 Run unit/build checks with the commands in the README. The live integration
 script `scripts/docker-integration.sh` builds the container image and exercises
-the real ROS service, selected-workspace package discovery, pinned TLS, event
-replay after restart, live `/tf_static` and `/joint_states` delivery, Gazebo
-world readiness/reset, and ROS-Gazebo topic bridging. Unit tests cover TF graph
-validation, URDF parsing, primitive/joint rendering, and package metadata
-discovery. This does not substitute for visual desktop validation on every
-target operating system or testing a physical robot.
+the real ROS service, selected-workspace and underlay package discovery,
+authenticated safe lifecycle service calls, denied/invalid service and action
+requests, Fibonacci feedback/result/cancellation, pinned TLS, event replay
+after restart, bounded topic inspection, live `/tf_static` and `/joint_states`
+delivery, Gazebo world readiness/reset, and ROS-Gazebo topic bridging. Unit
+tests cover TF graph validation, URDF parsing, Xacro expansion, mesh resolution,
+rendering, and package metadata discovery. This does not substitute for native
+visual validation on each target OS, broader ROS action types, or testing a
+physical robot.

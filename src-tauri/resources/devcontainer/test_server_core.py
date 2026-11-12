@@ -17,6 +17,7 @@ from server_core import (
     SafetyController,
     action_from_send_goal_service,
     discover_workspace_packages,
+    discover_ros_packages,
     is_valid_auth_token,
     load_auth_credentials,
     validate_twist_request,
@@ -180,6 +181,60 @@ class WorkspacePackageDiscoveryTests(unittest.TestCase):
             os.symlink(outside, os.path.join(workspace, "src", "linked"))
 
             self.assertEqual(discover_workspace_packages(workspace), [])
+
+    def test_resolves_workspace_dependencies_against_workspace_and_underlay(self):
+        with tempfile.TemporaryDirectory() as parent:
+            workspace = os.path.join(parent, "workspace")
+            underlay = os.path.join(parent, "underlay")
+            os.makedirs(workspace)
+            os.makedirs(underlay)
+            self.create_package(
+                workspace,
+                "src/application",
+                """<package format="3"><name>application</name>
+                  <version>1.0.0</version><description>application</description>
+                  <depend>workspace_util</depend><depend>rclpy</depend>
+                  <depend>missing_ros_package</depend></package>""",
+            )
+            self.create_package(
+                workspace,
+                "src/workspace_util",
+                """<package format="3"><name>workspace_util</name>
+                  <version>1.0.0</version><description>workspace utility</description>
+                </package>""",
+            )
+            self.create_package(
+                underlay,
+                "share/rclpy",
+                """<package format="3"><name>rclpy</name>
+                  <version>1.0.0</version><description>ROS client library</description>
+                </package>""",
+            )
+            self.create_package(
+                underlay,
+                "share/workspace_util",
+                """<package format="3"><name>workspace_util</name>
+                  <version>0.1.0</version><description>underlay shadow</description>
+                </package>""",
+            )
+
+            packages = {
+                package["name"]: package
+                for package in discover_ros_packages(workspace, (underlay,))
+            }
+
+            self.assertEqual(
+                packages["application"]["dependency_sources"],
+                {
+                    "workspace_util": "workspace",
+                    "rclpy": "underlay",
+                    "missing_ros_package": "missing",
+                },
+            )
+            self.assertEqual(packages["rclpy"]["source"], "underlay")
+            self.assertEqual(packages["rclpy"]["path"], "")
+            self.assertEqual(packages["workspace_util"]["source"], "workspace")
+            self.assertEqual(packages["workspace_util"]["description"], "workspace utility")
 
 
 class EventHubTests(unittest.TestCase):

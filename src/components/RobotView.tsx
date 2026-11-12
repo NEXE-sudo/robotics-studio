@@ -67,13 +67,29 @@ function buildPlaceholderRobot(node: string): RobotInstance {
     group,
     updateJoints: () => undefined,
     setCollisionVisible: () => undefined,
+    setInertialVisible: () => undefined,
+    dispose: () => {
+      group.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry.dispose();
+          const materials = Array.isArray(child.material)
+            ? child.material
+            : [child.material];
+          materials.forEach((material) => material.dispose());
+        }
+      });
+    },
   };
 }
 
 export default function RobotView({
   descriptionContent,
+  descriptionPath,
+  workspaceRoot,
 }: {
   descriptionContent: string | null;
+  descriptionPath: string | null;
+  workspaceRoot: string | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const robotsRef = useRef<Record<string, RobotInstance>>({});
@@ -81,10 +97,12 @@ export default function RobotView({
     useState<RobotDescription | null>(null);
   const [descriptionError, setDescriptionError] = useState<string | null>(null);
   const [showCollisions, setShowCollisions] = useState(false);
+  const [showInertial, setShowInertial] = useState(false);
   const collisionVisibleRef = useRef(false);
+  const inertialVisibleRef = useRef(false);
 
   useEffect(() => {
-    if (!descriptionContent) {
+    if (!descriptionContent || !descriptionPath || !workspaceRoot) {
       setRobotDescription(null);
       setDescriptionError(null);
       return;
@@ -94,6 +112,8 @@ export default function RobotView({
     setRobotDescription(null);
     setDescriptionError(null);
     invoke<RobotDescription>("parse_robot_description", {
+      path: descriptionPath,
+      workspaceRoot,
       content: descriptionContent,
     })
       .then((description) => {
@@ -106,7 +126,7 @@ export default function RobotView({
     return () => {
       active = false;
     };
-  }, [descriptionContent]);
+  }, [descriptionContent, descriptionPath, workspaceRoot]);
 
   useEffect(() => {
     collisionVisibleRef.current = showCollisions;
@@ -114,6 +134,13 @@ export default function RobotView({
       robot.setCollisionVisible(showCollisions),
     );
   }, [showCollisions]);
+
+  useEffect(() => {
+    inertialVisibleRef.current = showInertial;
+    Object.values(robotsRef.current).forEach((robot) =>
+      robot.setInertialVisible(showInertial),
+    );
+  }, [showInertial]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -191,6 +218,7 @@ export default function RobotView({
     if (robotDescription) {
       const preview = buildRobotInstance(robotDescription);
       preview.setCollisionVisible(collisionVisibleRef.current);
+      preview.setInertialVisible(inertialVisibleRef.current);
       scene.add(preview.group);
       robotsRef.current["__description_preview__"] = preview;
     }
@@ -208,13 +236,15 @@ export default function RobotView({
     const unlistenClear = listen("clear-robots", () => {
       if (!isActive) return;
 
-      Object.values(robotsRef.current).forEach((robot) =>
-        scene.remove(robot.group),
-      );
+      Object.values(robotsRef.current).forEach((robot) => {
+        scene.remove(robot.group);
+        robot.dispose();
+      });
       robotsRef.current = {};
       if (robotDescription) {
         const preview = buildRobotInstance(robotDescription);
         preview.setCollisionVisible(collisionVisibleRef.current);
+        preview.setInertialVisible(inertialVisibleRef.current);
         scene.add(preview.group);
         robotsRef.current["__description_preview__"] = preview;
       }
@@ -236,6 +266,7 @@ export default function RobotView({
               ? buildRobotInstance(robotDescription)
               : buildPlaceholderRobot(node));
           robot.setCollisionVisible(collisionVisibleRef.current);
+          robot.setInertialVisible(inertialVisibleRef.current);
           if (robotsRef.current["__description_preview__"]) {
             delete robotsRef.current["__description_preview__"];
           } else {
@@ -276,16 +307,7 @@ export default function RobotView({
 
       Object.values(robotsRef.current).forEach((robot) => {
         scene.remove(robot.group);
-        robot.group.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            child.geometry.dispose();
-            if (Array.isArray(child.material)) {
-              child.material.forEach((m) => m.dispose());
-            } else {
-              child.material.dispose();
-            }
-          }
-        });
+        robot.dispose();
       });
 
       controls.dispose();
@@ -311,19 +333,34 @@ export default function RobotView({
       }}
     >
       {robotDescription && (
-        <button
-          type="button"
-          aria-pressed={showCollisions}
-          onClick={() => setShowCollisions((visible) => !visible)}
+        <div
           style={{
             position: "absolute",
             zIndex: 1,
             left: 8,
             bottom: 8,
+            display: "flex",
+            gap: 8,
           }}
         >
-          {showCollisions ? "Hide" : "Show"} collision geometry
-        </button>
+          <button
+            type="button"
+            aria-pressed={showCollisions}
+            onClick={() => setShowCollisions((visible) => !visible)}
+          >
+            {showCollisions ? "Hide" : "Show"} collision geometry
+          </button>
+          {robotDescription.links.some((link) => link.inertial) && (
+            <button
+              type="button"
+              aria-pressed={showInertial}
+              title="Shows each inertial origin and a scalar radius-of-gyration marker."
+              onClick={() => setShowInertial((visible) => !visible)}
+            >
+              {showInertial ? "Hide" : "Show"} inertial frames
+            </button>
+          )}
+        </div>
       )}
       {(descriptionError || robotDescription?.warnings.length) && (
         <div
@@ -360,7 +397,8 @@ export default function RobotView({
           Validating robot description...
         </div>
       )}
-      {!descriptionContent && !descriptionError && (
+      {(!descriptionContent || !descriptionPath || !workspaceRoot) &&
+        !descriptionError && (
         <div
           role="status"
           style={{
@@ -373,7 +411,7 @@ export default function RobotView({
             fontSize: 12,
           }}
         >
-          Open a URDF file to preview its geometry; a placeholder robot is shown.
+          Open a URDF or Xacro file inside the selected workspace to preview it.
         </div>
       )}
     </div>

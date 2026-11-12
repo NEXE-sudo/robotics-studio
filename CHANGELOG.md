@@ -9,13 +9,19 @@ This version is still in development and is not release-ready. See
 
 - Selected-workspace ROS package discovery with package build type, version,
   description, dependencies, installed executables, launch/configuration file
-  paths, filtering, refresh, and approved-root package file browsing.
+  paths, filtering, refresh, approved-root package file browsing, and bounded
+  Jazzy underlay visibility with dependency-source resolution.
 - TF parent-child forest and transform inspector with multiple-root,
-  multiple-parent, cycle, stale dynamic-transform, quaternion, and finite-value
-  diagnostics.
+  multiple-parent, cycle, stale/disappearing dynamic-transform, quaternion, and
+  finite-value diagnostics; unambiguous root-to-frame poses are composed.
 - Bounded read-only ROS graph snapshots with node namespaces, topic
   publisher/subscriber identities and QoS, service types/endpoints, and action
   server/client discovery, grouped by fully qualified node identity in the UI.
+- Safe service inspection for allowlisted lifecycle and read-only parameter
+  APIs, with structured JSON schema validation, bounded requests/responses,
+  timeouts, and explicit failures.
+- Safe non-motion Fibonacci action goals with feedback, results, server status,
+  cancellation requests, and terminal updates only after ROS confirms results.
 - Optional bounded live topic inspection with executor-owned subscriptions,
   authenticated start/stop controls, rate and payload limits, and serialized
   message previews.
@@ -23,19 +29,22 @@ This version is still in development and is not release-ready. See
 - TF inspection preserves each transform's ROS source stamp separately from
   receive time; reconnect state shows disconnected last-known data and stale
   dynamic transforms.
-- Bounded URDF parsing for primitive visuals and connected link trees, with
-  safe rejection of malformed or unsupported descriptions.
-- Three.js rendering for box, cylinder, and sphere visuals and supported
-  fixed/revolute/continuous/prismatic joints; live `/joint_states` updates are
-  streamed to the preview. Joint limits and mimic relationships are applied,
-  and supported collision primitives can be toggled in the preview.
+- Bounded URDF parsing and non-executing Xacro subset expansion, with
+  workspace-confined package/relative resources, STL and texture-free DAE
+  geometry, named materials, inertial data, and explicit rejection of
+  unsupported or external resources.
+- Three.js rendering for supported primitive and mesh visuals, fixed,
+  revolute, continuous, and prismatic joints, joint limits, mimic
+  relationships, collision geometry, and inertial frames; live
+  `/joint_states` updates are streamed to the preview.
 - Dependency-free frontend unit tests for TF graph construction and robot
   geometry/joint transforms.
 - Docker integration coverage for selected-workspace package discovery,
   malformed package manifests, installed executables, workspace isolation,
   live ROS graph endpoints, static and dynamic TF plus `/joint_states`
-  delivery, bounded live topic inspection, and valid/invalid SDFormat schema
-  checks.
+  delivery, bounded live topic inspection, safe lifecycle service calls,
+  denied/invalid service and action requests, Fibonacci action feedback,
+  results and confirmed cancellation, and valid/invalid SDFormat schema checks.
 - Build-process state and cancellation feedback that distinguishes a stop
   request from confirmed process termination.
 
@@ -50,8 +59,9 @@ This version is still in development and is not release-ready. See
   frontend can inspect them.
 - ROS package discovery no longer interpolates the host workspace path into a
   shell command.
-- Service calls and action goals are intentionally not exposed by the graph
-  explorer, avoiding a bypass of the backend's bounded motion/safety path.
+- Service and action requests are backend-allowlisted and schema-validated:
+  arbitrary or mutating service types and motion-producing actions are not
+  exposed by the graph explorer.
 - Gazebo validates the selected SDF against the installed SDFormat schema
   before startup; external model/mesh resource validation remains incomplete.
 - Workspace package discovery reports inaccessible tree errors rather than
@@ -66,7 +76,8 @@ This version is still in development and is not release-ready. See
 ### Changed
 
 - The ROS sidebar distinguishes source packages in the selected workspace
-  from packages available in the ROS underlay.
+  from packages available in the ROS underlay and resolves dependencies
+  against both inventories.
 - The TF panel displays hierarchy and transform values instead of only a
   flat/grouped edge list.
 - Documentation now identifies package, TF, cross-platform, and release
@@ -81,19 +92,21 @@ This version is still in development and is not release-ready. See
 ### Breaking changes
 
 - No application-facing breaking change has been identified in this
-  development pass. New protobuf graph and joint-state event fields are
-  additive for protobuf readers; matching bundled protocol definitions must
-  still be deployed together.
+  development pass. New protobuf service/action RPCs and graph/action event
+  fields are additive; matching bundled protocol definitions and service code
+  must still be deployed together.
 
 ### Known limitations
 
-- Structured service/action invocation and monitoring are not implemented;
-  graph discovery remains read-only.
+- Service invocation is restricted to read-only lifecycle and parameter APIs;
+  action submission is restricted to Fibonacci. Broader service/action type
+  support and frontend workflow testing remain incomplete.
 - TF diagnostics are not a substitute for `tf2` authority validation; missing
   frame authorities cannot be determined from received edges alone.
-- URDF support is a bounded subset: Xacro expansion, safe mesh/model
-  resolution, floating/planar joints, and full URDF semantics remain
-  outstanding. Coordinate-convention validation remains incomplete.
+- Xacro expansion is a safe non-executing subset rather than ROS's full Xacro
+  implementation. Textured/external DAE resources, floating/planar joints,
+  full URDF semantics, and broader coordinate-convention validation remain
+  outstanding.
 - Build, simulation, and service processes do not yet share a complete
   lifecycle manager.
 - Windows filesystem race resistance, full SDF schema/resource validation,

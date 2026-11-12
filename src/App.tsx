@@ -7,6 +7,8 @@ import TFTree from "./components/TFTree";
 import RosGraphExplorer from "./components/RosGraphExplorer";
 import type {
   RosGraphSnapshot,
+  SafeActionGoal,
+  SafeServiceInvocation,
   TopicInspection,
 } from "./components/RosGraphExplorer";
 import Settings from "./components/Settings";
@@ -58,10 +60,12 @@ interface RecentProject {
 interface RosPackageInfo {
   name: string;
   path: string;
+  source: "workspace" | "underlay";
   package_type: string;
   version: string | null;
   description: string | null;
   dependencies: string[];
+  dependency_sources: Record<string, "workspace" | "underlay" | "missing">;
   executables: string[];
   launch_files: string[];
   config_files: string[];
@@ -296,6 +300,11 @@ function App() {
   const [topicInspectionError, setTopicInspectionError] = useState<
     string | null
   >(null);
+  const [safeServiceInvocation, setSafeServiceInvocation] =
+    useState<SafeServiceInvocation | null>(null);
+  const [safeActionGoal, setSafeActionGoal] = useState<SafeActionGoal | null>(
+    null,
+  );
   const [rosPackagesLoading, setRosPackagesLoading] = useState(false);
   const [rosPackagesError, setRosPackagesError] = useState<string | null>(null);
   const [rosPackageFilter, setRosPackageFilter] = useState("");
@@ -378,6 +387,188 @@ function App() {
       setPendingInspectionTopic(null);
     }
   };
+
+  const invokeSafeRosService = async (
+    serviceName: string,
+    serviceType: string,
+    requestJson: string,
+  ) => {
+    let requestValue: unknown;
+    try {
+      if (new TextEncoder().encode(requestJson).length > 16 * 1024) {
+        throw new Error("Request exceeds the 16 KiB limit.");
+      }
+      requestValue = JSON.parse(requestJson);
+      if (
+        requestValue === null ||
+        typeof requestValue !== "object" ||
+        Array.isArray(requestValue)
+      ) {
+        throw new Error("Request must be a JSON object.");
+      }
+    } catch (error) {
+      setSafeServiceInvocation({
+        serviceName,
+        serviceType,
+        responseJson: "",
+        error: String(error),
+        truncated: false,
+        pending: false,
+      });
+      return;
+    }
+
+    setSafeServiceInvocation({
+      serviceName,
+      serviceType,
+      responseJson: "",
+      error: "",
+      truncated: false,
+      pending: true,
+    });
+    try {
+      const response = await invoke<{
+        responseJson: string;
+        truncated: boolean;
+      }>("invoke_safe_ros_service", {
+        serviceName,
+        serviceType,
+        requestJson,
+        timeoutMs: 3000,
+      });
+      setSafeServiceInvocation({
+        serviceName,
+        serviceType,
+        responseJson: response.responseJson,
+        error: "",
+        truncated: response.truncated,
+        pending: false,
+      });
+    } catch (error) {
+      setSafeServiceInvocation({
+        serviceName,
+        serviceType,
+        responseJson: "",
+        error: String(error),
+        truncated: false,
+        pending: false,
+      });
+    }
+  };
+
+  const sendSafeActionGoal = async (
+    actionName: string,
+    actionType: string,
+    goalJson: string,
+  ) => {
+    let goalValue: unknown;
+    try {
+      if (new TextEncoder().encode(goalJson).length > 16 * 1024) {
+        throw new Error("Goal exceeds the 16 KiB limit.");
+      }
+      goalValue = JSON.parse(goalJson);
+      if (goalValue === null || typeof goalValue !== "object" || Array.isArray(goalValue)) {
+        throw new Error("Goal must be a JSON object.");
+      }
+    } catch (error) {
+      setSafeActionGoal({
+        goalId: "",
+        actionName,
+        actionType,
+        status: "invalid_goal",
+        feedbackJson: "",
+        resultJson: "",
+        error: String(error),
+        terminal: true,
+        truncated: false,
+        cancelPending: false,
+      });
+      return;
+    }
+
+    setSafeActionGoal({
+      goalId: "",
+      actionName,
+      actionType,
+      status: "submitting",
+      feedbackJson: "",
+      resultJson: "",
+      error: "",
+      terminal: false,
+      truncated: false,
+      cancelPending: false,
+    });
+    try {
+      const response = await invoke<{ goalId: string }>(
+        "send_safe_ros_action_goal",
+        {
+          actionName,
+          actionType,
+          goalJson,
+        },
+      );
+      setSafeActionGoal((current) =>
+        current?.actionName === actionName &&
+        current.actionType === actionType &&
+        (!current.goalId || current.goalId === response.goalId)
+          ? {
+              ...current,
+              goalId: response.goalId,
+              status:
+                current.status === "submitting" ? "submitted" : current.status,
+            }
+          : current,
+      );
+    } catch (error) {
+      setSafeActionGoal((current) =>
+        current?.actionName === actionName &&
+        current.actionType === actionType
+          ? {
+              ...current,
+              status: "failed",
+              error: String(error),
+              terminal: true,
+              cancelPending: false,
+            }
+          : current,
+      );
+    }
+  };
+
+  const cancelSafeActionGoal = async (goalId: string) => {
+    setSafeActionGoal((current) =>
+      current?.goalId === goalId
+        ? { ...current, cancelPending: true, error: "" }
+        : current,
+    );
+    try {
+      const response = await invoke<{ requested: boolean }>(
+        "cancel_safe_ros_action_goal",
+        { goalId },
+      );
+      if (!response.requested) {
+        setSafeActionGoal((current) =>
+          current?.goalId === goalId
+            ? {
+                ...current,
+                cancelPending: false,
+                error: "The ROS action server did not accept cancellation.",
+              }
+            : current,
+        );
+      }
+    } catch (error) {
+      setSafeActionGoal((current) =>
+        current?.goalId === goalId
+          ? {
+              ...current,
+              cancelPending: false,
+              error: String(error),
+            }
+          : current,
+      );
+    }
+  };
   const rosWorkspaceReady = useRef(false);
   const authRecoveryStarted = useRef(false);
   const [setupOutput, setSetupOutput] = useState<string[]>([]); // Environment setup logs
@@ -407,6 +598,7 @@ function App() {
       [
         pkg.name,
         pkg.description ?? "",
+        pkg.source,
         pkg.package_type,
         ...pkg.dependencies,
       ]
@@ -1089,6 +1281,30 @@ function App() {
         if (!update.error) setTopicInspectionError(null);
       },
     );
+    const unlistenActionGoal = listen<Omit<SafeActionGoal, "cancelPending">>(
+      "safe-action-goal-update",
+      (event) => {
+        const update = event.payload;
+        setSafeActionGoal((current) => {
+          if (!current) return current;
+          if (current.goalId && current.goalId !== update.goalId) return current;
+          if (
+            current.actionName !== update.actionName ||
+            current.actionType !== update.actionType
+          ) {
+            return current;
+          }
+          return {
+            ...current,
+            ...update,
+            feedbackJson: update.feedbackJson || current.feedbackJson,
+            resultJson: update.resultJson || current.resultJson,
+            error: update.error || current.error,
+            cancelPending: update.status === "cancel_requested",
+          };
+        });
+      },
+    );
 
     const unlistenBuildOutput = listen<LogEvent>("build-output", (event) => {
       const { kind, text } = event.payload;
@@ -1140,6 +1356,7 @@ function App() {
       unlistenEventRecovery.then((f) => f());
       unlistenRosGraph.then((f) => f());
       unlistenTopicInspection.then((f) => f());
+      unlistenActionGoal.then((f) => f());
       unlistenBuildOutput.then((f) => f());
       unlistenBuildError.then((f) => f());
       unlistenBuildFinished.then((f) => f());
@@ -1659,6 +1876,12 @@ function App() {
                     !rosPackagesError &&
                     rosPackages.length > 0 && (
                       <>
+                        <div style={{ opacity: 0.65, marginBottom: 8 }}>
+                          {rosPackages.filter((pkg) => pkg.source === "workspace").length}{" "}
+                          workspace ·{" "}
+                          {rosPackages.filter((pkg) => pkg.source === "underlay").length}{" "}
+                          underlay packages
+                        </div>
                         <input
                           type="search"
                           aria-label="Filter ROS packages"
@@ -1709,6 +1932,22 @@ function App() {
                             >
                               {pkg.name}
                             </div>
+                            <span
+                              style={{
+                                display: "inline-block",
+                                background:
+                                  pkg.source === "workspace"
+                                    ? "rgba(124,217,146,0.12)"
+                                    : "rgba(79,195,247,0.12)",
+                                borderRadius: 999,
+                                padding: "2px 6px",
+                                marginBottom: 5,
+                              }}
+                            >
+                              {pkg.source === "workspace"
+                                ? "Selected workspace"
+                                : "ROS 2 underlay"}
+                            </span>
                             {pkg.description && (
                               <div
                                 style={{
@@ -1727,7 +1966,7 @@ function App() {
                                 marginBottom: 4,
                               }}
                             >
-                              {pkg.path}
+                              {pkg.source === "workspace" ? pkg.path : "Installed ROS prefix"}
                             </div>
                             <div
                               style={{
@@ -1787,15 +2026,27 @@ function App() {
                                   {pkg.dependencies.slice(0, 8).map((dep) => (
                                     <span
                                       key={`${pkg.name}-${dep}`}
+                                      title={`Resolved from ${pkg.dependency_sources[dep] ?? "missing"}`}
                                       style={{
-                                        background: "rgba(255,255,255,0.04)",
+                                        background:
+                                          pkg.dependency_sources[dep] === "missing"
+                                            ? "rgba(224,96,96,0.18)"
+                                            : "rgba(255,255,255,0.04)",
                                         borderRadius: 999,
                                         padding: "2px 6px",
                                       }}
                                     >
                                       {dep}
+                                      {pkg.dependency_sources[dep] === "missing"
+                                        ? " (missing)"
+                                        : ""}
                                     </span>
                                   ))}
+                                  {pkg.dependencies.length > 8 && (
+                                    <span style={{ opacity: 0.6 }}>
+                                      +{pkg.dependencies.length - 8} more
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             )}
@@ -1827,17 +2078,19 @@ function App() {
                                 )}
                               </div>
                             )}
-                            <button
-                              className="ide-btn"
-                              type="button"
-                              aria-expanded={expandedRosPackage === pkg.path}
-                              onClick={() => void inspectRosPackage(pkg.path)}
-                              style={{ marginTop: 8 }}
-                            >
-                              {expandedRosPackage === pkg.path
-                                ? "Hide contents"
-                                : "Inspect contents"}
-                            </button>
+                            {pkg.source === "workspace" && (
+                              <button
+                                className="ide-btn"
+                                type="button"
+                                aria-expanded={expandedRosPackage === pkg.path}
+                                onClick={() => void inspectRosPackage(pkg.path)}
+                                style={{ marginTop: 8 }}
+                              >
+                                {expandedRosPackage === pkg.path
+                                  ? "Hide contents"
+                                  : "Inspect contents"}
+                              </button>
+                            )}
                             {expandedRosPackage === pkg.path &&
                               rosPackageContentsError && (
                                 <div
@@ -1885,11 +2138,26 @@ function App() {
                     inspection={topicInspection}
                     pendingTopic={pendingInspectionTopic}
                     inspectionError={topicInspectionError}
+                    safeServiceInvocation={safeServiceInvocation}
+                    actionGoal={safeActionGoal}
                     onStartInspection={(topicName) =>
                       void startTopicInspection(topicName)
                     }
                     onStopInspection={(topicName) =>
                       void stopTopicInspection(topicName)
+                    }
+                    onInvokeSafeService={(serviceName, serviceType, requestJson) =>
+                      void invokeSafeRosService(
+                        serviceName,
+                        serviceType,
+                        requestJson,
+                      )
+                    }
+                    onSendSafeActionGoal={(actionName, actionType, goalJson) =>
+                      void sendSafeActionGoal(actionName, actionType, goalJson)
+                    }
+                    onCancelSafeActionGoal={(goalId) =>
+                      void cancelSafeActionGoal(goalId)
                     }
                   />
                 </div>
@@ -2532,10 +2800,13 @@ function App() {
                   <div style={{ flex: 1 }}>
                     <RobotView
                       descriptionContent={
-                        activeFile?.name.toLowerCase().endsWith(".urdf")
+                        activeFile &&
+                        /\.(urdf|xacro)$/i.test(activeFile.name)
                           ? activeFile.content
                           : null
                       }
+                      descriptionPath={activeFile?.path ?? null}
+                      workspaceRoot={currentPath}
                     />
                   </div>
                   <div style={{ width: 200, borderLeft: "1px solid #333" }}>

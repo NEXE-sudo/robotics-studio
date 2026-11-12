@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<robot name="materials" xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <material name="body_blue">
+    <color rgba="0.1 0.3 0.8 1"/>
+  </material>
+</robot>

@@ -6,6 +6,7 @@ import os
 import math
 import re
 import json
+import uuid
 from collections.abc import Sequence
 
 import grpc
@@ -14,6 +15,7 @@ from concurrent import futures
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.action import ActionClient
 
 AUTH_PROTOCOL_VERSION = 1
 
@@ -32,7 +34,8 @@ from tf2_msgs.msg import TFMessage
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import JointState
-from rosidl_runtime_py.utilities import get_message
+from rosidl_runtime_py.set_message import set_message_fields
+from rosidl_runtime_py.utilities import get_action, get_message, get_service
 from server_core import (
     CommandLeaseManager,
     EventPersistenceError,
@@ -60,6 +63,26 @@ MAX_INSPECTION_MESSAGE_BYTES = 16 * 1024
 MAX_INSPECTION_DEPTH = 5
 MAX_INSPECTION_ITEMS = 256
 MAX_INSPECTION_STRING_LENGTH = 512
+MAX_SAFE_SERVICE_REQUEST_BYTES = 16 * 1024
+MAX_SAFE_SERVICE_CALLS = 8
+SAFE_READ_ONLY_SERVICE_TYPES = frozenset(
+    {
+        "lifecycle_msgs/srv/GetAvailableStates",
+        "lifecycle_msgs/srv/GetAvailableTransitions",
+        "lifecycle_msgs/srv/GetState",
+        "lifecycle_msgs/srv/GetTransitionGraph",
+        "rcl_interfaces/srv/DescribeParameters",
+        "rcl_interfaces/srv/GetParameterTypes",
+        "rcl_interfaces/srv/GetParameters",
+        "rcl_interfaces/srv/ListParameters",
+    }
+)
+SAFE_NON_MOTION_ACTION_TYPES = frozenset(
+    {"action_tutorials_interfaces/action/Fibonacci"}
+)
+MAX_SAFE_ACTION_GOALS = 4
+MAX_SAFE_ACTION_DURATION_SECONDS = 60.0
+MAX_SAFE_ACTION_FEEDBACK_RATE_HZ = 5.0
 
 
 class _MessageSerializationBudget:
@@ -167,6 +190,16 @@ class RosIntrospector(Node):
         self.topic_inspection_requests = queue.Queue(maxsize=16)
         self.topic_inspection_timer = self.create_timer(
             0.1, self._process_topic_inspection_requests
+        )
+        self.safe_service_requests = queue.Queue(maxsize=16)
+        self.pending_safe_service_calls = {}
+        self.safe_service_timer = self.create_timer(
+            0.1, self._process_safe_service_requests
+        )
+        self.safe_action_requests = queue.Queue(maxsize=16)
+        self.safe_action_goals = {}
+        self.safe_action_timer = self.create_timer(
+            0.1, self._process_safe_action_requests
         )
 
     def _publish_stop_to_all(self):
@@ -284,6 +317,561 @@ class RosIntrospector(Node):
         except futures.TimeoutError as error:
             future.cancel()
             raise TimeoutError("Timed out waiting for the ROS executor") from error
+
+    @staticmethod
+    def _json_object_without_duplicate_keys(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"Duplicate JSON field: {key}")
+            result[key] = value
+        return result
+
+    @staticmethod
+    def _reject_json_constant(value):
+        raise ValueError(f"Invalid JSON number: {value}")
+
+    def invoke_safe_service(self, service_name, service_type, request_json, timeout_ms):
+        if not re.fullmatch(
+            r"/[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*",
+            service_name,
+        ):
+            raise ValueError("Service name must be a fully qualified ROS name")
+        if service_type not in SAFE_READ_ONLY_SERVICE_TYPES:
+            raise PermissionError("This ROS service type is not on the read-only allowlist")
+        if not 100 <= timeout_ms <= 5000:
+            raise ValueError("Service timeout must be between 100 and 5000 milliseconds")
+        try:
+            request_size = len(request_json.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError("Service request is not valid UTF-8") from error
+        if request_size > MAX_SAFE_SERVICE_REQUEST_BYTES:
+            raise ValueError("Service request exceeds the 16 KiB limit")
+        try:
+            request_values = json.loads(
+                request_json,
+                object_pairs_hook=self._json_object_without_duplicate_keys,
+                parse_constant=self._reject_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError, ValueError) as error:
+            raise ValueError(f"Invalid service request JSON: {error}") from error
+        if not isinstance(request_values, dict):
+            raise ValueError("Service request JSON must be an object")
+
+        response_future = futures.Future()
+        try:
+            self.safe_service_requests.put_nowait(
+                (
+                    service_name,
+                    service_type,
+                    request_values,
+                    timeout_ms,
+                    response_future,
+                )
+            )
+        except queue.Full as error:
+            raise RuntimeError("Safe service request queue is full") from error
+        try:
+            return response_future.result(timeout=timeout_ms / 1000.0 + 1.0)
+        except futures.TimeoutError as error:
+            response_future.cancel()
+            raise TimeoutError("Safe ROS service request timed out") from error
+
+    def _process_safe_service_requests(self):
+        while True:
+            try:
+                (
+                    service_name,
+                    service_type,
+                    request_values,
+                    timeout_ms,
+                    response_future,
+                ) = self.safe_service_requests.get_nowait()
+            except queue.Empty:
+                self._expire_safe_service_calls()
+                return
+            if not response_future.set_running_or_notify_cancel():
+                continue
+            try:
+                self._begin_safe_service_call(
+                    service_name,
+                    service_type,
+                    request_values,
+                    timeout_ms,
+                    response_future,
+                )
+            except Exception as error:
+                response_future.set_exception(error)
+
+    def _begin_safe_service_call(
+        self, service_name, service_type, request_values, timeout_ms, response_future
+    ):
+        if len(self.pending_safe_service_calls) >= MAX_SAFE_SERVICE_CALLS:
+            raise RuntimeError("Too many safe ROS service calls are in flight")
+        discovered_types = dict(self.get_service_names_and_types()).get(
+            service_name, []
+        )
+        if service_type not in discovered_types:
+            raise LookupError(
+                f"ROS service {service_name} with type {service_type} is unavailable"
+            )
+        service_class = get_service(service_type)
+        request = service_class.Request()
+        allowed_fields = set(request.get_fields_and_field_types())
+        unknown_fields = sorted(set(request_values) - allowed_fields)
+        if unknown_fields:
+            raise ValueError(
+                "Unknown service request fields: " + ", ".join(unknown_fields)
+            )
+        try:
+            set_message_fields(request, request_values)
+        except (AssertionError, AttributeError, TypeError, ValueError) as error:
+            raise ValueError(f"Service request does not match its ROS schema: {error}") from error
+
+        client = self.create_client(service_class, service_name)
+        if not client.wait_for_service(timeout_sec=0.0):
+            self.destroy_client(client)
+            raise LookupError(f"ROS service {service_name} is not ready")
+        call_id = id(response_future)
+        try:
+            ros_future = client.call_async(request)
+        except Exception:
+            self.destroy_client(client)
+            raise
+        self.pending_safe_service_calls[call_id] = {
+            "client": client,
+            "ros_future": ros_future,
+            "response_future": response_future,
+            "deadline": time.monotonic() + timeout_ms / 1000.0,
+            "service_name": service_name,
+            "service_type": service_type,
+        }
+        ros_future.add_done_callback(
+            lambda completed, key=call_id: self._finish_safe_service_call(key, completed)
+        )
+
+    def _finish_safe_service_call(self, call_id, ros_future):
+        call = self.pending_safe_service_calls.pop(call_id, None)
+        if call is None:
+            return
+        self.destroy_client(call["client"])
+        if ros_future.cancelled():
+            if not call["response_future"].done():
+                call["response_future"].set_exception(
+                    TimeoutError("Safe ROS service request was cancelled")
+                )
+            return
+        error = ros_future.exception()
+        if error is not None:
+            call["response_future"].set_exception(
+                RuntimeError(f"ROS service call failed: {error}")
+            )
+            return
+        try:
+            payload, truncated = _serialize_inspection_message(ros_future.result())
+        except (TypeError, ValueError, OverflowError) as error:
+            call["response_future"].set_exception(
+                RuntimeError(f"Could not serialize ROS service response: {error}")
+            )
+            return
+        call["response_future"].set_result(
+            {"response_json": payload, "truncated": truncated}
+        )
+
+    def _expire_safe_service_calls(self):
+        now = time.monotonic()
+        expired = [
+            call_id
+            for call_id, call in self.pending_safe_service_calls.items()
+            if call["deadline"] <= now
+        ]
+        for call_id in expired:
+            call = self.pending_safe_service_calls.pop(call_id)
+            call["ros_future"].cancel()
+            self.destroy_client(call["client"])
+            if not call["response_future"].done():
+                call["response_future"].set_exception(
+                    TimeoutError("ROS service response timed out")
+                )
+
+    def submit_safe_action_goal(self, action_name, action_type, goal_json):
+        if not re.fullmatch(
+            r"/[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*",
+            action_name,
+        ):
+            raise ValueError("Action name must be a fully qualified ROS name")
+        if action_type not in SAFE_NON_MOTION_ACTION_TYPES:
+            raise PermissionError("This ROS action type is not on the non-motion allowlist")
+        if len(goal_json.encode("utf-8")) > MAX_SAFE_SERVICE_REQUEST_BYTES:
+            raise ValueError("Action goal exceeds the 16 KiB limit")
+        try:
+            goal_values = json.loads(
+                goal_json,
+                object_pairs_hook=self._json_object_without_duplicate_keys,
+                parse_constant=self._reject_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError, ValueError) as error:
+            raise ValueError(f"Invalid action goal JSON: {error}") from error
+        if not isinstance(goal_values, dict):
+            raise ValueError("Action goal JSON must be an object")
+
+        action_class = get_action(action_type)
+        goal = action_class.Goal()
+        unknown_fields = sorted(
+            set(goal_values) - set(goal.get_fields_and_field_types())
+        )
+        if unknown_fields:
+            raise ValueError("Unknown action goal fields: " + ", ".join(unknown_fields))
+        try:
+            set_message_fields(goal, goal_values)
+        except (AssertionError, AttributeError, TypeError, ValueError) as error:
+            raise ValueError(f"Action goal does not match its ROS schema: {error}") from error
+        if action_type == "action_tutorials_interfaces/action/Fibonacci":
+            if not isinstance(goal.order, int) or isinstance(goal.order, bool):
+                raise ValueError("Fibonacci order must be an integer")
+            if not 1 <= goal.order <= 20:
+                raise ValueError("Fibonacci order must be between 1 and 20")
+
+        goal_id = str(uuid.uuid4())
+        try:
+            self.safe_action_requests.put_nowait(
+                ("start", goal_id, action_name, action_type, goal, None)
+            )
+        except queue.Full as error:
+            raise RuntimeError("Safe ROS action request queue is full") from error
+        self._publish_action_goal(
+            goal_id, action_name, action_type, status="submitted"
+        )
+        return goal_id
+
+    def cancel_safe_action_goal(self, goal_id):
+        try:
+            normalized_id = str(uuid.UUID(goal_id))
+        except (AttributeError, TypeError, ValueError) as error:
+            raise ValueError("Invalid action goal identifier") from error
+        response_future = futures.Future()
+        try:
+            self.safe_action_requests.put_nowait(
+                ("cancel", normalized_id, "", "", None, response_future)
+            )
+        except queue.Full as error:
+            raise RuntimeError("Safe ROS action request queue is full") from error
+        try:
+            return response_future.result(timeout=5.0)
+        except futures.TimeoutError as error:
+            response_future.cancel()
+            raise TimeoutError("Timed out waiting for action cancellation acknowledgement") from error
+
+    def _publish_action_goal(
+        self,
+        goal_id,
+        action_name,
+        action_type,
+        status,
+        feedback_json="",
+        result_json="",
+        error="",
+        terminal=False,
+        truncated=False,
+    ):
+        event = ros_engine_pb2.WorkspaceEvent(
+            action_goal_update=ros_engine_pb2.ActionGoalUpdate(
+                goal_id=goal_id,
+                action_name=action_name,
+                action_type=action_type,
+                status=status,
+                feedback_json=feedback_json,
+                result_json=result_json,
+                error=error,
+                terminal=terminal,
+                truncated=truncated,
+            ),
+            timestamp_ns=time.time_ns(),
+        )
+        if status == "feedback":
+            self.event_hub.publish(
+                event,
+                priority="telemetry",
+                key=("action_feedback", goal_id),
+            )
+        else:
+            self.event_hub.publish(event, key=("action_goal", goal_id))
+
+    def _process_safe_action_requests(self):
+        while True:
+            try:
+                action, goal_id, name, action_type, goal, response_future = (
+                    self.safe_action_requests.get_nowait()
+                )
+            except queue.Empty:
+                self._expire_safe_action_goals()
+                return
+            try:
+                if action == "start":
+                    self._begin_safe_action_goal(
+                        goal_id, name, action_type, goal
+                    )
+                else:
+                    self._begin_safe_action_cancel(goal_id, response_future)
+            except Exception as error:
+                if response_future is not None and not response_future.done():
+                    response_future.set_exception(error)
+                else:
+                    self._publish_action_goal(
+                        goal_id,
+                        name,
+                        action_type,
+                        status="failed",
+                        error=str(error),
+                        terminal=True,
+                    )
+
+    def _begin_safe_action_goal(self, goal_id, action_name, action_type, goal):
+        if len(self.safe_action_goals) >= MAX_SAFE_ACTION_GOALS:
+            self._publish_action_goal(
+                goal_id,
+                action_name,
+                action_type,
+                status="failed",
+                error=f"At most {MAX_SAFE_ACTION_GOALS} safe goals can run at once",
+                terminal=True,
+            )
+            return
+        action_class = get_action(action_type)
+        client = ActionClient(self, action_class, action_name)
+        if not client.wait_for_server(timeout_sec=0.0):
+            self.destroy_client(client)
+            self._publish_action_goal(
+                goal_id,
+                action_name,
+                action_type,
+                status="unavailable",
+                error=f"ROS action server {action_name} is not available",
+                terminal=True,
+            )
+            return
+        record = {
+            "action_name": action_name,
+            "action_type": action_type,
+            "client": client,
+            "goal_handle": None,
+            "deadline": time.monotonic() + MAX_SAFE_ACTION_DURATION_SECONDS,
+            "timed_out": False,
+            "cancel_requested": False,
+            "last_feedback_at": 0.0,
+        }
+        self.safe_action_goals[goal_id] = record
+        try:
+            send_future = client.send_goal_async(
+                goal,
+                feedback_callback=lambda feedback, key=goal_id: (
+                    self._safe_action_feedback(key, feedback)
+                ),
+            )
+        except Exception:
+            self.safe_action_goals.pop(goal_id, None)
+            self.destroy_client(client)
+            raise
+        send_future.add_done_callback(
+            lambda completed, key=goal_id: self._safe_action_goal_response(
+                key, completed
+            )
+        )
+
+    def _safe_action_goal_response(self, goal_id, completed):
+        record = self.safe_action_goals.get(goal_id)
+        if record is None:
+            return
+        try:
+            goal_handle = completed.result()
+        except Exception as error:
+            self._finish_safe_action_goal(
+                goal_id, "failed", error=str(error)
+            )
+            return
+        if not goal_handle.accepted:
+            self._finish_safe_action_goal(
+                goal_id,
+                "rejected",
+                error="ROS action server rejected the goal",
+            )
+            return
+        record["goal_handle"] = goal_handle
+        self._publish_action_goal(
+            goal_id,
+            record["action_name"],
+            record["action_type"],
+            status="accepted",
+        )
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(
+            lambda result, key=goal_id: self._safe_action_result(key, result)
+        )
+        if record["timed_out"]:
+            self._request_action_cancel(record, goal_id)
+
+    def _safe_action_feedback(self, goal_id, feedback_message):
+        record = self.safe_action_goals.get(goal_id)
+        if record is None:
+            return
+        now = time.monotonic()
+        if now - record["last_feedback_at"] < 1.0 / MAX_SAFE_ACTION_FEEDBACK_RATE_HZ:
+            return
+        record["last_feedback_at"] = now
+        try:
+            payload, truncated = _serialize_inspection_message(
+                feedback_message.feedback
+            )
+        except (TypeError, ValueError, OverflowError):
+            LOGGER.exception("Could not serialize feedback for action goal %s", goal_id)
+            self._publish_action_goal(
+                goal_id,
+                record["action_name"],
+                record["action_type"],
+                status="feedback_error",
+                error="Action feedback could not be serialized",
+            )
+            return
+        self._publish_action_goal(
+            goal_id,
+            record["action_name"],
+            record["action_type"],
+            status="feedback",
+            feedback_json=payload,
+            truncated=truncated,
+        )
+
+    def _safe_action_result(self, goal_id, completed):
+        record = self.safe_action_goals.get(goal_id)
+        if record is None:
+            return
+        try:
+            response = completed.result()
+            result_json, truncated = _serialize_inspection_message(response.result)
+        except Exception as error:
+            self._finish_safe_action_goal(
+                goal_id, "failed", error=f"Could not retrieve action result: {error}"
+            )
+            return
+        status = {
+            4: "succeeded",
+            5: "canceled",
+            6: "aborted",
+        }.get(response.status, f"terminal_{response.status}")
+        if record["timed_out"]:
+            status = "timed_out"
+        self._finish_safe_action_goal(
+            goal_id,
+            status,
+            result_json=result_json,
+            truncated=truncated,
+            error=(
+                "Action exceeded its 60-second execution limit"
+                if record["timed_out"]
+                else ""
+            ),
+        )
+
+    def _finish_safe_action_goal(
+        self,
+        goal_id,
+        status,
+        result_json="",
+        error="",
+        truncated=False,
+    ):
+        record = self.safe_action_goals.pop(goal_id, None)
+        if record is None:
+            return
+        self.destroy_client(record["client"])
+        self._publish_action_goal(
+            goal_id,
+            record["action_name"],
+            record["action_type"],
+            status=status,
+            result_json=result_json,
+            error=error,
+            terminal=True,
+            truncated=truncated,
+        )
+
+    def _begin_safe_action_cancel(self, goal_id, response_future):
+        if not response_future.set_running_or_notify_cancel():
+            return
+        record = self.safe_action_goals.get(goal_id)
+        if record is None:
+            response_future.set_exception(LookupError("Action goal is not active"))
+            return
+        if record["goal_handle"] is None:
+            response_future.set_exception(
+                RuntimeError("Action goal has not yet been accepted by its server")
+            )
+            return
+        record["cancel_requested"] = True
+        self._request_action_cancel(
+            record, goal_id, response_future=response_future
+        )
+
+    def _request_action_cancel(self, record, goal_id, response_future=None):
+        if record["goal_handle"] is None:
+            return
+        record["cancel_requested"] = True
+        self._publish_action_goal(
+            goal_id,
+            record["action_name"],
+            record["action_type"],
+            status="cancel_requested",
+            error=(
+                "Execution time limit reached; awaiting confirmed cancellation"
+                if record["timed_out"]
+                else ""
+            ),
+        )
+        try:
+            cancel_future = record["goal_handle"].cancel_goal_async()
+        except Exception as error:
+            if response_future is not None and not response_future.done():
+                response_future.set_exception(error)
+            else:
+                LOGGER.exception("Could not request cancellation for action goal %s", goal_id)
+            record["cancel_requested"] = False
+            return
+
+        def cancellation_done(completed):
+            try:
+                response = completed.result()
+                accepted = bool(response.goals_canceling)
+            except Exception as error:
+                if response_future is not None and not response_future.done():
+                    response_future.set_exception(error)
+                self._publish_action_goal(
+                    goal_id,
+                    record["action_name"],
+                    record["action_type"],
+                    status="cancel_failed",
+                    error=f"Action cancellation failed: {error}",
+                )
+                return
+            if response_future is not None and not response_future.done():
+                response_future.set_result(accepted)
+            if not accepted:
+                record["cancel_requested"] = False
+                self._publish_action_goal(
+                    goal_id,
+                    record["action_name"],
+                    record["action_type"],
+                    status="cancel_rejected",
+                    error="ROS action server did not accept cancellation",
+                )
+
+        cancel_future.add_done_callback(cancellation_done)
+
+    def _expire_safe_action_goals(self):
+        now = time.monotonic()
+        for goal_id, record in tuple(self.safe_action_goals.items()):
+            if record["deadline"] <= now and not record["timed_out"]:
+                record["timed_out"] = True
+                self._request_action_cancel(record, goal_id)
 
     def _process_topic_inspection_requests(self):
         while True:
@@ -670,6 +1258,9 @@ class RosIntrospector(Node):
                     types=sorted(types),
                     server_nodes=sorted(set(role["servers"])),
                     client_nodes=sorted(set(role["clients"])),
+                    safe_types=sorted(
+                        set(types) & SAFE_READ_ONLY_SERVICE_TYPES
+                    ),
                 )
             )
 
@@ -684,6 +1275,9 @@ class RosIntrospector(Node):
                     types=sorted(action["types"]),
                     server_nodes=sorted(action["servers"]),
                     client_nodes=sorted(action["clients"]),
+                    safe_types=sorted(
+                        set(action["types"]) & SAFE_NON_MOTION_ACTION_TYPES
+                    ),
                 )
             )
 
@@ -800,6 +1394,79 @@ class RosEngineServicer(ros_engine_pb2_grpc.RosEngineServicer):
                 grpc.StatusCode.INTERNAL, "Failed to stop topic inspection"
             )
         return ros_engine_pb2.Empty()
+
+    def InvokeSafeService(self, request, context):
+        self._require_authentication(context)
+        try:
+            response = self.ros_node.invoke_safe_service(
+                request.service_name,
+                request.service_type,
+                request.request_json,
+                request.timeout_ms,
+            )
+        except PermissionError as error:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, str(error))
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except LookupError as error:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(error))
+        except TimeoutError as error:
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
+        except RuntimeError as error:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+        except Exception:
+            LOGGER.exception(
+                "Safe ROS service invocation failed for %s", request.service_name
+            )
+            context.abort(
+                grpc.StatusCode.INTERNAL, "Safe ROS service invocation failed"
+            )
+        return ros_engine_pb2.SafeServiceResponse(
+            service_name=request.service_name,
+            service_type=request.service_type,
+            response_json=response["response_json"],
+            truncated=response["truncated"],
+        )
+
+    def SendSafeActionGoal(self, request, context):
+        self._require_authentication(context)
+        try:
+            goal_id = self.ros_node.submit_safe_action_goal(
+                request.action_name,
+                request.action_type,
+                request.goal_json,
+            )
+        except PermissionError as error:
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, str(error))
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except RuntimeError as error:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(error))
+        except Exception:
+            LOGGER.exception(
+                "Could not submit safe ROS action goal for %s", request.action_name
+            )
+            context.abort(grpc.StatusCode.INTERNAL, "Could not submit ROS action goal")
+        return ros_engine_pb2.ActionGoalResponse(goal_id=goal_id)
+
+    def CancelActionGoal(self, request, context):
+        self._require_authentication(context)
+        try:
+            requested = self.ros_node.cancel_safe_action_goal(request.goal_id)
+        except ValueError as error:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+        except LookupError as error:
+            context.abort(grpc.StatusCode.NOT_FOUND, str(error))
+        except TimeoutError as error:
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, str(error))
+        except RuntimeError as error:
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, str(error))
+        except Exception:
+            LOGGER.exception("Could not request cancellation for action goal %s", request.goal_id)
+            context.abort(
+                grpc.StatusCode.INTERNAL, "Could not cancel ROS action goal"
+            )
+        return ros_engine_pb2.ActionCancelResponse(requested=requested)
 
     def _safety_state_message(self):
         state, detail, updated_at_ns = self.ros_node.safety.snapshot()

@@ -29,6 +29,7 @@ MAX_CONFIG_LINEAR_ACCELERATION = 2.0
 MAX_CONFIG_ANGULAR_ACCELERATION = 4.0
 ALLOWED_MOTION_MODES = frozenset(("planar", "full_twist"))
 MAX_WORKSPACE_PACKAGES = 1000
+MAX_UNDERLAY_PACKAGES = 2000
 MAX_PACKAGE_SCAN_FILES = 5000
 MAX_PACKAGE_DISCOVERY_FILES = 250
 ACTION_SEND_GOAL_SUFFIX = "/_action/send_goal"
@@ -296,6 +297,79 @@ def discover_workspace_packages(workspace="/workspace"):
         {key: value for key, value in package.items() if key != "is_source"}
         for _, package in sorted(result_by_name.items())
     ]
+
+
+def _discover_underlay_packages(underlay_roots):
+    packages = {}
+    for prefix in underlay_roots:
+        root = Path(prefix)
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError(f"ROS underlay prefix is missing or unsafe: {root}")
+        root = root.resolve(strict=True)
+        share = root / "share"
+        if not share.is_dir() or share.is_symlink():
+            raise ValueError(f"ROS underlay package index is missing or unsafe: {share}")
+        try:
+            package_directories = sorted(share.iterdir())
+        except OSError as error:
+            raise ValueError(f"Could not inspect ROS underlay {share}: {error}") from error
+        for package_directory in package_directories:
+            manifest = package_directory / "package.xml"
+            if (
+                not package_directory.is_dir()
+                or package_directory.is_symlink()
+                or manifest.is_symlink()
+                or not manifest.is_file()
+                or not _package_directory_is_within(root, package_directory)
+            ):
+                continue
+            package = _parse_package_manifest(package_directory)
+            name = package["name"]
+            if not name or name in packages:
+                continue
+            package.update(
+                {
+                    "path": "",
+                    "executables": [],
+                    "launch_files": [],
+                    "config_files": [],
+                    "source": "underlay",
+                }
+            )
+            packages[name] = package
+            if len(packages) > MAX_UNDERLAY_PACKAGES:
+                raise ValueError(
+                    f"ROS underlay contains more than {MAX_UNDERLAY_PACKAGES} packages"
+                )
+    return packages
+
+
+def discover_ros_packages(
+    workspace="/workspace", underlay_roots=("/opt/ros/jazzy",)
+):
+    """Return bounded workspace and ROS underlay packages with dependency resolution."""
+    workspace_packages = {
+        package["name"]: {**package, "source": "workspace"}
+        for package in discover_workspace_packages(workspace)
+    }
+    underlay_packages = _discover_underlay_packages(underlay_roots)
+    package_sources = {
+        name: "workspace" for name in workspace_packages
+    }
+    package_sources.update(
+        {
+            name: "underlay"
+            for name in underlay_packages
+            if name not in workspace_packages
+        }
+    )
+    resolved_packages = {**underlay_packages, **workspace_packages}
+    for package in resolved_packages.values():
+        package["dependency_sources"] = {
+            dependency: package_sources.get(dependency, "missing")
+            for dependency in package["dependencies"]
+        }
+    return [resolved_packages[name] for name in sorted(resolved_packages)]
 
 
 def action_from_send_goal_service(service_name, service_type):

@@ -113,25 +113,34 @@ docker exec -i "$container" bash -c 'cd /opt/robotics-studio && python3 -' <<'PY
 import sys
 
 sys.path.insert(0, "/opt/robotics-studio")
-from server_core import discover_workspace_packages
+from server_core import discover_ros_packages
 
 packages = {
     package["name"]: package
-    for package in discover_workspace_packages("/workspace")
+    for package in discover_ros_packages("/workspace")
 }
-assert set(packages) == {
+workspace_packages = {
+    name for name, package in packages.items() if package["source"] == "workspace"
+}
+assert workspace_packages == {
     "malformed_fixture",
     "robotics_studio_integration_fixture",
-}, sorted(packages)
+}, sorted(workspace_packages)
 fixture = packages["robotics_studio_integration_fixture"]
 assert fixture["package_type"] == "ament_cmake"
 assert fixture["version"] == "1.0.0"
 assert fixture["description"] == "Temporary package discovery integration fixture"
 assert fixture["dependencies"] == ["ament_cmake", "rclpy"]
+assert fixture["dependency_sources"] == {
+    "ament_cmake": "underlay",
+    "rclpy": "underlay",
+}
 assert fixture["executables"] == ["fixture_node"]
 assert fixture["launch_files"] == ["launch/start.launch.xml"]
 assert fixture["config_files"] == ["config/settings.yaml"]
 assert packages["malformed_fixture"]["metadata_error"]
+assert packages["rclpy"]["source"] == "underlay"
+assert packages["rclpy"]["path"] == ""
 print("Selected-workspace ROS package discovery passed")
 PY
 
@@ -203,6 +212,7 @@ docker exec -i "$container" bash -lc \
   'source /opt/ros/jazzy/setup.bash && cd /opt/robotics-studio && /opt/robotics-studio/venv/bin/python -' <<'PY'
 import sys
 import time
+from threading import Thread
 
 sys.path.insert(0, "/opt/robotics-studio/generated")
 import grpc
@@ -211,10 +221,13 @@ import ros_engine_pb2 as pb
 import ros_engine_pb2_grpc as rpc
 from action_tutorials_interfaces.action import Fibonacci
 from geometry_msgs.msg import TransformStamped
-from rclpy.action import ActionClient, ActionServer
+from rclpy.action import ActionClient, ActionServer, CancelResponse
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
+from lifecycle_msgs.srv import GetState
 from std_srvs.srv import Trigger
 from tf2_msgs.msg import TFMessage
 
@@ -232,7 +245,7 @@ stub = rpc.RosEngineStub(
 events = stub.ReplayEvents(
     pb.ReplayEventsRequest(has_after_sequence=True, after_sequence=0),
     metadata=metadata,
-    timeout=10,
+    timeout=30,
 )
 
 rclpy.init()
@@ -242,12 +255,48 @@ service = node.create_service(
     "/integration/echo",
     lambda request, response: response,
 )
+
+def get_integration_lifecycle_state(request, response):
+    response.current_state.id = 2
+    response.current_state.label = "active"
+    return response
+
+lifecycle_service = node.create_service(
+    GetState,
+    "/integration/lifecycle/get_state",
+    get_integration_lifecycle_state,
+)
 service_client = node.create_client(Trigger, "/integration/echo")
+
+def execute_fibonacci(goal_handle):
+    sequence = [0, 1]
+    feedback = Fibonacci.Feedback()
+    result = Fibonacci.Result()
+    feedback.partial_sequence = sequence
+    goal_handle.publish_feedback(feedback)
+    for index in range(1, goal_handle.request.order):
+        if goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            result.sequence = sequence
+            return result
+        sequence.append(sequence[index] + sequence[index - 1])
+        feedback.partial_sequence = sequence
+        goal_handle.publish_feedback(feedback)
+        time.sleep(0.1)
+    if goal_handle.is_cancel_requested:
+        goal_handle.canceled()
+    else:
+        goal_handle.succeed()
+    result.sequence = sequence
+    return result
+
 action_server = ActionServer(
     node,
     Fibonacci,
     "/integration/fibonacci",
-    lambda goal_handle: Fibonacci.Result(),
+    execute_fibonacci,
+    callback_group=ReentrantCallbackGroup(),
+    cancel_callback=lambda _goal_handle: CancelResponse.ACCEPT,
 )
 action_client = ActionClient(node, Fibonacci, "/integration/fibonacci")
 publisher = node.create_publisher(
@@ -306,6 +355,99 @@ except grpc.RpcError as error:
     assert error.code() == grpc.StatusCode.INVALID_ARGUMENT
 else:
     raise AssertionError("ROS service accepted an invalid inspection topic name")
+
+executor = MultiThreadedExecutor(num_threads=4)
+executor.add_node(node)
+executor_thread = Thread(target=executor.spin, daemon=True)
+executor_thread.start()
+
+safe_service_request = pb.SafeServiceRequest(
+    service_name="/integration/lifecycle/get_state",
+    service_type="lifecycle_msgs/srv/GetState",
+    request_json="{}",
+    timeout_ms=1000,
+)
+service_deadline = time.monotonic() + 8
+while True:
+    try:
+        safe_service_response = stub.InvokeSafeService(
+            safe_service_request,
+            metadata=metadata,
+            timeout=3,
+        )
+        break
+    except grpc.RpcError as error:
+        if (
+            error.code() != grpc.StatusCode.NOT_FOUND
+            or time.monotonic() >= service_deadline
+        ):
+            raise
+        time.sleep(0.1)
+import json
+
+assert safe_service_response.service_type == "lifecycle_msgs/srv/GetState"
+assert json.loads(safe_service_response.response_json) == {
+    "current_state": {"id": 2, "label": "active"}
+}
+try:
+    stub.InvokeSafeService(
+        pb.SafeServiceRequest(
+            service_name="/integration/echo",
+            service_type="std_srvs/srv/Trigger",
+            request_json="{}",
+            timeout_ms=1000,
+        ),
+        metadata=metadata,
+        timeout=3,
+    )
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.PERMISSION_DENIED
+else:
+    raise AssertionError("ROS service invoked a type outside the read-only allowlist")
+try:
+    stub.InvokeSafeService(
+        pb.SafeServiceRequest(
+            service_name="/integration/lifecycle/get_state",
+            service_type="lifecycle_msgs/srv/GetState",
+            request_json='{"unknown":true}',
+            timeout_ms=1000,
+        ),
+        metadata=metadata,
+        timeout=3,
+    )
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT
+else:
+    raise AssertionError("ROS service accepted a request outside its schema")
+
+try:
+    stub.SendSafeActionGoal(
+        pb.SafeActionGoalRequest(
+            action_name="/integration/fibonacci",
+            action_type="example_interfaces/action/Fibonacci",
+            goal_json='{"order":3}',
+        ),
+        metadata=metadata,
+        timeout=3,
+    )
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.PERMISSION_DENIED
+else:
+    raise AssertionError("ROS action accepted a type outside the non-motion allowlist")
+try:
+    stub.SendSafeActionGoal(
+        pb.SafeActionGoalRequest(
+            action_name="/integration/fibonacci",
+            action_type="action_tutorials_interfaces/action/Fibonacci",
+            goal_json='{"order":0}',
+        ),
+        metadata=metadata,
+        timeout=3,
+    )
+except grpc.RpcError as error:
+    assert error.code() == grpc.StatusCode.INVALID_ARGUMENT
+else:
+    raise AssertionError("ROS action accepted a goal outside its safe bounds")
 
 transform = TransformStamped()
 transform.header.frame_id = "map"
@@ -388,11 +530,19 @@ for event in events:
             (service for service in graph.services if service.name == "/integration/echo"),
             None,
         )
+        lifecycle_service_info = next(
+            (
+                service
+                for service in graph.services
+                if service.name == "/integration/lifecycle/get_state"
+            ),
+            None,
+        )
         action_info = next(
             (action for action in graph.actions if action.name == "/integration/fibonacci"),
             None,
         )
-        if tf_topic and service_info and action_info:
+        if tf_topic and service_info and lifecycle_service_info and action_info:
             graph_verified = (
                 any(
                 endpoint.node_name == "robotics_studio_tf_integration"
@@ -402,6 +552,8 @@ for event in events:
                 )
                 and "/robotics_studio_tf_integration" in service_info.server_nodes
                 and "/robotics_studio_tf_integration" in service_info.client_nodes
+                and lifecycle_service_info.safe_types
+                == ["lifecycle_msgs/srv/GetState"]
                 and action_info.types
                 == ["action_tutorials_interfaces/action/Fibonacci"]
                 and "/robotics_studio_tf_integration" in action_info.server_nodes
@@ -429,10 +581,94 @@ if not dynamic_tf_verified:
 if not topic_inspection_verified or not topic_inspection_stopped:
     raise AssertionError("ROS topic inspection did not stream and stop cleanly")
 
+action_response = stub.SendSafeActionGoal(
+    pb.SafeActionGoalRequest(
+        action_name="/integration/fibonacci",
+        action_type="action_tutorials_interfaces/action/Fibonacci",
+        goal_json='{"order":3}',
+    ),
+    metadata=metadata,
+    timeout=3,
+)
+action_updates = []
+for event in events:
+    if event.WhichOneof("event") != "action_goal_update":
+        continue
+    update = event.action_goal_update
+    if update.goal_id != action_response.goal_id:
+        continue
+    action_updates.append(update)
+    if update.terminal:
+        break
+else:
+    raise AssertionError("ROS action goal did not reach a terminal state")
+assert any(update.status == "feedback" for update in action_updates), (
+    "ROS action goal did not stream feedback"
+)
+terminal_update = action_updates[-1]
+assert terminal_update.status == "succeeded", terminal_update
+assert json.loads(terminal_update.result_json)["sequence"] == [0, 1, 1, 2]
+
+missing_action = stub.SendSafeActionGoal(
+    pb.SafeActionGoalRequest(
+        action_name="/integration/missing_fibonacci",
+        action_type="action_tutorials_interfaces/action/Fibonacci",
+        goal_json='{"order":3}',
+    ),
+    metadata=metadata,
+    timeout=3,
+)
+for event in events:
+    if event.WhichOneof("event") == "action_goal_update":
+        update = event.action_goal_update
+        if update.goal_id == missing_action.goal_id and update.terminal:
+            assert update.status == "unavailable"
+            assert "not available" in update.error
+            break
+else:
+    raise AssertionError("Unavailable ROS action server was not reported")
+
+cancellable_goal = stub.SendSafeActionGoal(
+    pb.SafeActionGoalRequest(
+        action_name="/integration/fibonacci",
+        action_type="action_tutorials_interfaces/action/Fibonacci",
+        goal_json='{"order":20}',
+    ),
+    metadata=metadata,
+    timeout=3,
+)
+cancel_requested = False
+for event in events:
+    if event.WhichOneof("event") != "action_goal_update":
+        continue
+    update = event.action_goal_update
+    if update.goal_id != cancellable_goal.goal_id:
+        continue
+    if update.status == "feedback" and not cancel_requested:
+        cancellation = stub.CancelActionGoal(
+            pb.ActionGoalIdRequest(goal_id=cancellable_goal.goal_id),
+            metadata=metadata,
+            timeout=3,
+        )
+        assert cancellation.requested, "ROS action server rejected cancellation"
+        cancel_requested = True
+    if update.terminal:
+        assert cancel_requested, "ROS action goal completed before cancellation"
+        assert update.status == "canceled", update
+        break
+else:
+    raise AssertionError("Canceled ROS action did not report a terminal result")
+
 events.cancel()
+executor.shutdown()
+executor_thread.join(timeout=3)
+assert not executor_thread.is_alive(), "ROS integration fixture executor did not stop"
+executor.remove_node(node)
 node.destroy_node()
 rclpy.shutdown()
 print("Live ROS TF, joint-state, graph, and bounded topic inspection passed")
+print("Allowlisted lifecycle state service invocation passed")
+print("Safe ROS action feedback, result, cancellation, and terminal status passed")
 PY
 
 ROBOTICS_STUDIO_TEST_TLS_CERTIFICATE="$workspace/grpc-ca.crt" \

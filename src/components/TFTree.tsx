@@ -3,7 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import { AlertTriangle, Sparkles } from "lucide-react";
 import {
   buildTfGraph,
-  tfEdgeKey,
+  composeTfTransform,
+  mergeTfTransform,
   type TfTransform,
   type TfTreeNode,
 } from "../tfGraph";
@@ -134,8 +135,10 @@ export default function TFTree({ connected, onExplain }: Props) {
         ...event.payload,
         receivedAtMs: event.payload.received_at_ms,
       };
-      const key = tfEdgeKey(transform.parent_frame, transform.child_frame);
-      transformsRef.current[key] = transform;
+      transformsRef.current = mergeTfTransform(
+        transformsRef.current,
+        transform,
+      );
       if (updateFrame === null) {
         updateFrame = window.requestAnimationFrame(() => {
           updateFrame = null;
@@ -162,6 +165,9 @@ export default function TFTree({ connected, onExplain }: Props) {
   const selected =
     graph.edges.find((edge) => edge.key === selectedEdgeKey) ?? graph.edges[0];
   const euler = selected ? quaternionEulerDegrees(selected) : null;
+  const composed = selected
+    ? composeTfTransform(graph.edges, selected.child_frame)
+    : null;
 
   return (
     <div
@@ -257,6 +263,25 @@ export default function TFTree({ connected, onExplain }: Props) {
                 ).padStart(3, "0")} s`
               : "zero or unavailable"}
           </div>
+          {composed?.ok ? (
+            <div
+              aria-label={`Composed transform from ${composed.pose.rootFrame} to ${composed.pose.frame}`}
+              style={{ marginBottom: 6 }}
+            >
+              Pose in {composed.pose.rootFrame}: ({composed.pose.x.toFixed(4)},{" "}
+              {composed.pose.y.toFixed(4)}, {composed.pose.z.toFixed(4)}) m
+              {composed.pose.stale ? " · includes stale data" : ""}
+              <div>
+                Composed quaternion: ({composed.pose.qx.toFixed(4)},{" "}
+                {composed.pose.qy.toFixed(4)}, {composed.pose.qz.toFixed(4)},{" "}
+                {composed.pose.qw.toFixed(4)})
+              </div>
+            </div>
+          ) : composed ? (
+            <div role="alert" style={{ color: "#e0b060", marginBottom: 6 }}>
+              Composed pose unavailable: {composed.reason}
+            </div>
+          ) : null}
           <div>
             Translation (m): ({selected.x.toFixed(4)}, {selected.y.toFixed(4)},{" "}
             {selected.z.toFixed(4)})

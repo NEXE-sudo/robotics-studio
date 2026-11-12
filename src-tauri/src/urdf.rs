@@ -1,10 +1,14 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
-const MAX_DESCRIPTION_BYTES: usize = 2 * 1024 * 1024;
+const MAX_DESCRIPTION_BYTES: usize = 4 * 1024 * 1024;
+const MAX_MESH_BYTES: usize = 8 * 1024 * 1024;
 const MAX_LINKS: usize = 512;
 const MAX_JOINTS: usize = 512;
 const MAX_VISUALS_PER_LINK: usize = 64;
+const MAX_MESH_TRIANGLES: usize = 250_000;
+const MAX_XML_ELEMENTS: usize = 100_000;
+const MAX_XML_DEPTH: usize = 128;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,10 +20,25 @@ pub struct RobotOrigin {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum RobotGeometry {
-    Box { size: [f64; 3] },
-    Cylinder { radius: f64, length: f64 },
-    Sphere { radius: f64 },
-    Unsupported { description: String },
+    Box {
+        size: [f64; 3],
+    },
+    Cylinder {
+        radius: f64,
+        length: f64,
+    },
+    Sphere {
+        radius: f64,
+    },
+    Mesh {
+        filename: String,
+        scale: [f64; 3],
+        format: String,
+        data: Option<String>,
+    },
+    Unsupported {
+        description: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -28,6 +47,22 @@ pub struct RobotVisual {
     pub origin: RobotOrigin,
     pub geometry: RobotGeometry,
     pub color: Option<[f64; 4]>,
+    pub material_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RobotInertial {
+    pub origin: RobotOrigin,
+    pub mass: f64,
+    pub inertia: [f64; 6],
+}
+
+#[derive(Default)]
+struct InertialBuilder {
+    origin: RobotOrigin,
+    mass: Option<f64>,
+    inertia: Option<[f64; 6]>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -36,6 +71,7 @@ pub struct RobotLink {
     pub name: String,
     pub visuals: Vec<RobotVisual>,
     pub collisions: Vec<RobotVisual>,
+    pub inertial: Option<RobotInertial>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -194,6 +230,163 @@ fn parse_color(value: &str) -> Result<[f64; 4], String> {
     Ok(color)
 }
 
+pub fn validate_mesh_bytes(format: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() || bytes.len() > MAX_MESH_BYTES {
+        return Err(format!(
+            "Mesh size must be between 1 byte and {MAX_MESH_BYTES} bytes"
+        ));
+    }
+
+    match format {
+        "stl" => {
+            let triangle_count = if bytes.len() >= 84 {
+                let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+                let expected_size = 84usize.saturating_add(count.saturating_mul(50));
+                (expected_size == bytes.len()).then_some(count)
+            } else {
+                None
+            };
+            let triangle_count = match triangle_count {
+                Some(count) => count,
+                None => {
+                    let text = std::str::from_utf8(bytes).map_err(|_| {
+                        "STL mesh is neither valid binary nor UTF-8 ASCII".to_string()
+                    })?;
+                    if !text.trim_start().starts_with("solid")
+                        || !text
+                            .trim_end()
+                            .lines()
+                            .last()
+                            .is_some_and(|line| line.trim_start().starts_with("endsolid"))
+                    {
+                        return Err("Malformed ASCII STL mesh".to_string());
+                    }
+                    text.match_indices("facet normal").count()
+                }
+            };
+            if triangle_count == 0 || triangle_count > MAX_MESH_TRIANGLES {
+                return Err(format!(
+                    "STL triangle count must be between 1 and {MAX_MESH_TRIANGLES}"
+                ));
+            }
+        }
+        "dae" => {
+            let text =
+                std::str::from_utf8(bytes).map_err(|_| "DAE mesh must be UTF-8 XML".to_string())?;
+            if text.len() > MAX_MESH_BYTES {
+                return Err("DAE mesh exceeds its byte limit".to_string());
+            }
+            let mut reader = quick_xml::Reader::from_str(text);
+            reader.config_mut().trim_text(true);
+            let mut root_seen = false;
+            let mut triangle_count = 0usize;
+            let mut node_count = 0usize;
+            let mut depth = 0usize;
+            loop {
+                match reader.read_event() {
+                    Ok(
+                        event @ (quick_xml::events::Event::Start(_)
+                        | quick_xml::events::Event::Empty(_)),
+                    ) => {
+                        let (element, is_empty) = match event {
+                            quick_xml::events::Event::Start(element) => (element, false),
+                            quick_xml::events::Event::Empty(element) => (element, true),
+                            _ => unreachable!(),
+                        };
+                        node_count += 1;
+                        if node_count > 100_000 || depth > 128 {
+                            return Err("DAE XML exceeds the node or nesting limit".to_string());
+                        }
+                        let name =
+                            String::from_utf8_lossy(element.local_name().as_ref()).into_owned();
+                        if !root_seen {
+                            if name != "COLLADA" {
+                                return Err("DAE mesh root element must be <COLLADA>".to_string());
+                            }
+                            root_seen = true;
+                        }
+                        if name == "image" {
+                            return Err(
+                                "DAE meshes with external image/texture references are not supported"
+                                    .to_string(),
+                            );
+                        }
+                        for attribute in element.attributes().with_checks(true) {
+                            let attribute = attribute
+                                .map_err(|error| format!("Malformed DAE attribute: {error}"))?;
+                            if String::from_utf8_lossy(attribute.key.as_ref())
+                                .rsplit(':')
+                                .next()
+                                == Some("url")
+                            {
+                                let value = attribute
+                                    .decoded_and_normalized_value(
+                                        quick_xml::XmlVersion::Implicit1_0,
+                                        reader.decoder(),
+                                    )
+                                    .map_err(|error| {
+                                        format!("Malformed DAE URL attribute: {error}")
+                                    })?;
+                                if !value.starts_with('#') || value.len() < 2 {
+                                    return Err("DAE meshes cannot reference external resources"
+                                        .to_string());
+                                }
+                            }
+                        }
+                        if matches!(name.as_ref(), "triangles" | "polylist") {
+                            let mut count = None;
+                            for attribute in element.attributes().with_checks(true) {
+                                let attribute = attribute
+                                    .map_err(|error| format!("Malformed DAE attribute: {error}"))?;
+                                if attribute.key.as_ref() == b"count" {
+                                    let value = attribute
+                                        .decoded_and_normalized_value(
+                                            quick_xml::XmlVersion::Implicit1_0,
+                                            reader.decoder(),
+                                        )
+                                        .map_err(|error| {
+                                            format!("Malformed DAE count attribute: {error}")
+                                        })?;
+                                    count =
+                                        Some(value.parse::<usize>().map_err(|_| {
+                                            "Invalid DAE primitive count".to_string()
+                                        })?);
+                                }
+                            }
+                            triangle_count =
+                                triangle_count.saturating_add(count.ok_or_else(|| {
+                                    "DAE primitive is missing its count attribute".to_string()
+                                })?);
+                            if triangle_count > MAX_MESH_TRIANGLES {
+                                return Err(format!(
+                                    "DAE triangle count exceeds {MAX_MESH_TRIANGLES}"
+                                ));
+                            }
+                        }
+                        if !is_empty {
+                            depth += 1;
+                        }
+                    }
+                    Ok(quick_xml::events::Event::End(_)) => {
+                        depth = depth.saturating_sub(1);
+                    }
+                    Ok(quick_xml::events::Event::DocType(_)) => {
+                        return Err("DAE documents must not contain a DTD".to_string());
+                    }
+                    Ok(quick_xml::events::Event::Eof) => break,
+                    Ok(_) => {}
+                    Err(error) => return Err(format!("Malformed DAE XML: {error}")),
+                }
+            }
+            if !root_seen || triangle_count == 0 {
+                return Err("DAE mesh contains no supported triangle geometry".to_string());
+            }
+        }
+        _ => return Err(format!("Unsupported mesh format '{format}'")),
+    }
+    Ok(())
+}
+
 fn element_name(element: &quick_xml::events::BytesStart<'_>) -> String {
     String::from_utf8_lossy(element.local_name().as_ref()).into_owned()
 }
@@ -227,12 +420,35 @@ fn parse_geometry(
             }
             Ok(RobotGeometry::Sphere { radius })
         }
-        "mesh" => Ok(RobotGeometry::Unsupported {
-            description: attributes
-                .get("filename")
-                .cloned()
-                .unwrap_or_else(|| "mesh with no filename".to_string()),
-        }),
+        "mesh" => {
+            let filename = required_attribute(attributes, "filename")?.to_string();
+            let format = filename
+                .rsplit_once('.')
+                .map(|(_, extension)| extension.to_ascii_lowercase())
+                .ok_or_else(|| format!("Unsupported URDF mesh format: '{filename}'"))?;
+            if !matches!(format.as_str(), "stl" | "dae") {
+                return Err(format!(
+                    "Unsupported URDF mesh format '{format}'; only STL and DAE are supported"
+                ));
+            }
+            let scale = attributes
+                .get("scale")
+                .map(|value| parse_vector(value, "mesh scale"))
+                .transpose()?
+                .unwrap_or([1.0; 3]);
+            if scale
+                .iter()
+                .any(|component| component.abs() <= f64::EPSILON)
+            {
+                return Err("URDF mesh scale components must be non-zero".to_string());
+            }
+            Ok(RobotGeometry::Mesh {
+                filename,
+                scale,
+                format,
+                data: None,
+            })
+        }
         _ => Err(format!("Unsupported URDF geometry element: {element_name}")),
     }
 }
@@ -369,15 +585,23 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
     let mut current_joint = None::<RobotJoint>;
     let mut current_visual = None::<RobotVisual>;
     let mut current_collision = None::<RobotVisual>;
+    let mut current_inertial = None::<InertialBuilder>;
+    let mut current_global_material = None::<(String, Option<[f64; 4]>)>;
+    let mut global_materials = HashMap::<String, Option<[f64; 4]>>::new();
     let mut links = Vec::new();
     let mut joints = Vec::new();
     let mut warnings = Vec::new();
+    let mut element_count = 0usize;
 
     loop {
         match reader.read_event() {
             Ok(
                 event @ (quick_xml::events::Event::Start(_) | quick_xml::events::Event::Empty(_)),
             ) => {
+                element_count += 1;
+                if element_count > MAX_XML_ELEMENTS || stack.len() >= MAX_XML_DEPTH {
+                    return Err("URDF XML exceeds the element or nesting limit".to_string());
+                }
                 let (element, is_empty) = match event {
                     quick_xml::events::Event::Start(element) => (element, false),
                     quick_xml::events::Event::Empty(element) => (element, true),
@@ -408,6 +632,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                             name: required_attribute(&attributes, "name")?.to_string(),
                             visuals: Vec::new(),
                             collisions: Vec::new(),
+                            inertial: None,
                         });
                     }
                     "joint" if parent == Some("robot") => {
@@ -435,6 +660,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                                 description: String::new(),
                             },
                             color: None,
+                            material_name: None,
                         });
                     }
                     "collision" if parent == Some("link") => {
@@ -447,6 +673,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                                 description: String::new(),
                             },
                             color: None,
+                            material_name: None,
                         });
                     }
                     "origin" if parent == Some("visual") => {
@@ -462,6 +689,11 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                     "origin" if parent == Some("joint") => {
                         if let Some(joint) = current_joint.as_mut() {
                             joint.origin = parse_origin(&attributes)?;
+                        }
+                    }
+                    "origin" if parent == Some("inertial") => {
+                        if let Some(inertial) = current_inertial.as_mut() {
+                            inertial.origin = parse_origin(&attributes)?;
                         }
                     }
                     "parent" if parent == Some("joint") => {
@@ -504,21 +736,87 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                         }
                     }
                     "inertial" if parent == Some("link") => {
-                        warnings.push(
-                            "URDF inertial properties are not used in the preview".to_string(),
-                        );
+                        if current_inertial.is_some() {
+                            return Err("Link contains more than one inertial element".to_string());
+                        }
+                        current_inertial = Some(InertialBuilder::default());
+                    }
+                    "mass" if parent == Some("inertial") => {
+                        if let Some(inertial) = current_inertial.as_mut() {
+                            if inertial.mass.is_some() {
+                                return Err("Inertial element defines mass more than once".into());
+                            }
+                            let mass = parse_number(
+                                required_attribute(&attributes, "value")?,
+                                "inertial mass",
+                            )?;
+                            if mass < 0.0 {
+                                return Err("URDF inertial mass must not be negative".to_string());
+                            }
+                            inertial.mass = Some(mass);
+                        }
+                    }
+                    "inertia" if parent == Some("inertial") => {
+                        if let Some(inertial) = current_inertial.as_mut() {
+                            if inertial.inertia.is_some() {
+                                return Err(
+                                    "Inertial element defines inertia more than once".into()
+                                );
+                            }
+                            let names = ["ixx", "ixy", "ixz", "iyy", "iyz", "izz"];
+                            let mut values = [0.0; 6];
+                            for (index, name) in names.iter().enumerate() {
+                                values[index] = parse_number(
+                                    required_attribute(&attributes, name)?,
+                                    "inertia tensor",
+                                )?;
+                            }
+                            let [ixx, ixy, ixz, iyy, iyz, izz] = values;
+                            let minor_xy = ixx * iyy - ixy * ixy;
+                            let minor_xz = ixx * izz - ixz * ixz;
+                            let minor_yz = iyy * izz - iyz * iyz;
+                            let determinant = ixx * (iyy * izz - iyz * iyz)
+                                - ixy * (ixy * izz - iyz * ixz)
+                                + ixz * (ixy * iyz - iyy * ixz);
+                            if !minor_xy.is_finite()
+                                || !minor_xz.is_finite()
+                                || !minor_yz.is_finite()
+                                || !determinant.is_finite()
+                                || ixx < 0.0
+                                || iyy < 0.0
+                                || izz < 0.0
+                                || minor_xy < -f64::EPSILON
+                                || minor_xz < -f64::EPSILON
+                                || minor_yz < -f64::EPSILON
+                                || determinant < -f64::EPSILON
+                            {
+                                return Err(
+                                    "URDF inertia tensor must be positive semidefinite".to_string()
+                                );
+                            }
+                            inertial.inertia = Some(values);
+                        }
                     }
                     "material" if parent == Some("robot") => {
-                        warnings.push(
-                            "Robot-level named materials are not resolved in the preview"
-                                .to_string(),
-                        );
+                        let name = required_attribute(&attributes, "name")?.to_string();
+                        if current_global_material.is_some() {
+                            return Err("Nested URDF material elements are invalid".into());
+                        }
+                        current_global_material = Some((name, None));
+                    }
+                    "material" if parent == Some("visual") => {
+                        if let Some(visual) = current_visual.as_mut() {
+                            visual.material_name = attributes.get("name").cloned();
+                        }
                     }
                     "color" if parent == Some("material") => {
-                        if let (Some(visual), Some(color)) =
-                            (current_visual.as_mut(), attributes.get("rgba"))
-                        {
-                            visual.color = Some(parse_color(color)?);
+                        if let Some(color) = attributes.get("rgba") {
+                            let color = parse_color(color)?;
+                            if let Some((_, material_color)) = current_global_material.as_mut() {
+                                *material_color = Some(color);
+                            } else if let Some(visual) = current_visual.as_mut() {
+                                visual.color = Some(color);
+                            }
                         }
                     }
                     "box" | "cylinder" | "sphere" | "mesh" if parent == Some("geometry") => {
@@ -551,6 +849,36 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                                     .take()
                                     .ok_or_else(|| "URDF link state is inconsistent".to_string())?,
                             );
+                        }
+                        "inertial" => {
+                            let inertial = current_inertial
+                                .take()
+                                .ok_or_else(|| "URDF inertial state is inconsistent".to_string())?;
+                            let mass = inertial
+                                .mass
+                                .ok_or_else(|| "URDF inertial is missing mass".to_string())?;
+                            let inertia = inertial.inertia.ok_or_else(|| {
+                                "URDF inertial is missing its inertia tensor".to_string()
+                            })?;
+                            if let Some(link) = current_link.as_mut() {
+                                link.inertial = Some(RobotInertial {
+                                    origin: inertial.origin,
+                                    mass,
+                                    inertia,
+                                });
+                            } else {
+                                return Err("URDF inertial is outside a link".to_string());
+                            }
+                        }
+                        "material" if current_global_material.is_some() => {
+                            let (name, color) = current_global_material
+                                .take()
+                                .ok_or_else(|| "URDF material state is inconsistent".to_string())?;
+                            if global_materials.insert(name.clone(), color).is_some() {
+                                return Err(format!(
+                                    "URDF material '{name}' is defined more than once"
+                                ));
+                            }
                         }
                         "visual" => {
                             return Err("URDF visual is missing a geometry".to_string());
@@ -629,6 +957,35 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                         }
                         link.collisions.push(collision);
                     }
+                    "inertial" => {
+                        let inertial = current_inertial
+                            .take()
+                            .ok_or_else(|| "URDF inertial state is inconsistent".to_string())?;
+                        let mass = inertial
+                            .mass
+                            .ok_or_else(|| "URDF inertial is missing mass".to_string())?;
+                        let inertia = inertial.inertia.ok_or_else(|| {
+                            "URDF inertial is missing its inertia tensor".to_string()
+                        })?;
+                        let link = current_link
+                            .as_mut()
+                            .ok_or_else(|| "URDF inertial is outside a link".to_string())?;
+                        link.inertial = Some(RobotInertial {
+                            origin: inertial.origin,
+                            mass,
+                            inertia,
+                        });
+                    }
+                    "material" if current_global_material.is_some() => {
+                        let (name, color) = current_global_material
+                            .take()
+                            .ok_or_else(|| "URDF material state is inconsistent".to_string())?;
+                        if global_materials.insert(name.clone(), color).is_some() {
+                            return Err(format!(
+                                "URDF material '{name}' is defined more than once"
+                            ));
+                        }
+                    }
                     "link" => {
                         if links.len() >= MAX_LINKS {
                             return Err(format!("URDF contains more than {MAX_LINKS} links"));
@@ -700,6 +1057,21 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
     if !root_seen || !root_closed || !stack.is_empty() {
         return Err("URDF document is incomplete".to_string());
     }
+    for link in &mut links {
+        for visual in &mut link.visuals {
+            if visual.color.is_none() {
+                if let Some(name) = visual.material_name.as_ref() {
+                    match global_materials.get(name) {
+                        Some(Some(color)) => visual.color = Some(*color),
+                        Some(None) => {}
+                        None => {
+                            warnings.push(format!("Visual references undefined material '{name}'"))
+                        }
+                    }
+                }
+            }
+        }
+    }
     let root_link = validate_robot_tree(&links, &joints)?;
     let name = robot_name.ok_or_else(|| "URDF robot name is missing".to_string())?;
     Ok(RobotDescription {
@@ -713,7 +1085,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_robot_description, RobotGeometry};
+    use super::{parse_robot_description, validate_mesh_bytes, RobotGeometry};
 
     #[test]
     fn parses_primitive_visuals_and_normalizes_joint_axes() {
@@ -780,18 +1152,65 @@ mod tests {
     }
 
     #[test]
-    fn reports_mesh_geometry_as_unsupported_instead_of_silently_rendering_it() {
+    fn parses_stl_mesh_references_and_scale_for_safe_resource_resolution() {
         let robot = parse_robot_description(
-            r#"<robot name="test"><link name="base"><visual><geometry><mesh filename="package://robot/meshes/base.stl"/></geometry></visual></link></robot>"#,
+            r#"<robot name="test"><link name="base"><visual><geometry><mesh filename="package://robot/meshes/base.stl" scale="2 1 0.5"/></geometry></visual></link></robot>"#,
         )
         .unwrap();
 
-        assert!(matches!(
-            robot.links[0].visuals[0].geometry,
-            RobotGeometry::Unsupported { .. }
-        ));
-        assert_eq!(robot.warnings.len(), 1);
-        assert!(robot.warnings[0].contains("base.stl"));
+        let RobotGeometry::Mesh {
+            filename,
+            scale,
+            format,
+            data,
+        } = &robot.links[0].visuals[0].geometry
+        else {
+            panic!("expected STL mesh geometry");
+        };
+        assert_eq!(filename, "package://robot/meshes/base.stl");
+        assert_eq!(*scale, [2.0, 1.0, 0.5]);
+        assert_eq!(format, "stl");
+        assert!(data.is_none());
+    }
+
+    #[test]
+    fn resolves_named_materials_and_preserves_inertial_frames_and_tensors() {
+        let robot = parse_robot_description(
+            r#"<robot name="test">
+                <material name="blue"><color rgba="0.1 0.2 0.8 1"/></material>
+                <link name="base">
+                    <inertial><origin xyz="0 0 0.2" rpy="0.1 0.2 0.3"/>
+                        <mass value="2"/><inertia ixx="1" ixy="0" ixz="0" iyy="2" iyz="0" izz="3"/>
+                    </inertial>
+                    <visual><geometry><box size="1 1 1"/></geometry><material name="blue"/></visual>
+                </link>
+            </robot>"#,
+        )
+        .unwrap();
+        assert_eq!(robot.links[0].visuals[0].color, Some([0.1, 0.2, 0.8, 1.0]));
+        let inertial = robot.links[0].inertial.as_ref().unwrap();
+        assert_eq!(inertial.mass, 2.0);
+        assert_eq!(inertial.origin.xyz, [0.0, 0.0, 0.2]);
+        assert_eq!(inertial.inertia, [1.0, 0.0, 0.0, 2.0, 0.0, 3.0]);
+    }
+
+    #[test]
+    fn rejects_invalid_inertia_and_external_dae_textures_and_bounds_meshes() {
+        let invalid_inertia = r#"<robot name="test"><link name="base"><inertial><mass value="1"/><inertia ixx="1" ixy="2" ixz="0" iyy="1" iyz="0" izz="1"/></inertial></link></robot>"#;
+        assert!(parse_robot_description(invalid_inertia)
+            .unwrap_err()
+            .contains("positive semidefinite"));
+        let dae = br#"<COLLADA><library_images><image id="texture"><init_from>https://example.test/texture.png</init_from></image></library_images><library_geometries><triangles count="1"/></library_geometries></COLLADA>"#;
+        assert!(validate_mesh_bytes("dae", dae)
+            .unwrap_err()
+            .contains("external image"));
+        let external_url =
+            br#"<COLLADA><instance_geometry url="https://example.test/geometry.dae"/><triangles count="1"/></COLLADA>"#;
+        assert!(validate_mesh_bytes("dae", external_url)
+            .unwrap_err()
+            .contains("external resources"));
+        assert!(validate_mesh_bytes("stl", b"invalid").is_err());
+        assert!(validate_mesh_bytes("stl", &vec![0; 8 * 1024 * 1024 + 1]).is_err());
     }
 
     #[test]

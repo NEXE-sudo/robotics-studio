@@ -18,15 +18,20 @@ upfront about that than pretend otherwise.
 - **Live ROS status** — node/topic snapshots and TF updates are streamed over
   authenticated gRPC while the system runs. The ROS sidebar also discovers
   source packages in the selected workspace, shows package metadata and
-  resources, and lets you inspect package files. The live graph shows topic
-  publisher/subscriber QoS, service endpoints, and discovered action servers
-  and clients. Service invocation and action goal monitoring are not yet
-  available.
-- **3D visualization** — preview primitive URDF visuals and articulated
-  joints in the three.js viewport when a `.urdf` file is active; streamed
-  `/joint_states` update supported joints. Without an active URDF, the view
-  keeps its placeholder robot. In-app controls publish bounded `cmd_vel`
-  commands directly (no manual container terminal needed for basic teleop).
+  resources, and lets you inspect package files. Underlay packages are
+  identified separately from workspace packages, with dependency sources
+  reported as workspace, underlay, or missing. The live graph shows topic
+  publisher/subscriber QoS and bounded message inspection. It also exposes
+  read-only lifecycle/parameter service calls and the allowlisted non-motion
+  Fibonacci action workflow; arbitrary service types and motion-producing
+  actions are not enabled.
+- **3D visualization** — preview supported URDF and Xacro descriptions,
+  primitive and workspace-confined STL/texture-free DAE visuals, supported
+  joints, inertial frames, and collision geometry in the three.js viewport.
+  Streamed `/joint_states` update supported joints. Without an active robot
+  description, the view keeps its placeholder robot. In-app controls publish
+  bounded `cmd_vel` commands directly (no manual container terminal needed
+  for basic teleop).
 - **Custom Gazebo world support** — load your own world file instead of
   being limited to the bundled demo.
 - **AI assistant with real context** — ask questions about your open file,
@@ -168,28 +173,36 @@ any of this — the app manages the environment for you.
 
 ## Known limitations (please break things and tell me what you find)
 
-- The URDF preview supports box, cylinder, and sphere visuals plus
-  fixed/revolute/continuous/prismatic joints. It does not expand Xacro or
-  resolve mesh/package resources; mesh visuals are reported and skipped.
-  Joint limits and mimic relationships are applied, and supported primitive
-  collision geometry can be toggled. Inertial properties and robot-level
-  named materials are not used in the preview. Floating/planar joints and full
-  URDF semantics are not supported. The ROS to three.js coordinate mapping is
-  a first pass and still needs convention validation.
+- The URDF preview supports box, cylinder, sphere, STL, and texture-free DAE
+  visuals plus fixed/revolute/continuous/prismatic joints. Xacro uses a
+  non-executing subset (arguments, properties, arithmetic, macros, workspace-
+  local includes, and boolean conditionals); unsupported constructs fail
+  closed. `package://` and relative mesh paths are confined to the selected
+  workspace and its discovered packages. DAE image/texture and external
+  resource references are rejected. Joint limits, mimic relationships,
+  named material colors, inertial origins, and supported primitive collision
+  geometry are represented in the preview. Inertial frames can be shown with
+  a scalar radius-of-gyration marker. Floating/planar joints and full URDF
+  semantics are not supported. ROS fixed-axis RPY rotations and the Z-up to
+  Three.js coordinate mapping are applied.
 - The TF tab builds a live transform forest and warns about multiple roots,
   cycles, multiple parents, stale dynamic transforms, non-finite values, and
   invalid quaternions. It displays the ROS source stamp separately from the
   local receive age, so replayed old data does not appear freshly received.
+  Stale dynamic edges are labeled after five seconds and reported as having
+  no recent updates after 30 seconds; an old dynamic parent is replaced after
+  a child changes parent and the old edge has gone stale. The inspector
+  composes root-to-frame poses when the path is unambiguous and valid.
   Disconnection is explicit; static `/tf_static` edges use transient-local
   QoS and are not marked stale. This is diagnostic validation, not a
   substitute for `tf2` authority or full ROS graph validation.
-- ROS graph snapshots are bounded and read-only, with optional live topic
-  inspection limited to four topics, five samples per second per topic, and
-  bounded serialized payloads. Service invocation and action goal
-  submission/monitoring are not implemented because arbitrary operations
-  could bypass the motion safety path. Package discovery reads source
-  package manifests and workspace install outputs, but does not show every
-  underlay package.
+- ROS graph snapshots are bounded. Live topic inspection is limited to four
+  topics, five samples per second per topic, and bounded serialized payloads.
+  Service invocation is restricted to read-only lifecycle/parameter types;
+  action goals are restricted to the non-motion Fibonacci type. Arbitrary
+  service types and motion-producing actions are not enabled. Package
+  discovery reports bounded workspace and Jazzy-underlay packages, not every
+  package installed in the container.
 - SDF imports are structurally checked, and the world is validated against
   the installed SDFormat schema before Gazebo starts. This does not resolve or
   validate every external model/mesh resource.
@@ -315,16 +328,18 @@ and dependency audit, and isolated Python service-core tests from the repository
 root. Install `cargo-audit` 0.23.0 if it is not already available.
 
 ```sh
+npm ci
 cargo install cargo-audit --version 0.23.0 --locked
 npm run build
-npm audit --audit-level=moderate
+npm run test:frontend
+npm audit
 cargo audit --file src-tauri/Cargo.lock
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo check --manifest-path src-tauri/Cargo.toml --locked
 cargo test --manifest-path src-tauri/Cargo.toml --locked
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings
 python3 -m unittest discover -s src-tauri/resources/devcontainer -p 'test_*.py' -v
-npm run test:frontend
+python3 -m py_compile src-tauri/resources/devcontainer/server.py src-tauri/resources/devcontainer/server_core.py
 ```
 
 For the live container integration (Docker Desktop or Docker Engine must be
@@ -335,12 +350,13 @@ running), execute:
 ```
 
 The script builds the supported ROS 2 Jazzy/Gazebo Harmonic image, mounts a
-temporary workspace, verifies selected-workspace package discovery, the
-pinned-TLS Rust client, gRPC authentication, emergency-stop gating, event
-replay after service restart, live `/tf_static` delivery, Gazebo world/model
-readiness, reset, and ROS-Gazebo topic bridging. It performs no robot movement
-and removes its temporary container and workspace on exit. CI runs the same
-script on its Linux runner.
+temporary workspace, verifies workspace/underlay package discovery, safe
+lifecycle service calls, rejected unsafe requests, Fibonacci action feedback,
+results and confirmed cancellation, bounded topic inspection, static/dynamic
+TF and joint states, pinned-TLS authentication, emergency-stop gating, event
+replay after service restart, Gazebo readiness/reset and ROS-Gazebo topic
+bridging. It performs no robot movement and removes its temporary container
+and workspace on exit. CI runs the same script on its Linux runner.
 
 Unit/build checks are not a substitute for live Docker/ROS 2/Gazebo checks.
 They require Docker Desktop running for an integration environment; if it is
