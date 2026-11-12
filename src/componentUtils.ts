@@ -25,11 +25,46 @@ export function defaultServiceRequest(serviceType: string) {
   return "{}";
 }
 
+export function shouldResetEventRecoveryAcknowledgement(
+  previous: {
+    gapDetected: boolean;
+    oldestAvailableSequence: number;
+    latestSequence: number;
+    snapshotIncluded: boolean;
+    retainedCriticalEvents: number;
+  } | null,
+  current: {
+    gapDetected: boolean;
+    oldestAvailableSequence: number;
+    latestSequence: number;
+    snapshotIncluded: boolean;
+    retainedCriticalEvents: number;
+  } | null,
+) {
+  if (!current?.gapDetected) {
+    return Boolean(previous?.gapDetected);
+  }
+  if (!previous) {
+    return true;
+  }
+  if (!previous.gapDetected) {
+    return true;
+  }
+
+  return (
+    previous.oldestAvailableSequence !== current.oldestAvailableSequence ||
+    previous.latestSequence !== current.latestSequence ||
+    previous.snapshotIncluded !== current.snapshotIncluded ||
+    previous.retainedCriticalEvents !== current.retainedCriticalEvents
+  );
+}
+
 export function describeEventRecovery(recovery: {
   gapDetected: boolean;
   oldestAvailableSequence: number;
   latestSequence: number;
   snapshotIncluded: boolean;
+  retainedCriticalEvents?: number;
 } | null) {
   if (!recovery || !recovery.gapDetected) {
     return null;
@@ -38,17 +73,26 @@ export function describeEventRecovery(recovery: {
   const snapshotText = recovery.snapshotIncluded
     ? "Current state snapshots were restored."
     : "A state snapshot is not available yet.";
+  const retainedText =
+    typeof recovery.retainedCriticalEvents === "number"
+      ? ` Retained critical events: ${recovery.retainedCriticalEvents}.`
+      : "";
 
-  return `${snapshotText} Oldest retained sequence: ${recovery.oldestAvailableSequence}; latest sequence: ${recovery.latestSequence}.`;
+  return `${snapshotText} Oldest retained sequence: ${recovery.oldestAvailableSequence}; latest sequence: ${recovery.latestSequence}.${retainedText}`;
 }
 
 export function eventRecoveryActionLabel(recovery: {
   gapDetected: boolean;
   oldestAvailableSequence: number;
   latestSequence: number;
+  retainedCriticalEvents?: number;
 } | null) {
   if (!recovery || !recovery.gapDetected) {
     return "No recovery action required";
   }
-  return `Acknowledge recovery gap · appears from ${recovery.oldestAvailableSequence} to ${recovery.latestSequence}`;
+  const retainedText =
+    typeof recovery.retainedCriticalEvents === "number"
+      ? ` · retained critical events ${recovery.retainedCriticalEvents}`
+      : "";
+  return `Acknowledge recovery gap · appears from ${recovery.oldestAvailableSequence} to ${recovery.latestSequence}${retainedText}`;
 }

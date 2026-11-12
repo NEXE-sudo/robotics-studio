@@ -90,6 +90,24 @@ test("uses receive time for staleness and preserves the ROS source timestamp", (
   assert.equal(graph.edges[0].source_timestamp_ms, 9000);
 });
 
+test("flags future source timestamps and invalid receive stamps during reconnect", () => {
+  const graph = buildTfGraph(
+    [
+      transform("map", "future", {
+        receivedAtMs: 1000,
+        source_timestamp_ms: 20000,
+      }),
+      transform("map", "invalid", {
+        receivedAtMs: Number.NaN,
+        source_timestamp_ms: 9000,
+      }),
+    ],
+    10000,
+  );
+  assert.ok(graph.edges[0].issues.includes("Source timestamp is in the future"));
+  assert.ok(graph.edges[1].issues.includes("Contains an invalid receive timestamp"));
+});
+
 test("marks dynamic frames with no recent updates as disappeared", () => {
   const graph = buildTfGraph(
     [transform("map", "lost_frame", { receivedAtMs: 0 })],

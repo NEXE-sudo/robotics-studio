@@ -28,6 +28,7 @@ import {
 import {
   describeEventRecovery,
   eventRecoveryActionLabel,
+  shouldResetEventRecoveryAcknowledgement,
 } from "./componentUtils";
 import {
   X,
@@ -309,17 +310,31 @@ function App() {
   } | null>(null);
   const [eventRecoveryAcknowledged, setEventRecoveryAcknowledged] =
     useState(false);
+  const previousEventRecoveryRef = useRef<
+    | {
+        gapDetected: boolean;
+        oldestAvailableSequence: number;
+        latestSequence: number;
+        snapshotIncluded: boolean;
+        retainedCriticalEvents: number;
+      }
+    | null
+  >(null);
   const [robotCommandError, setRobotCommandError] = useState<string | null>(
     null,
   );
 
   useEffect(() => {
-    if (eventRecovery?.gapDetected) {
-      setEventRecoveryAcknowledged(false);
-    } else {
+    if (
+      shouldResetEventRecoveryAcknowledgement(
+        previousEventRecoveryRef.current,
+        eventRecovery,
+      )
+    ) {
       setEventRecoveryAcknowledged(false);
     }
-  }, [eventRecovery?.gapDetected, eventRecovery?.oldestAvailableSequence, eventRecovery?.latestSequence]);
+    previousEventRecoveryRef.current = eventRecovery ?? null;
+  }, [eventRecovery]);
 
   const startTopicInspection = async (topicName: string) => {
     setPendingInspectionTopic(topicName);

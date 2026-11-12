@@ -6,6 +6,7 @@ import {
   describeEventRecovery,
   eventRecoveryActionLabel,
   nodePath,
+  shouldResetEventRecoveryAcknowledgement,
 } from "../src/componentUtils.ts";
 
 test("robot descriptions only load when content, path, and workspace are all present", () => {
@@ -33,15 +34,49 @@ test("event recovery summaries explain missing telemetry windows in the UI", () 
     oldestAvailableSequence: 42,
     latestSequence: 97,
     snapshotIncluded: true,
+    retainedCriticalEvents: 6,
   };
 
   assert.equal(
     eventRecoveryActionLabel(recovery),
-    "Acknowledge recovery gap · appears from 42 to 97",
+    "Acknowledge recovery gap · appears from 42 to 97 · retained critical events 6",
   );
   assert.match(
     describeEventRecovery(recovery),
-    /Current state snapshots were restored\./,
+    /Retained critical events: 6\./,
   );
   assert.equal(describeEventRecovery({ ...recovery, gapDetected: false }), null);
+});
+
+test("event recovery acknowledgements reset only for a new or resolved gap", () => {
+  const recovery = {
+    gapDetected: true,
+    oldestAvailableSequence: 42,
+    latestSequence: 97,
+    snapshotIncluded: true,
+    retainedCriticalEvents: 6,
+  };
+
+  assert.equal(shouldResetEventRecoveryAcknowledgement(null, recovery), true);
+  assert.equal(
+    shouldResetEventRecoveryAcknowledgement(recovery, {
+      ...recovery,
+      latestSequence: 98,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldResetEventRecoveryAcknowledgement(recovery, {
+      ...recovery,
+      retainedCriticalEvents: 6,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldResetEventRecoveryAcknowledgement(recovery, {
+      ...recovery,
+      gapDetected: false,
+    }),
+    true,
+  );
 });

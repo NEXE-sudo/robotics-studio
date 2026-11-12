@@ -163,6 +163,7 @@ class RosIntrospector(Node):
         self.event_hub = event_hub
         self.known_nodes = set()
         self.odom_subscribers = {}
+        self._graph_refresh_lock = threading.RLock()
         self.timer = self.create_timer(2.0, self.tick)
         self.twist_publishers = {}
         self._command_lock = threading.RLock()
@@ -1020,36 +1021,9 @@ class RosIntrospector(Node):
         except Exception as e:
             self.get_logger().error(f"tick() failed, skipping this cycle: {e}")
 
-    def _tick_impl(self):
-        nodes = set(self.get_node_names())
-        appeared = nodes - self.known_nodes
-        disappeared = self.known_nodes - nodes
-
-        for name in appeared:
-            evt = ros_engine_pb2.WorkspaceEvent(
-                node_started=ros_engine_pb2.NodeStarted(node_name=name),
-                timestamp_ns=time.time_ns()
-            )
-            self.event_hub.publish(evt, key=("node", name))
-
-        for name in disappeared:
-            evt = ros_engine_pb2.WorkspaceEvent(
-                node_crashed=ros_engine_pb2.NodeCrashed(node_name=name),
-                timestamp_ns=time.time_ns()
-            )
-            self.event_hub.publish(evt, key=("node", name))
-
-        self.known_nodes = nodes
-
-        topics = self.get_topic_names_and_types()
-        if self._startup_stop_pending:
-            if self.safety.snapshot()[0] != "READY":
-                self.safety.enforce_latched_stop()
-            self._startup_stop_pending = False
-
-        # Clean up subscription tracking for topics that no longer exist,
-        # so they can be freshly re-subscribed if they reappear later
+    def _sync_automatic_topic_subscriptions(self, topics):
         current_topic_names = {name for name, _ in topics}
+
         stale_inspections = (
             set(self.topic_inspection_subscriptions) - current_topic_names
         )
@@ -1062,31 +1036,29 @@ class RosIntrospector(Node):
                 active=False,
                 error="Topic is no longer available",
             )
-        stale = set(self.odom_subscribers.keys()) - current_topic_names
-        for name in stale:
-            del self.odom_subscribers[name]
 
-        stale_tf = set(self.tf_subscribers.keys()) - current_topic_names
+        stale_odom = set(self.odom_subscribers) - current_topic_names
+        for name in stale_odom:
+            self.destroy_subscription(self.odom_subscribers.pop(name))
+
+        stale_tf = set(self.tf_subscribers) - current_topic_names
         for name in stale_tf:
-            del self.tf_subscribers[name]
+            self.destroy_subscription(self.tf_subscribers.pop(name))
 
-        stale_joint_state = (
-            set(self.joint_state_subscribers.keys()) - current_topic_names
-        )
+        stale_joint_state = set(self.joint_state_subscribers) - current_topic_names
         for name in stale_joint_state:
-            del self.joint_state_subscribers[name]
+            self.destroy_subscription(self.joint_state_subscribers.pop(name))
 
         for name, types in topics:
             if 'nav_msgs/msg/Odometry' in types and name not in self.odom_subscribers:
                 sub = self.create_subscription(
                     Odometry, name,
                     lambda msg, n=name: self.odom_callback(msg, n),
-                    10
+                    10,
                 )
                 self.odom_subscribers[name] = sub
                 self.get_logger().info(f'Subscribed to odometry topic: {name}')
 
-        for name, types in topics:
             if 'tf2_msgs/msg/TFMessage' in types and name not in self.tf_subscribers:
                 qos = (
                     QoSProfile(
@@ -1100,12 +1072,11 @@ class RosIntrospector(Node):
                 sub = self.create_subscription(
                     TFMessage, name,
                     lambda msg, n=name: self.tf_callback(msg, n),
-                    qos
+                    qos,
                 )
                 self.tf_subscribers[name] = sub
                 self.get_logger().info(f'Subscribed to TF topic: {name}')
 
-        for name, types in topics:
             if (
                 "sensor_msgs/msg/JointState" in types
                 and name not in self.joint_state_subscribers
@@ -1119,12 +1090,167 @@ class RosIntrospector(Node):
                 self.joint_state_subscribers[name] = subscription
                 self.get_logger().info(f"Subscribed to joint state topic: {name}")
 
+    def _build_graph_snapshot(self, topics):
+        with self._graph_refresh_lock:
+            node_entries = sorted(self.get_node_names_and_namespaces())
+            truncated = len(node_entries) > MAX_GRAPH_NODES
+            node_entries = node_entries[:MAX_GRAPH_NODES]
+            service_roles = {}
+            for node_name, node_namespace in node_entries:
+                node_id = f"{node_namespace.rstrip('/')}/{node_name}"
+                for service_name, _ in self.get_service_names_and_types_by_node(
+                    node_name, node_namespace
+                ):
+                    service_roles.setdefault(service_name, {"servers": [], "clients": []})[
+                        "servers"
+                    ].append(node_id)
+                for service_name, _ in self.get_client_names_and_types_by_node(
+                    node_name, node_namespace
+                ):
+                    service_roles.setdefault(service_name, {"servers": [], "clients": []})[
+                        "clients"
+                    ].append(node_id)
+
+            graph = ros_engine_pb2.RosGraphSnapshot()
+            graph.nodes.extend(
+                ros_engine_pb2.GraphNode(name=name, namespace=namespace)
+                for name, namespace in node_entries
+            )
+
+            endpoint_count = 0
+            topic_entries = sorted(topics)
+            if len(topic_entries) > MAX_GRAPH_TOPICS:
+                truncated = True
+            for topic_name, types in topic_entries[:MAX_GRAPH_TOPICS]:
+                topic = ros_engine_pb2.GraphTopic(name=topic_name, types=sorted(types))
+                for field, query in (
+                    ("publishers", self.get_publishers_info_by_topic),
+                    ("subscribers", self.get_subscriptions_info_by_topic),
+                ):
+                    remaining = MAX_GRAPH_ENDPOINTS - endpoint_count
+                    if remaining <= 0:
+                        truncated = True
+                        break
+                    endpoints = sorted(
+                        query(topic_name),
+                        key=lambda endpoint: (
+                            endpoint.node_namespace,
+                            endpoint.node_name,
+                            endpoint.topic_type,
+                        ),
+                    )
+                    if len(endpoints) > remaining:
+                        truncated = True
+                    selected = endpoints[:remaining]
+                    endpoint_count += len(selected)
+                    getattr(topic, field).extend(
+                        ros_engine_pb2.GraphEndpoint(
+                            node_name=endpoint.node_name,
+                            node_namespace=endpoint.node_namespace,
+                            topic_type=endpoint.topic_type,
+                            reliability=_qos_policy_name(
+                                endpoint.qos_profile.reliability
+                            ),
+                            durability=_qos_policy_name(
+                                endpoint.qos_profile.durability
+                            ),
+                            history=_qos_policy_name(endpoint.qos_profile.history),
+                            depth=endpoint.qos_profile.depth,
+                        )
+                        for endpoint in selected
+                    )
+                graph.topics.append(topic)
+
+            service_entries = sorted(self.get_service_names_and_types())
+            if len(service_entries) > MAX_GRAPH_SERVICES:
+                truncated = True
+            action_services = {}
+            for service_name, types in service_entries:
+                role = service_roles.get(service_name, {"servers": [], "clients": []})
+                action_info = None
+                for service_type in types:
+                    action_info = action_from_send_goal_service(
+                        service_name, service_type
+                    )
+                    if action_info:
+                        break
+                if action_info:
+                    action_name, action_type = action_info
+                    action = action_services.setdefault(
+                        action_name,
+                        {"types": set(), "servers": set(), "clients": set()},
+                    )
+                    action["types"].add(action_type)
+                    action["servers"].update(role["servers"])
+                    action["clients"].update(role["clients"])
+                    continue
+                if "/_action/" in service_name:
+                    continue
+                graph.services.append(
+                    ros_engine_pb2.GraphService(
+                        name=service_name,
+                        types=sorted(types),
+                        server_nodes=sorted(set(role["servers"])),
+                        client_nodes=sorted(set(role["clients"])),
+                        safe_types=sorted(
+                            set(types) & SAFE_READ_ONLY_SERVICE_TYPES
+                        ),
+                    )
+                )
+
+            if len(action_services) > MAX_GRAPH_ACTIONS:
+                truncated = True
+            for action_name, action in sorted(action_services.items())[:MAX_GRAPH_ACTIONS]:
+                graph.actions.append(
+                    ros_engine_pb2.GraphAction(
+                        name=action_name,
+                        types=sorted(action["types"]),
+                        server_nodes=sorted(action["servers"]),
+                        client_nodes=sorted(action["clients"]),
+                        safe_types=sorted(
+                            set(action["types"]) & SAFE_NON_MOTION_ACTION_TYPES
+                        ),
+                    )
+                )
+
+            graph.truncated = truncated
+            return graph
+
+    def _tick_impl(self):
+        nodes = set(self.get_node_names())
+        appeared = nodes - self.known_nodes
+        disappeared = self.known_nodes - nodes
+
+        for name in appeared:
+            evt = ros_engine_pb2.WorkspaceEvent(
+                node_started=ros_engine_pb2.NodeStarted(node_name=name),
+                timestamp_ns=time.time_ns(),
+            )
+            self.event_hub.publish(evt, key=("node", name))
+
+        for name in disappeared:
+            evt = ros_engine_pb2.WorkspaceEvent(
+                node_crashed=ros_engine_pb2.NodeCrashed(node_name=name),
+                timestamp_ns=time.time_ns(),
+            )
+            self.event_hub.publish(evt, key=("node", name))
+
+        self.known_nodes = nodes
+
+        topics = self.get_topic_names_and_types()
+        if self._startup_stop_pending:
+            if self.safety.snapshot()[0] != "READY":
+                self.safety.enforce_latched_stop()
+            self._startup_stop_pending = False
+
+        self._sync_automatic_topic_subscriptions(topics)
+
         topic_msgs = [
             ros_engine_pb2.Topic(name=n, types=list(t)) for n, t in topics
         ]
         evt = ros_engine_pb2.WorkspaceEvent(
             topic_snapshot=ros_engine_pb2.TopicSnapshot(topics=topic_msgs),
-            timestamp_ns=time.time_ns()
+            timestamp_ns=time.time_ns(),
         )
         self.event_hub.publish(
             evt,
@@ -1134,7 +1260,7 @@ class RosIntrospector(Node):
 
         node_evt = ros_engine_pb2.WorkspaceEvent(
             node_snapshot=ros_engine_pb2.NodeSnapshot(node_names=list(nodes)),
-            timestamp_ns=time.time_ns()
+            timestamp_ns=time.time_ns(),
         )
         self.event_hub.publish(
             node_evt,
@@ -1155,133 +1281,7 @@ class RosIntrospector(Node):
         self.publish_graph_snapshot(topics)
 
     def publish_graph_snapshot(self, topics):
-        graph = ros_engine_pb2.RosGraphSnapshot()
-        truncated = False
-
-        node_entries = sorted(self.get_node_names_and_namespaces())
-        if len(node_entries) > MAX_GRAPH_NODES:
-            truncated = True
-        node_entries = node_entries[:MAX_GRAPH_NODES]
-        graph.nodes.extend(
-            ros_engine_pb2.GraphNode(name=name, namespace=namespace)
-            for name, namespace in node_entries
-        )
-
-        service_roles = {}
-        for node_name, node_namespace in node_entries:
-            node_id = f"{node_namespace.rstrip('/')}/{node_name}"
-            for service_name, _ in self.get_service_names_and_types_by_node(
-                node_name, node_namespace
-            ):
-                service_roles.setdefault(service_name, {"servers": [], "clients": []})[
-                    "servers"
-                ].append(node_id)
-            for service_name, _ in self.get_client_names_and_types_by_node(
-                node_name, node_namespace
-            ):
-                service_roles.setdefault(service_name, {"servers": [], "clients": []})[
-                    "clients"
-                ].append(node_id)
-
-        endpoint_count = 0
-        topic_entries = sorted(topics)
-        if len(topic_entries) > MAX_GRAPH_TOPICS:
-            truncated = True
-        for topic_name, types in topic_entries[:MAX_GRAPH_TOPICS]:
-            topic = ros_engine_pb2.GraphTopic(name=topic_name, types=sorted(types))
-            for field, query in (
-                ("publishers", self.get_publishers_info_by_topic),
-                ("subscribers", self.get_subscriptions_info_by_topic),
-            ):
-                remaining = MAX_GRAPH_ENDPOINTS - endpoint_count
-                if remaining <= 0:
-                    truncated = True
-                    break
-                endpoints = sorted(
-                    query(topic_name),
-                    key=lambda endpoint: (
-                        endpoint.node_namespace,
-                        endpoint.node_name,
-                        endpoint.topic_type,
-                    ),
-                )
-                if len(endpoints) > remaining:
-                    truncated = True
-                selected = endpoints[:remaining]
-                endpoint_count += len(selected)
-                getattr(topic, field).extend(
-                    ros_engine_pb2.GraphEndpoint(
-                        node_name=endpoint.node_name,
-                        node_namespace=endpoint.node_namespace,
-                        topic_type=endpoint.topic_type,
-                        reliability=_qos_policy_name(
-                            endpoint.qos_profile.reliability
-                        ),
-                        durability=_qos_policy_name(
-                            endpoint.qos_profile.durability
-                        ),
-                        history=_qos_policy_name(endpoint.qos_profile.history),
-                        depth=endpoint.qos_profile.depth,
-                    )
-                    for endpoint in selected
-                )
-            graph.topics.append(topic)
-
-        service_entries = sorted(self.get_service_names_and_types())
-        if len(service_entries) > MAX_GRAPH_SERVICES:
-            truncated = True
-        action_services = {}
-        for service_name, types in service_entries:
-            role = service_roles.get(service_name, {"servers": [], "clients": []})
-            action_info = None
-            for service_type in types:
-                action_info = action_from_send_goal_service(
-                    service_name, service_type
-                )
-                if action_info:
-                    break
-            if action_info:
-                action_name, action_type = action_info
-                action = action_services.setdefault(
-                    action_name,
-                    {"types": set(), "servers": set(), "clients": set()},
-                )
-                action["types"].add(action_type)
-                action["servers"].update(role["servers"])
-                action["clients"].update(role["clients"])
-                continue
-            if "/_action/" in service_name:
-                continue
-            graph.services.append(
-                ros_engine_pb2.GraphService(
-                    name=service_name,
-                    types=sorted(types),
-                    server_nodes=sorted(set(role["servers"])),
-                    client_nodes=sorted(set(role["clients"])),
-                    safe_types=sorted(
-                        set(types) & SAFE_READ_ONLY_SERVICE_TYPES
-                    ),
-                )
-            )
-
-        if len(action_services) > MAX_GRAPH_ACTIONS:
-            truncated = True
-        for action_name, action in sorted(action_services.items())[
-            :MAX_GRAPH_ACTIONS
-        ]:
-            graph.actions.append(
-                ros_engine_pb2.GraphAction(
-                    name=action_name,
-                    types=sorted(action["types"]),
-                    server_nodes=sorted(action["servers"]),
-                    client_nodes=sorted(action["clients"]),
-                    safe_types=sorted(
-                        set(action["types"]) & SAFE_NON_MOTION_ACTION_TYPES
-                    ),
-                )
-            )
-
-        graph.truncated = truncated
+        graph = self._build_graph_snapshot(topics)
         self.event_hub.publish(
             ros_engine_pb2.WorkspaceEvent(
                 ros_graph_snapshot=graph,

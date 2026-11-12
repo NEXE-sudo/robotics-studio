@@ -51,6 +51,7 @@ export type TfComposition =
 const QUATERNION_TOLERANCE = 0.01;
 const TRANSLATION_WARNING_THRESHOLD = 1000;
 const SOURCE_DISAPPEARED_AFTER_MS = 30_000;
+const SOURCE_FUTURE_TOLERANCE_MS = 5_000;
 
 export function tfEdgeKey(parentFrame: string, childFrame: string) {
   return JSON.stringify([parentFrame, childFrame]);
@@ -63,12 +64,17 @@ export function mergeTfTransform(
 ): Record<string, TfTransform> {
   const updated = { ...existing };
   for (const [key, transform] of Object.entries(updated)) {
-    if (
+    const sameChildDifferentParent =
       transform.child_frame === incoming.child_frame &&
-      transform.parent_frame !== incoming.parent_frame &&
-      !transform.topic_name.endsWith("/tf_static") &&
-      incoming.receivedAtMs - transform.receivedAtMs > staleAfterMs
-    ) {
+      transform.parent_frame !== incoming.parent_frame;
+    const dynamicTransform = !transform.topic_name.endsWith("/tf_static");
+    const incomingIsNewer = incoming.receivedAtMs >= transform.receivedAtMs;
+    const staleParentSwap =
+      sameChildDifferentParent &&
+      dynamicTransform &&
+      (incoming.receivedAtMs - transform.receivedAtMs > staleAfterMs ||
+        (incomingIsNewer && transform.receivedAtMs < incoming.receivedAtMs - staleAfterMs));
+    if (staleParentSwap) {
       delete updated[key];
     }
   }
@@ -224,11 +230,15 @@ export function buildTfGraph(
     if (values.some((value) => !Number.isFinite(value))) {
       issues.push("Contains NaN or Infinity");
     }
-    if (
-      !Number.isFinite(transform.receivedAtMs) ||
-      !Number.isFinite(transform.source_timestamp_ms)
-    ) {
+    if (!Number.isFinite(transform.receivedAtMs)) {
       issues.push("Contains an invalid timestamp");
+      issues.push("Contains an invalid receive timestamp");
+    }
+    if (!Number.isFinite(transform.source_timestamp_ms)) {
+      issues.push("Contains an invalid timestamp");
+      issues.push("Contains an invalid source timestamp");
+    } else if (transform.source_timestamp_ms > nowMs + SOURCE_FUTURE_TOLERANCE_MS) {
+      issues.push("Source timestamp is in the future");
     }
 
     const quaternionNorm = Math.hypot(
