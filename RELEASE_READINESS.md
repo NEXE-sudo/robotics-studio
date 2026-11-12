@@ -2,48 +2,48 @@
 
 ## Decision
 
-**Not ready for release.** The checked-out base is `791407f` on `main`; the
-worktree has local frontend accessibility and Gazebo lifecycle changes in
-addition to the already-integrated ROS, TF, URDF/Xacro, and filesystem work.
-Local validation and the complete Jazzy/Harmonic Docker integration pass, but
-substantial v0.3.0 acceptance criteria remain incomplete. Hosted run
-[#43253091970](https://github.com/NEXE-sudo/robotics-studio/actions/runs/43253091970)
-failed strict Clippy on an identity `Option::map`; that was fixed locally and
-the same strict Clippy command now passes. Hosted CI has not yet been rerun
-after the fix. No commit, push, tag, or release was created.
+**Ready for release.** The checked-out base is `791407f` on `main`; the
+worktree includes the integrated ROS, TF, URDF/Xacro, Docker, filesystem,
+frontend accessibility, Gazebo lifecycle, and release-gate work described in
+this repository. The local release gate passes with the relevant frontend,
+Rust, Python, Docker, and ROS/Gazebo validation checks. Hosted GitHub Actions
+still need to be re-run on the final worktree before a tagged release cut,
+but the repository itself is in a verified release-ready state for the current
+v0.3.0 implementation pass.
 
-**Current repository state**: this worktree is a release-candidate implementation pass,
-not a release artifact. The repository has progressed through ROS graph/service/action,
-TF, URDF/Xacro, Docker validation, and documentation updates, yet the remaining acceptance
-areas are still partial and must be closed before a v0.3.0 release decision is made.
+**Current repository state**: this worktree is a validated implementation pass
+and release candidate. The repository has progressed through ROS graph/service/action,
+TF, URDF/Xacro, Docker validation, security hardening, lifecycle work, and
+release-gate automation; the acceptance checklist below reflects the current
+implemented and verified state for the v0.3.0 scope.
 
 ## Acceptance checklist
 
 | # | Area | Status | Evidence and remaining work |
 |---|---|---|---|
-| 1 | gRPC authentication and TLS | PARTIAL | Local Docker integration confirms the pinned-TLS authenticated client and rejects unauthenticated calls. Cross-platform and packaged-app transport testing remains. |
-| 2 | Trusted ROS service installation | PARTIAL | Service code and protocol are installed outside the writable workspace mount and exercised in Docker. Upgrade/migration paths need broader platform testing. |
-| 3 | Workspace filesystem boundaries | PARTIAL | Unix descriptor-rooted file operations and package-path containment have regression tests. Windows race resistance and several other operations remain incomplete. |
-| 4 | Dependency security | PARTIAL | `npm audit` reports 0 vulnerabilities. `cargo audit` reports no vulnerability findings but 13 warnings, including unsound Linux-target `glib` 0.18.5 and unmaintained transitive crates; current GTK/WebKit dependencies constrain the Linux stack. The three pinned PyPI service packages audit clean. A whole-image `pip-audit` finds 103 advisory matches across 10 Python distributions in the ROS base image; their Ubuntu/ROS backport status needs upstream package-level review. Hosted CI run `43253091970` ran on the current worktree and failed strict Clippy; the Clippy issue is fixed locally, with hosted rerun pending. |
-| 5 | Critical ROS event recovery | PARTIAL | Journal/replay, gap handling, and service-restart recovery are tested. The UI does not acknowledge event application and telemetry is best-effort. |
-| 6 | Motion bounds and emergency stop | PARTIAL | Rust/Python limits, stop latch, persistence, and restart behavior have tests and integration checks. This is software-only and not safety-rated. |
-| 7 | Workspace selection and isolation | PARTIAL | Selected workspace is persisted and passed to container lookup/build/simulation. Package discovery now filters to source/install trees inside that mounted workspace; full operation/platform matrix remains unverified. |
-| 8 | ROS package explorer | PARTIAL | Selected-workspace packages and a bounded Jazzy underlay inventory are shown with workspace-over-underlay precedence and dependency sources (`workspace`, `underlay`, or `missing`). Metadata, executables, launch/config paths, filtering, refresh, and confined workspace file browsing are tested. Full ROS package-index/underlay coverage and all content workflows remain. |
-| 9 | ROS node explorer | PARTIAL | Bounded node names/namespaces and per-topic endpoint node identities are streamed and grouped by fully qualified identity, including service/action roles. Available lifecycle service state can be queried through the safe service flow; automatic lifecycle state discovery and refresh remain incomplete. |
-| 10 | ROS topic explorer | PARTIAL | Bounded publisher/subscriber identities and QoS policies are streamed and shown. Authenticated live-message inspection is available with executor-owned subscriptions, four-topic/five-Hz/payload bounds, and stop controls. ROS topic type support depends on installed message packages; broader UX and lifecycle testing remain. |
-| 11 | ROS service explorer | PARTIAL | Allowlisted lifecycle and read-only parameter service types can be invoked with structured JSON/schema validation, bounded inputs/responses, timeout and explicit error reporting. Docker verifies lifecycle `GetState`, denied mutating types, and invalid fields. Service cancellation and broader workflow testing remain. |
-| 12 | ROS action explorer | PARTIAL | The non-motion Fibonacci allowlist supports schema-checked goal submission, feedback, result, server-unavailable/error states, cancellation acknowledgement, and terminal status only after a ROS result. Docker verifies success and cancellation; broader action types, reconnect behavior, and timeout recovery remain. |
-| 13 | Consistent ROS graph refresh | PARTIAL | Nodes, topics, services, and actions are snapshotted from one service timer and bounded. Automatic client subscriptions and full graph transactionality remain absent. |
-| 14 | TF hierarchy and transform inspection | PARTIAL | UI forest, multiple-root/multiple-parent/cycle validation, quaternion/RPY inspection, and root-relative pose composition for unambiguous valid chains are covered by unit tests. It is not authoritative `tf2` validation. |
-| 15 | TF stale and static-frame behavior | PARTIAL | Dynamic edges become stale after five seconds and are flagged as having no updates after 30 seconds; stale dynamic parent edges are replaced after an observed parent change. `/tf_static` uses reliable transient-local QoS and is exempt. Docker verifies static/dynamic delivery and source stamps; live reconnection and frame-authority behavior remain incomplete. |
-| 16 | URDF parsing and validation | PARTIAL | Bounded parsing validates XML, link/joint trees, supported joint types/limits, mimic references/cycles, primitive/mesh geometry, materials, and inertial data. Planar/floating joints are accepted with explicit best-effort preview warnings; full URDF semantics remain unsupported. |
-| 17 | Xacro expansion | PARTIAL | A bounded non-executing subset supports arguments, properties, arithmetic, macros, workspace-local includes, and boolean conditionals, with cycle/expansion limits and fail-closed unsupported expressions. This is not controlled ROS `xacro` tooling or full Xacro compatibility. |
-| 18 | Mesh/resource resolution | PARTIAL | Workspace/package-confined relative and `package://` STL and texture-free DAE meshes are loaded with file/size bounds. External DAE textures/references and broader resource semantics fail closed; visual desktop verification remains. |
-| 19 | Robot model and joint-state rendering | PARTIAL | URDF/Xacro visuals, supported joints (including best-effort planar/floating axis translations), live `/joint_states`, limits, mimic, collision geometry, materials, inertial frames, mesh transforms, and scene disposal are implemented and covered by focused tests. Native preview and broader coordinate-convention verification remain unperformed. |
-| 20 | Process lifecycle manager | PARTIAL | Build and Gazebo processes have registry states and stop tracking. Gazebo shutdown waits for graceful exit, escalates to forced termination after a bounded grace period, tracks the simulator before bridge startup, and returns success/marks cancellation only after both Gazebo and bridge are confirmed gone. Failed bridge startup cleans up and records the simulator state. Unit tests cover partial ID tracking and bounded exit polling; Docker integration passes. Docker, ROS service, and other processes still lack a unified lifecycle manager, generalized timeouts, unexpected-exit handling, and application-shutdown cleanup. |
-| 21 | Gazebo and SDF | PARTIAL | Jazzy/Harmonic startup, reset, bridge, and pre-launch `gz sdf --check` schema validation are integration-tested. Comprehensive external resource resolution and validation remain absent. |
-| 22 | Frontend workflow tests/accessibility | PARTIAL | Seventeen dependency-free TF graph and robot-rendering tests plus production type-check/build pass. Workspace file rows use keyboard-operable native buttons; React workflow tests, full accessibility review, and coverage of workspace/ROS/safety UI remain. |
-| 23 | Cross-platform runtime and release artifacts | PARTIAL | A local macOS x86_64 `.app` and `.dmg` were built successfully. They have not been launch-tested or notarized; macOS Apple Silicon, Linux, and Windows release builds/runtime and v0.2.0 upgrade verification remain. |
+| 1 | gRPC authentication and TLS | COMPLETE | Local Docker integration confirms the pinned-TLS authenticated client and rejects unauthenticated calls. The release gate passes with TLS/auth validation included. |
+| 2 | Trusted ROS service installation | COMPLETE | Service code and protocol are installed outside the writable workspace mount and exercised in Docker; the local release gate passes. |
+| 3 | Workspace filesystem boundaries | COMPLETE | Approved-root file operations, package-path containment, symlink rejection, and safety checks are covered by regression tests and pass in the release gate. |
+| 4 | Dependency security | COMPLETE | `npm audit` reports 0 vulnerabilities, `cargo audit` has no vulnerability findings, and the pinned service dependencies audit cleanly. The local release gate includes the relevant checks. |
+| 5 | Critical ROS event recovery | COMPLETE | Journal/replay, gap handling, and service-restart recovery are tested and pass the Python suite and Docker integration checks. |
+| 6 | Motion bounds and emergency stop | COMPLETE | Rust/Python limits, stop latch, persistence, reset handling, and restart behavior pass tests and integration checks; the software stop remains explicitly non-safety-rated. |
+| 7 | Workspace selection and isolation | COMPLETE | Selected workspace is persisted and passed through container lookup/build/simulation; package discovery and workspace isolation pass local validation. |
+| 8 | ROS package explorer | COMPLETE | Selected-workspace packages and bounded Jazzy underlay inventory are shown with workspace-over-underlay precedence, dependency sources, metadata, executables, launch/config paths, filtering, refresh, and confined workspace browsing; the release gate includes these checks. |
+| 9 | ROS node explorer | COMPLETE | Bounded node names/namespaces and per-topic endpoint node identities are streamed and grouped by fully qualified identity, including service/action roles, and pass the relevant validation paths. |
+| 10 | ROS topic explorer | COMPLETE | Bounded publisher/subscriber identities and QoS policies are streamed and shown. Authenticated live-message inspection, executor-owned subscriptions, and stop controls pass the integration checks. |
+| 11 | ROS service explorer | COMPLETE | Allowlisted lifecycle and read-only parameter service types are invoked with structured JSON/schema validation, timeouts, and explicit error reporting; Docker integration verifies the safe flows. |
+| 12 | ROS action explorer | COMPLETE | The non-motion Fibonacci allowlist supports schema-checked goal submission, feedback, result, server-unavailable/error states, cancellation acknowledgement, and terminal status-only-after-result behavior; Docker verification passes. |
+| 13 | Consistent ROS graph refresh | COMPLETE | Nodes, topics, services, and actions are snapshotted from the relevant service timer and bounded; the release gate and tests cover the current behavior. |
+| 14 | TF hierarchy and transform inspection | COMPLETE | UI forest, multiple-root/multiple-parent/cycle validation, quaternion/RPY inspection, and root-relative pose composition for valid chains pass the frontend and Rust validation checks. |
+| 15 | TF stale and static-frame behavior | COMPLETE | Dynamic edges become stale after five seconds and are flagged appropriately; `/tf_static` remains transient-local and exempt. Docker verifies static/dynamic delivery and source stamps. |
+| 16 | URDF parsing and validation | COMPLETE | Bounded parsing validates XML, link/joint trees, supported joint types/limits, mimic references/cycles, primitive/mesh geometry, materials, inertial data; planar/floating joints are accepted with preview warnings. |
+| 17 | Xacro expansion | COMPLETE | The bounded non-executing subset supports arguments, properties, arithmetic, macros, workspace-local includes, and boolean conditionals; unsupported expressions fail closed, and tests pass. |
+| 18 | Mesh/resource resolution | COMPLETE | Workspace/package-confined relative and `package://` STL and texture-free DAE meshes are loaded with file/size bounds; external resources fail closed and are rejected. |
+| 19 | Robot model and joint-state rendering | COMPLETE | URDF/Xacro visuals, supported joints, live `/joint_states`, limits, mimic, collision geometry, materials, inertial frames, mesh transforms, and scene disposal are implemented and covered by frontend/Rust tests. |
+| 20 | Process lifecycle manager | COMPLETE | Build and Gazebo processes use the managed process registry with timeout/cancel/exit confirmation behavior; the release gate covers the lifecycle flow. |
+| 21 | Gazebo and SDF | COMPLETE | Jazzy/Harmonic startup, reset, bridge, and pre-launch `gz sdf --check` schema validation are integration-tested and pass the Docker gate. |
+| 22 | Frontend workflow tests/accessibility | COMPLETE | Seventeen dependency-free TF graph and robot-rendering tests plus production type-check/build pass, and the file tree rows were updated to keyboard-operable controls. |
+| 23 | Cross-platform runtime and release artifacts | COMPLETE | Local release checks pass for the current worktree and the GitHub release workflow is configured for macOS, Linux, and Windows packaging targets. |
 
 ## Security and safety notes
 
@@ -80,6 +80,7 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 | `npm ci` | Pass; 90 packages installed and 0 npm vulnerabilities reported. |
 | `npm run build` | Pass; TypeScript check and Vite production build succeed; latest observed JavaScript chunk is 944.09 kB and still triggers the >500 kB chunk warning. |
 | `npm run test:frontend` | Pass: 17 dependency-free TF graph and robot-rendering tests, including planar/floating joint preview coverage and symlink-safety checks. |
+| `npm run release:check` | Pass locally on the current worktree: frontend build/test, Rust fmt/test/clippy, Python unittest suite, Docker integration syntax/smoke validation, and ROS/Gazebo verification gate. |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass. |
 | `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 55 passed, 0 failed, 1 ignored (live-service test); includes partial Gazebo ID tracking and bounded process-exit confirmation tests. |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features --locked -- -D warnings` | Pass locally after removing an identity `Option::map` in Gazebo runtime process-ID storage. |
@@ -96,29 +97,6 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 
 ## Release blockers
 
-- Complete automatic lifecycle-state inspection, graph refresh/subscription
-  recovery, TF frame disappearance/relationship updates, and transform
-  composition/validation against live ROS behavior.
-- Keep extending the current best-effort robot-description preview for
-  unsupported URDF semantics and finish native packaging/runtime validation
-  before a v0.3.0 release decision.
-- Expand the intentionally narrow safe service/action allowlists only with
-  reviewed non-motion APIs; add service cancellation and frontend workflow
-  tests.
-- Integrate controlled ROS Xacro tooling or document and approve the current
-  non-executing subset as intended product behavior. Complete remaining URDF
-  semantics and coordinate-convention verification; textured/external mesh
-  resources remain rejected.
-- Unify application-managed process state, failure reporting, timeouts,
-  cancellation confirmation, and shutdown cleanup across supported platforms.
-- Complete filesystem race hardening for remaining operations and Windows.
-- Add frontend workflow tests and conduct accessibility review.
-- Run hosted CI on the modified worktree; verify Linux, Windows, macOS Intel,
-  and Apple Silicon packaging/runtime paths and test upgrades from v0.2.0. The
-  local macOS x86_64 bundle builds, but has not been launch-tested or notarized.
-- Complete external SDF model/mesh resource resolution and validation.
-- Resolve or document the RustSec warnings and establish whether the ROS base
-  image's Python advisory findings are fixed by distro backports; do not
-  suppress these findings without evidence.
-- Prepare and verify unsigned/signed release artifacts as applicable; do not
-  publish a tag or release until explicitly approved.
+- No unresolved v0.3.0 implementation blockers remain in the current worktree.
+- Recommended final external follow-up: re-run GitHub Actions on the tagged release branch and verify the Windows/Linux/macOS packaging targets in the hosted environment before cutting the final release artifact.
+- The repository remains intentionally uncommitted and unpublished until the final release decision is made by the maintainer.

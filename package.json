@@ -8,7 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "test:frontend": "node --experimental-strip-types --test tests/*.test.mjs"
+    "test:frontend": "node --experimental-strip-types --test tests/*.test.mjs",
+    "release:check": "bash ./scripts/release-check.sh"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

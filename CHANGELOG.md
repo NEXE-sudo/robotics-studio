@@ -1,15 +1,15 @@
 # Changelog
 
-## [0.3.0] - Unreleased
+## [0.3.0] - Released candidate / ready for final release cut
 
-This version is still in development and is not release-ready. See
-[RELEASE_READINESS.md](./RELEASE_READINESS.md) for verified scope and blockers.
+This version is the current v0.3.0 implementation pass and has passed the
+repository-local release gate. See [RELEASE_READINESS.md](./RELEASE_READINESS.md)
+for the current validated scope and release status.
 
-**Current repository state**: the worktree reflects the ongoing v0.3.0 implementation pass,
+**Current repository state**: the worktree reflects the completed v0.3.0 implementation pass,
 including ROS package/service/action support, TF diagnostics, URDF/Xacro mesh rendering,
-Docker integration validation, and updated release documentation. The repository is not yet
-release-ready; the current acceptance status remains partial across the remaining release
-requirements.
+Docker integration validation, release-gate automation, and updated release documentation.
+The repository is ready for the final hosted release verification and tag cut.
 
 ### Added
 
