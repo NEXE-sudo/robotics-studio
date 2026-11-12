@@ -3306,8 +3306,7 @@ fn stream_process_output<R: Read + Send + 'static>(
 static BUILD_RUNNING: AtomicBool = AtomicBool::new(false);
 static BUILD_CONTAINER: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 static BUILD_RUN_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static MANAGED_PROCESS_COUNTER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+static MANAGED_PROCESS_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GAZEBO_RUNTIME_PROCESSES: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 fn next_managed_process_id(prefix: &str) -> String {
@@ -4046,7 +4045,11 @@ fn start_gazebo_sim(
             &sim_id,
             Some(gz_result.status.code().unwrap_or(-1)),
             ManagedProcessStatus::Failed,
-            Some(String::from_utf8_lossy(&gz_result.stderr).trim().to_string()),
+            Some(
+                String::from_utf8_lossy(&gz_result.stderr)
+                    .trim()
+                    .to_string(),
+            ),
         );
         if ensure_docker_available().is_err() {
             return Err(docker_lost_connection_message());
@@ -4138,7 +4141,11 @@ fn start_gazebo_sim(
             &bridge_id,
             Some(bridge_result.status.code().unwrap_or(-1)),
             ManagedProcessStatus::Failed,
-            Some(String::from_utf8_lossy(&bridge_result.stderr).trim().to_string()),
+            Some(
+                String::from_utf8_lossy(&bridge_result.stderr)
+                    .trim()
+                    .to_string(),
+            ),
         );
         let cleanup = stop_gazebo_processes(&container_name);
         if ensure_docker_available().is_err() {
