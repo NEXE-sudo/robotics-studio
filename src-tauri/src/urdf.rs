@@ -1023,7 +1023,7 @@ pub fn parse_robot_description(content: &str) -> Result<RobotDescription, String
                                 joint.axis.iter_mut().for_each(|axis| *axis /= magnitude);
                             }
                             "floating" | "planar" => warnings.push(format!(
-                                "Joint '{}' uses unsupported '{}' motion and remains fixed",
+                                "Joint '{}' uses '{}' motion; the scalar joint-state preview applies a best-effort axis translation only",
                                 joint.name, joint.joint_type
                             )),
                             _ => {
@@ -1241,6 +1241,30 @@ mod tests {
         assert_eq!(robot.joints[1].mimic.as_ref().unwrap().joint, "driver");
         assert_eq!(robot.links[1].collisions[0].origin.xyz, [0.0, 0.0, 0.1]);
         assert_eq!(robot.links[1].collisions.len(), 1);
+    }
+
+    #[test]
+    fn accepts_planar_and_floating_joints_with_preview_warnings() {
+        let robot = parse_robot_description(
+            r#"<robot name="floating">
+                <link name="base"/>
+                <link name="planar_link"/>
+                <link name="floating_link"/>
+                <joint name="planar" type="planar">
+                    <parent link="base"/><child link="planar_link"/>
+                    <axis xyz="1 0 0"/>
+                </joint>
+                <joint name="float" type="floating">
+                    <parent link="base"/><child link="floating_link"/>
+                </joint>
+            </robot>"#,
+        )
+        .unwrap();
+        assert_eq!(robot.joints.len(), 2);
+        assert!(robot
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("planar") || warning.contains("floating")));
     }
 
     #[test]

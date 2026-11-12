@@ -34,10 +34,12 @@ upgrade, and hosted-CI validation before release.
 - **3D visualization** — preview supported URDF and Xacro descriptions,
   primitive and workspace-confined STL/texture-free DAE visuals, supported
   joints, inertial frames, and collision geometry in the three.js viewport.
-  Streamed `/joint_states` update supported joints. Without an active robot
-  description, the view keeps its placeholder robot. In-app controls publish
-  bounded `cmd_vel` commands directly (no manual container terminal needed
-  for basic teleop).
+  Planar and floating joints are accepted in the preview with explicit
+  best-effort axis translations, while unsupported external resources remain
+  rejected. Streamed `/joint_states` update supported joints. Without an
+  active robot description, the view keeps its placeholder robot. In-app
+  controls publish bounded `cmd_vel` commands directly (no manual container
+  terminal needed for basic teleop).
 - **Custom Gazebo world support** — load your own world file instead of
   being limited to the bundled demo.
 - **AI assistant with real context** — ask questions about your open file,
@@ -61,7 +63,7 @@ upgrade, and hosted-CI validation before release.
   pinned at a fixed layout.
 - **Restricted native file access** — file browsing/editing is scoped to
   directories selected in a native picker; file operations reject traversal,
-  symlink escapes, and oversized text files.
+  symlink escapes anywhere in the requested path, and oversized text files.
 - **Authenticated ROS gRPC** — application-generated session credentials,
   expiry checks, and authenticated event/control requests over TLS. The client
   pins a container-generated CA certificate delivered through Docker's control

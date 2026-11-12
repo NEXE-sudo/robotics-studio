@@ -370,7 +370,11 @@ export function buildRobotInstance(
             new THREE.Vector3(...joint.axis),
             position,
           );
-        } else if (joint.jointType === "prismatic") {
+        } else if (
+          joint.jointType === "prismatic" ||
+          joint.jointType === "planar" ||
+          joint.jointType === "floating"
+        ) {
           motion.position.set(
             joint.axis[0] * position,
             joint.axis[1] * position,

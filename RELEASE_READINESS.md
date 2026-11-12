@@ -77,9 +77,9 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 |---|---|
 | `npm ci` | Pass; 90 packages installed and 0 npm vulnerabilities reported. |
 | `npm run build` | Pass; TypeScript check and Vite production build succeed; 941.5 kB JavaScript chunk warning remains. |
-| `npm run test:frontend` | Pass: 16 dependency-free TF graph and robot-rendering tests. |
+| `npm run test:frontend` | Pass: 17 dependency-free TF graph and robot-rendering tests, including planar/floating joint preview coverage and symlink-safety checks. |
 | `cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` | Pass. |
-| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 51 passed, 1 ignored (live-service test). |
+| `cargo test --manifest-path src-tauri/Cargo.toml --locked` | Pass: 52 passed, 0 failed, 1 ignored (live-service test). |
 | `cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings` | Pass. |
 | Python unittest discovery from `src-tauri/resources/devcontainer` | Pass: 44 tests. |
 | Python `py_compile` for ROS service modules | Pass. |
@@ -97,6 +97,9 @@ areas are still partial and must be closed before a v0.3.0 release decision is m
 - Complete automatic lifecycle-state inspection, graph refresh/subscription
   recovery, TF frame disappearance/relationship updates, and transform
   composition/validation against live ROS behavior.
+- Keep extending the current best-effort robot-description preview for
+  unsupported URDF semantics and finish native packaging/runtime validation
+  before a v0.3.0 release decision.
 - Expand the intentionally narrow safe service/action allowlists only with
   reviewed non-motion APIs; add service cancellation and frontend workflow
   tests.

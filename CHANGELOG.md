@@ -38,13 +38,16 @@ requirements.
 - Bounded URDF parsing and non-executing Xacro subset expansion, with
   workspace-confined package/relative resources, STL and texture-free DAE
   geometry, named materials, inertial data, and explicit rejection of
-  unsupported or external resources.
+  unsupported or external resources. Planar and floating joints are accepted
+  in the preview with best-effort axis translations and warnings rather than
+  being silently dropped.
 - Three.js rendering for supported primitive and mesh visuals, fixed,
-  revolute, continuous, and prismatic joints, joint limits, mimic
-  relationships, collision geometry, and inertial frames; live
-  `/joint_states` updates are streamed to the preview.
+  revolute, continuous, prismatic, planar, and floating joints, joint
+  limits, mimic relationships, collision geometry, and inertial frames;
+  live `/joint_states` updates are streamed to the preview.
 - Dependency-free frontend unit tests for TF graph construction and robot
-  geometry/joint transforms.
+  geometry/joint transforms, including the planar/floating preview case and
+  runtime symlink-safety checks.
 - Docker integration coverage for selected-workspace package discovery,
   malformed package manifests, installed executables, workspace isolation,
   live ROS graph endpoints, static and dynamic TF plus `/joint_states`
@@ -94,6 +97,9 @@ requirements.
 - Workspace package discovery no longer silently converts missing package
   tooling or malformed overall command output into an empty package list.
 - Package file inspection uses the backend's approved-root file commands.
+- Approved-root file resolve logic now rejects symlinks anywhere in the
+  requested path before canonicalization, closing an escape vector in the
+  selected-workspace filesystem guard.
 
 ### Breaking changes
 

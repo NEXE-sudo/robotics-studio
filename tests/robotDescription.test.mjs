@@ -68,6 +68,57 @@ test("builds primitive robot links and applies revolute and prismatic joint stat
   assert.equal(instance.group.getObjectByName("base_link").children.length, 2);
 });
 
+test("applies planar and floating joint states as best-effort axis translations", () => {
+  const instance = buildRobotInstance({
+    name: "floating_robot",
+    rootLink: "base_link",
+    warnings: [],
+    links: [
+      { name: "base_link", visuals: [], collisions: [] },
+      { name: "planar_link", visuals: [], collisions: [] },
+      { name: "float_link", visuals: [], collisions: [] },
+    ],
+    joints: [
+      {
+        name: "planar_joint",
+        jointType: "planar",
+        parent: "base_link",
+        child: "planar_link",
+        origin,
+        axis: [1, 2, 0],
+        limit: null,
+        mimic: null,
+      },
+      {
+        name: "floating_joint",
+        jointType: "floating",
+        parent: "base_link",
+        child: "float_link",
+        origin,
+        axis: [0, 0, 1],
+        limit: null,
+        mimic: null,
+      },
+    ],
+  });
+
+  const planar = instance.group.getObjectByName("planar_joint:motion");
+  const floating = instance.group.getObjectByName("floating_joint:motion");
+  assert.ok(planar);
+  assert.ok(floating);
+
+  instance.updateJoints(
+    new Map([
+      ["planar_joint", 0.5],
+      ["floating_joint", -0.25],
+    ]),
+  );
+
+  assert.ok(Math.abs(planar.position.x - 0.5) < 1e-8);
+  assert.ok(Math.abs(planar.position.y - 1) < 1e-8);
+  assert.ok(Math.abs(floating.position.z + 0.25) < 1e-8);
+});
+
 test("skips unsupported mesh visuals without failing the whole model", () => {
   const instance = buildRobotInstance({
     name: "mesh_robot",
